@@ -21,7 +21,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
     val address = RegInit(BigInt(p.resetVector).U(32))
     val buffered = RegInit(false.B)
     val packet = Reg(new Instruction)
-    val flush = io.redirect | io.halt
+    val flush = io.redirect | io.pause
     io.output.valid := buffered & !flush
     io.output.bits :<= packet
     val consume = io.output.valid & io.output.ready
@@ -51,7 +51,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
         packet.fault := io.memory.response.bits.fault
       }
     }
-    // An offered request cannot be withdrawn; redirects poison its response.
+    // Redirects discard responses without withdrawing offered requests.
     when(flush) {
       buffered := false.B
       when(active) { discarded := true.B }

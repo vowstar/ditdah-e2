@@ -26,4 +26,6 @@ Completed stores must be visible to later instruction fetches.
 Cold reset is synchronous and active high. Apply it only with no offered or outstanding peer requests.
 It clears integer registers and protocol state. Core reset does not initialize memory contents.
 
+`misa` is fixed by configuration.
+
 The retirement port reports completed instructions and synchronous exceptions.

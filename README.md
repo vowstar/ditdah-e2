@@ -1,7 +1,7 @@
 # DitDah-E2
 
 DitDah-E2 is a three-stage RV32 processor for embedded control.
-The core executes RV32I and stops on an exception.
+The core executes RV32I and Zicsr, enters machine trap handlers and supports MRET.
 It uses separate instruction and data ports with ordered memory completion.
 
 ## Build and verify

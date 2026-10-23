@@ -10,9 +10,11 @@ rtl:
 verify-signoff: rtl
 	python3 test/verify.py
 	python3 test/formal.py
+	python3 test/core_formal.py
 
 verify-formal: rtl
 	python3 test/formal.py
+	python3 test/core_formal.py
 
 verify-compliance:
 	python3 -m unittest discover -s test -p 'test_*.py'

@@ -3,6 +3,7 @@
 """Prove fetch transaction ownership under an ordered, backpressured memory peer."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_rtl import digest, sources
 
 
+def freeze_inputs(paths):
+    return {path: path.read_bytes() for path in paths}
+
+
+def check_inputs(frozen):
+    if any(not path.is_file() or path.read_bytes() != value for path, value in frozen.items()):
+        raise RuntimeError("Formal inputs changed during verification")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
@@ -24,16 +34,18 @@ def main():
     assert manifest["sourceHashes"] == sources(), "Stale RTL inputs"
     source = args.rtl / "DitDahE2Fetch.sv"
     assert digest(source) == manifest["rtlHashes"][source.name], "Changed RTL"
+    wrapper = Path("test/fetch_formal.sv")
+    frozen = freeze_inputs([source, wrapper, Path(__file__), args.rtl / "manifest.json"])
     args.output.mkdir(parents=True, exist_ok=True)
     scratch = "/data/tmp" if os.access("/data/tmp", os.W_OK) else None
     outcomes = []
     with tempfile.TemporaryDirectory(prefix="ditdah-e2-formal-", dir=scratch) as directory:
         work = Path(directory)
-        shutil.copyfile("test/fetch_formal.sv", work / "fetch_formal.sv")
+        (work / "fetch_formal.sv").write_bytes(frozen[wrapper])
         for name, mode, depth, negative in (("prove", "prove", 12, False),
                                             ("cover", "cover", 24, False),
                                             ("negative", "bmc", 12, True)):
-            rtl = source.read_text()
+            rtl = frozen[source].decode()
             declaration = "module DitDahE2Fetch("
             assert rtl.count(declaration) == 1 and rtl.count("endmodule") == 1
             rtl = rtl.replace(declaration, declaration + "\n"
@@ -65,11 +77,17 @@ def main():
                 assert list((work / name / "engine_0").glob("trace*.vcd")), "Missing semantic counterexample"
             outcomes.append({"name": name, "mode": mode, "depth": depth,
                              "status": status, "exitStatus": run.returncode})
+    check_inputs(frozen)
+    assert manifest["sourceHashes"] == sources(), "RTL inputs changed during verification"
     report = {"scope": "fetch ownership, stable requests, redirect draining and fault metadata",
+              "parameters": manifest["parameters"], "sourceHashes": manifest["sourceHashes"],
+              "manifestHash": hashlib.sha256(frozen[args.rtl / "manifest.json"]).hexdigest(),
               "assumptions": ["initial synchronous reset", "aligned redirect target",
                               "one ordered response per accepted request, at least one cycle later",
                               "stable response while backpressured", "no liveness fairness assumption"],
-              "rtlHash": digest(source), "wrapperHash": digest(Path("test/fetch_formal.sv")),
+              "rtlHash": hashlib.sha256(frozen[source]).hexdigest(),
+              "wrapperHash": hashlib.sha256(frozen[wrapper]).hexdigest(),
+              "runnerHash": hashlib.sha256(frozen[Path(__file__)]).hexdigest(),
               "command": "python3 test/formal.py", "exitStatus": 0, "outcomes": outcomes,
               "yosys": subprocess.check_output(["yosys", "-V"], text=True).strip(),
               "sby": subprocess.check_output(["sby", "--version"], text=True).strip(),

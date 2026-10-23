@@ -28,7 +28,7 @@ struct Port {
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 7) throw std::runtime_error("Expected image seed delay instruction-fault data-fault limit");
+        if (argc != 8) throw std::runtime_error("Expected image seed delay instruction-fault data-fault limit completion-pc");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
@@ -43,6 +43,7 @@ int main(int argc, char **argv) {
         const uint64_t instructionFault = std::stoull(argv[4]);
         const uint64_t dataFault = std::stoull(argv[5]);
         const auto limit = std::stoul(argv[6]);
+        const uint32_t completionPc = std::stoul(argv[7]);
         Port instruction, data;
         dut.reset = 1;
         dut.instruction_request_ready = dut.data_request_ready = 0;
@@ -54,11 +55,13 @@ int main(int argc, char **argv) {
         }
         dut.reset = 0;
         uint64_t retired = 0, traps = 0, forwards = 0, loadUse = 0, redirects = 0;
-        uint64_t memoryWait = 0, blockedRedirect = 0, drainAfterHalt = 0;
-        bool finished = false;
+        uint64_t memoryWait = 0, blockedRedirect = 0, drainAfterCompletion = 0, quietCycles = 0;
+        bool finished = false, completing = false;
+        bool finalOfferValid = false;
+        Request finalOffer{};
         for (uint64_t cycle = 0; cycle < limit; ++cycle) {
             dut.clock = 0;
-            dut.instruction_request_ready = !instruction.active && (!delay || random() % 3 == 0);
+            dut.instruction_request_ready = !completing && !instruction.active && (!delay || random() % 3 == 0);
             dut.data_request_ready = !data.active && (!delay || random() % 3 == 0);
             dut.instruction_response_valid = instruction.active && cycle >= instruction.due;
             dut.data_response_valid = data.active && cycle >= data.due;
@@ -67,18 +70,12 @@ int main(int argc, char **argv) {
             dut.data_response_bits_data = data.data;
             dut.data_response_bits_fault = data.fault;
             dut.eval();
-            if (dut.idle) {
-                if (instruction.active || data.active || instruction.held || data.held)
-                    throw std::runtime_error("Idle with an uncompleted transaction");
-                std::cout << "C " << cycle << ' ' << retired << ' ' << traps << ' '
-                          << forwards << ' ' << loadUse << ' ' << redirects << ' '
-                          << memoryWait << ' ' << blockedRedirect << ' ' << drainAfterHalt << '\n';
-                finished = true; break;
-            }
+            if (completing && dut.data_request_valid)
+                throw std::runtime_error("Data request after program completion");
             forwards += dut.forward; loadUse += dut.loadUse; redirects += dut.redirect;
             memoryWait += dut.memoryWait;
             blockedRedirect += dut.redirect && dut.instruction_request_valid && !dut.instruction_request_ready;
-            drainAfterHalt += dut.halted && dut.instruction_response_valid && dut.instruction_response_ready;
+            drainAfterCompletion += completing && dut.instruction_response_valid && dut.instruction_response_ready;
             auto observe = [&](Port &port, char name, bool valid, bool ready, Request request,
                                bool responseValid, bool responseReady, uint64_t faultAddress) {
                 if (port.held && (!valid || !(request == port.previous)))
@@ -125,8 +122,38 @@ int main(int argc, char **argv) {
                           << unsigned(dut.retire_writes) << ' ' << dut.retire_value << ' '
                           << unsigned(dut.retire_trap) << ' ' << unsigned(dut.retire_cause) << ' '
                           << dut.retire_tval << '\n';
+                if (!dut.retire_trap && dut.retire_pc == completionPc) {
+                    if (dut.retire_word != 0x0000006f || dut.retire_nextPc != completionPc)
+                        throw std::runtime_error("Invalid program completion instruction");
+                    completing = true;
+                }
             }
             dut.clock = 1; dut.eval();
+            if (completing && !instruction.active && !data.active) {
+                const bool unchanged = instruction.held == finalOfferValid &&
+                                       (!instruction.held || instruction.previous == finalOffer);
+                quietCycles = quietCycles && unchanged ? quietCycles + 1 : 1;
+                finalOfferValid = instruction.held;
+                finalOffer = instruction.previous;
+                std::cout << "O " << cycle << ' ' << finalOfferValid << ' ' << finalOffer.address << ' '
+                          << finalOffer.write << ' ' << finalOffer.data << ' ' << finalOffer.mask << ' '
+                          << finalOffer.size << '\n';
+            } else {
+                quietCycles = 0;
+            }
+            if (quietCycles == 8) {
+                if (data.held) throw std::runtime_error("Held data request after completion");
+                if (instruction.held) {
+                    const auto &held = instruction.previous;
+                    std::cout << "H " << cycle << ' ' << held.address << ' ' << held.write << ' '
+                              << held.data << ' ' << held.mask << ' ' << held.size << '\n';
+                }
+                std::cout << "C " << cycle + 1 << ' ' << retired << ' ' << traps << ' '
+                          << forwards << ' ' << loadUse << ' ' << redirects << ' '
+                          << memoryWait << ' ' << blockedRedirect << ' ' << drainAfterCompletion << '\n';
+                finished = true;
+                break;
+            }
         }
         if (!finished) throw std::runtime_error("Execution timeout");
         for (const auto &[location, value] : memory) std::cout << "W " << location << ' ' << value << '\n';

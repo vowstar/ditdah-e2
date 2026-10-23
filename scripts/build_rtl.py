@@ -15,7 +15,8 @@ import tempfile
 INSTRUCTIONS = ["lui", "auipc", "jal", "jalr", "beq", "bne", "blt", "bge", "bltu", "bgeu",
                 "lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw", "addi", "slti", "sltiu",
                 "xori", "ori", "andi", "slli", "srli", "srai", "add", "sub", "sll", "slt",
-                "sltu", "xor", "srl", "sra", "or", "and", "fence", "ecall", "ebreak"]
+                "sltu", "xor", "srl", "sra", "or", "and", "fence", "ecall", "ebreak",
+                "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "mret"]
 
 
 def configuration(value):
@@ -67,6 +68,7 @@ def main():
         manifest = {
             "parameters": params, "top": "DitDahE2", "isaComplete": False,
             "instructions": INSTRUCTIONS, "privilegedArchitecture": False,
+            "machineTrapHandling": True, "extensions": ["I", "Zicsr"],
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},
             "firtool": subprocess.check_output(["firtool", "--version"], text=True).strip(),

@@ -3,7 +3,7 @@
 module fetch_formal(input clock);
   reg reset = 1;
   always @(posedge clock) reset <= 0;
-  (* anyseq *) reg redirect, halt, memory_request_ready, memory_response_valid, output_ready;
+  (* anyseq *) reg redirect, pause, memory_request_ready, memory_response_valid, output_ready;
   (* anyseq *) reg [31:0] target, memory_response_bits_data;
   (* anyseq *) reg memory_response_bits_fault;
   wire idle, memory_request_valid, memory_request_bits_write, memory_response_ready, output_valid;
@@ -21,7 +21,7 @@ module fetch_formal(input clock);
   reg past_valid = 0;
   wire request = memory_request_valid && memory_request_ready;
   wire response = memory_response_valid && memory_response_ready;
-  wire flush = redirect || halt;
+  wire flush = redirect || pause;
   reg saw_blocked_redirect = 0, saw_poison_drain = 0;
   always @(posedge clock) begin
     past_valid <= 1;

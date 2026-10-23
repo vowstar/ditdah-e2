@@ -48,8 +48,14 @@ class Completion extends Bundle:
   val storeData = Aligned(UInt(32))
   val size = Aligned(UInt(2))
   val unsignedLoad = Aligned(Bool())
+  val csr = Aligned(Bool())
+  val csrAddress = Aligned(UInt(12))
+  val csrOperation = Aligned(UInt(2))
+  val csrOperand = Aligned(UInt(32))
+  val csrWrite = Aligned(Bool())
+  val mret = Aligned(Bool())
   val trap = Aligned(Bool())
-  val cause = Aligned(UInt(4))
+  val cause = Aligned(UInt(32))
   val tval = Aligned(UInt(32))
 
 class Retirement extends Bundle:
@@ -61,7 +67,7 @@ class Retirement extends Bundle:
   val writes = Aligned(Bool())
   val value = Aligned(UInt(32))
   val trap = Aligned(Bool())
-  val cause = Aligned(UInt(4))
+  val cause = Aligned(UInt(32))
   val tval = Aligned(UInt(32))
 
 class FetchIO(p: Parameters) extends HWBundle(p):
@@ -69,7 +75,7 @@ class FetchIO(p: Parameters) extends HWBundle(p):
   val reset = Flipped(Reset())
   val redirect = Flipped(Bool())
   val target = Flipped(UInt(32))
-  val halt = Flipped(Bool())
+  val pause = Flipped(Bool())
   val idle = Aligned(Bool())
   val memory = Aligned(new MemoryPort)
   val output = Aligned(new Channel(new Instruction))
@@ -80,8 +86,6 @@ class CoreIO(p: Parameters) extends HWBundle(p):
   val instruction = Aligned(new MemoryPort)
   val data = Aligned(new MemoryPort)
   val retire = Aligned(new Retirement)
-  val halted = Aligned(Bool())
-  val idle = Aligned(Bool())
   val loadUse = Aligned(Bool())
   val forward = Aligned(Bool())
   val redirect = Aligned(Bool())

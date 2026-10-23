@@ -34,22 +34,32 @@ class Model:
         self.registers = [0] * 32
         self.instruction_fault = instruction_fault
         self.data_fault = data_fault
-        self.stopped = False
+        self.csrs = {0x300: 0x1800, 0x301: 0x40000100, 0x304: 0,
+                     0x305: reset & ~3, 0x310: 0, 0x340: 0, 0x341: 0,
+                     0x342: 0, 0x343: 0, 0x344: 0,
+                     **dict.fromkeys(range(0xF11, 0xF16), 0)}
+
+    def write_csr(self, address, value):
+        masks = {0x300: 0x88, 0x301: 0, 0x304: 0, 0x305: 0xFFFFFFFC,
+                 0x310: 0, 0x340: MASK, 0x341: 0xFFFFFFFC,
+                 0x342: MASK, 0x343: MASK, 0x344: 0}
+        mask = masks[address]
+        self.csrs[address] = (self.csrs[address] & ~mask) | (value & mask)
 
     def word(self, address):
         return sum(self.memory.get((address + lane) & MASK, 0) << (lane * 8)
                    for lane in range(4))
 
     def step(self):
-        if self.stopped:
-            raise AssertionError("Retirement after terminal fault")
         pc = self.pc
         insn = self.word(pc)
         result = Event(pc, insn, (pc + 4) & MASK)
 
         def fault(cause, value):
             result.trap, result.cause, result.tval = True, cause, value & MASK
-            result.next_pc, result.rd, result.value = pc, 0, 0
+            result.next_pc, result.rd, result.value = self.csrs[0x305], 0, 0
+            self.csrs[0x341], self.csrs[0x342], self.csrs[0x343] = pc, cause, value & MASK
+            self.csrs[0x300] = 0x1800 | ((self.csrs[0x300] & 8) << 4)
 
         op, rd, f3 = insn & 127, (insn >> 7) & 31, (insn >> 12) & 7
         a, b = self.registers[(insn >> 15) & 31], self.registers[(insn >> 20) & 31]
@@ -115,6 +125,24 @@ class Model:
                 fault(0, result.next_pc)
             else:
                 result.rd, result.value = rd, (pc + 4) & MASK
+        elif op == 0x73 and f3 in (1, 2, 3, 5, 6, 7):
+            address, source = insn >> 20, (insn >> 15) & 31
+            result.instruction = {1: "csrrw", 2: "csrrs", 3: "csrrc",
+                                  5: "csrrwi", 6: "csrrsi", 7: "csrrci"}[f3]
+            write = f3 in (1, 5) or source != 0
+            if address not in self.csrs or (write and address >> 10 == 3):
+                fault(2, insn)
+            else:
+                old = self.csrs[address]
+                operand = source if f3 >= 5 else a
+                updated = operand if f3 & 3 == 1 else old | operand if f3 & 3 == 2 else old & ~operand
+                if write:
+                    self.write_csr(address, updated)
+                result.rd, result.value = rd, old
+        elif insn == 0x30200073:
+            result.instruction = "mret"
+            result.next_pc = self.csrs[0x341]
+            self.csrs[0x300] = 0x1880 | ((self.csrs[0x300] >> 4) & 8)
         elif insn == 0x00100073:
             result.instruction = "ebreak"
             fault(3, pc)
@@ -130,5 +158,4 @@ class Model:
         else:
             result.value = 0
         self.pc = result.next_pc
-        self.stopped = result.trap
         return result
