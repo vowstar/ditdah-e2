@@ -1,0 +1,16 @@
+/result/
+/result-*
+/.direnv/
+/.bsp/
+/.scala-build/
+/*.mlirbc
+/*.fir
+/*.sv
+/*.v
+__pycache__/
+.pytest_cache/
+sim_build/
+*.vcd
+*.fst
+*.fsdb
+*.log
