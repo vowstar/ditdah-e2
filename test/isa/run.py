@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 # SPDX-License-Identifier: MIT
-"""Compare fixed RV32I architectural tests on Spike and bound RTL."""
+"""Compare fixed integer architectural tests on Spike and bound RTL."""
 
 import argparse
 import configparser
@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
-from isa_checks import ROOT, LOCAL, compare_signatures, digest, signature_words
+from isa_checks import ROOT, LOCAL, compare_signatures, compressed_test_kind, digest, isa_specification, signature_words
 
 ADD = 'rv32i_m/I/src/add-01.S'
 REVISIONS = {
@@ -38,6 +38,15 @@ def archive_inputs(output, bound):
         shutil.copyfile(ROOT / name, target)
 
 
+def archive_candidate(output, candidate, hashes):
+    for name, path in candidate.items():
+        if digest(path) != hashes[name]:
+            raise ValueError('Candidate inputs changed')
+        target = output / 'candidate' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
 def check_result(test, work, output):
     base = work / 'run' / test
     actual_file = base / 'dut/DUT-ditdah_e2.signature'
@@ -55,10 +64,14 @@ def check_result(test, work, output):
         raise AssertionError('Signature checker accepted a changed result')
     if digest(base / 'dut/ditdah_e2.elf') != digest(base / 'ref/spike_reference.elf'):
         raise ValueError('Reference and RTL compiled different ELF images')
+    spike = json.loads((base / 'ref/spike_reference.json').read_text())
+    if spike['exitStatus'] != 0 or spike['elfHash'] != digest(base / 'dut/ditdah_e2.elf'):
+        raise ValueError('Reference execution evidence does not match the ELF')
     output.mkdir(parents=True, exist_ok=True)
     for original, destination in ((reference_file, 'spike.signature'), (actual_file, 'rtl.signature'),
                                   (base / 'dut/ditdah_e2.elf', 'test.elf'),
                                   (base / 'dut/ditdah_e2.raw.elf', 'test.raw.elf'),
+                                  (base / 'ref/spike_reference.json', 'spike.json'),
                                   (base / 'dut/ditdah_e2.trace', 'rtl.trace')):
         shutil.copyfile(original, output / destination)
     return {
@@ -66,16 +79,28 @@ def check_result(test, work, output):
         'elfHash': digest(output / 'test.elf'), 'rawElfHash': digest(output / 'test.raw.elf'),
         'signatureHash': digest(output / 'rtl.signature'), 'traceHash': digest(output / 'rtl.trace'),
         'negativeControls': 1, 'execution': json.loads((base / 'dut/ditdah_e2.json').read_text()),
+        'reference': spike,
     }
 
 
 def run(args):
     source = Path(os.environ['ARCH_TEST_SOURCE'])
     suite_source = source / 'riscv-test-suite'
-    tests = [ADD] if args.suite == 'add' else sorted(str(path.relative_to(suite_source))
-                                                  for path in (suite_source / 'rv32i_m/I/src').glob('*.S'))
-    if len(tests) != (1 if args.suite == 'add' else 39):
+    group = {'rv32m': 'M', 'rv32c': 'C'}.get(args.suite, 'I')
+    tests, excluded = [], {}
+    for path in sorted((suite_source / f'rv32i_m/{group}/src').glob('*.S')):
+        name = str(path.relative_to(suite_source))
+        kind = compressed_test_kind(path.name, path.read_text()) if args.suite == 'rv32c' else 'selected'
+        if kind == 'selected':
+            tests.append(name)
+        else:
+            excluded[name] = kind
+    if args.suite == 'add':
+        tests = [ADD]
+    if len(tests) != {'add': 1, 'rv32i': 39, 'rv32m': 8, 'rv32c': 28}[args.suite]:
         raise ValueError('Unexpected fixed test collection')
+    if args.suite == 'rv32c' and (len(excluded) != 12 or sum(value == 'requires Zcb' for value in excluded.values()) != 11):
+        raise ValueError('Unexpected compressed test exclusions')
     acceptance_hash = None
     if args.accepted:
         args.rtl = args.accepted / 'reset-80000000/rtl'
@@ -89,18 +114,28 @@ def run(args):
         acceptance_hash = digest(args.accepted / 'acceptance.json')
     bound = inputs()
     manifest = json.loads((args.rtl / 'manifest.json').read_text())
+    enable_m = manifest['parameters'].get('enableM', False)
+    enable_c = manifest['parameters'].get('enableC', False)
+    if args.suite == 'rv32m' and enable_m is not True:
+        raise ValueError('M tests require enableM=true')
+    if args.suite == 'rv32c' and enable_c is not True:
+        raise ValueError('C tests require enableC=true')
     candidate = {'rtl/manifest.json': args.rtl / 'manifest.json'}
     candidate.update({'rtl/' + name: args.rtl / name for name in manifest['rtlHashes']})
     candidate.update({'source/' + name: args.source_root / name for name in manifest['sourceHashes']})
-    candidate.update({'source/test/' + name: args.source_root / 'test' / name
-                      for name in ('sim.cpp', 'model.py', 'programs.py', 'verify.py')})
+    candidate.update({'source/test/' + path.name: path for path in
+                      [args.source_root / 'test/sim.cpp'] + sorted((args.source_root / 'test').glob('*.py'))})
     candidate_hashes = {name: digest(path) for name, path in candidate.items()}
     dependencies = {name: importlib.metadata.version(name) for name in
                     ('riscof', 'riscv-config', 'riscv-isac', 'setuptools', 'GitPython', 'click', 'Jinja2', 'pytz')}
     args.output.mkdir(parents=True, exist_ok=True)
+    archive_candidate(args.output, candidate, candidate_hashes)
     scratch = '/data/tmp' if os.access('/data/tmp', os.W_OK) else None
     with tempfile.TemporaryDirectory(prefix='ditdah-e2-isa-', dir=scratch) as directory:
         work = Path(directory)
+        specification = isa_specification(enable_m, enable_c)
+        (work / 'isa.yaml').write_text(specification)
+        (args.output / 'isa.yaml').write_text(specification)
         suite = work / 'suite'
         for name in tests:
             target = suite / name
@@ -111,7 +146,7 @@ def run(args):
             'ReferencePlugin': 'spike_reference', 'ReferencePluginPath': str(LOCAL),
             'DUTPlugin': 'ditdah_e2', 'DUTPluginPath': str(LOCAL),
         }
-        common = {'ispec': str(LOCAL / 'isa.yaml'), 'pspec': str(LOCAL / 'platform.yaml'),
+        common = {'ispec': str(work / 'isa.yaml'), 'pspec': str(LOCAL / 'platform.yaml'),
                   'pluginpath': str(LOCAL)}
         config['spike_reference'] = common
         config['ditdah_e2'] = common | {'rtl': str(args.rtl), 'inputs': str(args.source_root)}
@@ -146,17 +181,22 @@ def run(args):
             raise ValueError('Candidate or checker inputs changed during execution')
         archive_inputs(args.output, bound)
         summary = {
-            'scope': 'fixed RV32I architectural test signatures', 'suite': args.suite,
+            'scope': 'fixed ' + args.suite + ' architectural test signatures', 'suite': args.suite,
             'command': 'python3 test/isa/run.py', 'exitStatus': 0,
             'tests': results, 'testCount': len(tests), 'revisions': REVISIONS, 'pythonPackages': dependencies,
+            'excludedTests': excluded, 'parameters': manifest['parameters'],
             'sourceHashes': bound, 'testHashes': {test: digest(suite_source / test) for test in tests},
             'candidateHashes': candidate_hashes,
             'environmentHashes': {str(path.relative_to(source)): digest(path)
                                   for path in sorted((suite_source / 'env').rglob('*')) if path.is_file()},
             'acceptanceHash': acceptance_hash, 'rtlManifestHash': digest(args.rtl / 'manifest.json'),
-            'elfNormalization': 'clear RVC metadata after checking all executable bytes for 32-bit encodings',
+            'isaSpecificationHash': digest(args.output / 'isa.yaml'),
+            'elfNormalization': 'none, preserve RVC metadata and instruction bytes' if enable_c else
+                                'clear RVC metadata after checking all executable bytes for 32-bit encodings',
             'compiler': subprocess.check_output(['riscv32-none-elf-gcc', '-dumpfullversion'], text=True).strip(),
             'verilator': subprocess.check_output(['verilator', '--version'], text=True).strip(),
+            'toolHashes': {name: digest(Path(shutil.which(name))) for name in
+                           ('riscof', 'spike', 'riscv32-none-elf-gcc', 'verilator')},
             'negativeControls': len(tests),
             'memory': {'base': 0x80000000, 'size': 0x400000, 'resetVector': 0x80000000},
             'fullIsaCompliance': 'not run', 'coverageCommand': 'not run',
@@ -171,7 +211,7 @@ if __name__ == '__main__':
     candidate.add_argument('--accepted', type=Path)
     candidate.add_argument('--rtl', type=Path)
     parser.add_argument('--source-root', type=Path)
-    parser.add_argument('--suite', choices=('add', 'rv32i'), default='add')
+    parser.add_argument('--suite', choices=('add', 'rv32i', 'rv32m', 'rv32c'), default='add')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if args.accepted and args.source_root:

@@ -7,10 +7,42 @@ import struct
 import sys
 from pathlib import Path
 
-from isa_checks import compare_signatures, execution_case, normalize_elf, signature_words
+from isa_checks import architectural_configuration, compare_signatures, compressed_test_kind, execution_case, isa_specification, normalize_elf, signature_words
 
 
 class SignatureTests(unittest.TestCase):
+    def test_m_isa_and_misa_agree(self):
+        for enabled, isa, misa, mask in ((False, 'RV32IZicsr', '0x40000100', '[0x100]'),
+                                         (True, 'RV32IMZicsr', '0x40001100', '[0x1100]')):
+            text = isa_specification(enabled)
+            self.assertIn('ISA: ' + isa, text)
+            self.assertIn('reset-val: ' + misa, text)
+            self.assertIn(mask, text)
+        with self.assertRaisesRegex(ValueError, 'Boolean'):
+            isa_specification(1)
+
+    def test_c_isa_and_misa_agree(self):
+        for enable_m, isa, misa, mask in ((False, 'RV32ICZicsr', '0x40000104', '[0x104]'),
+                                         (True, 'RV32IMCZicsr', '0x40001104', '[0x1104]')):
+            text = isa_specification(enable_m, True)
+            self.assertIn('ISA: ' + isa, text)
+            self.assertIn('reset-val: ' + misa, text)
+            self.assertIn(mask, text)
+            self.assertEqual(architectural_configuration(isa), (enable_m, True, 'rv32imc_zicsr' if enable_m else 'rv32ic_zicsr'))
+        with self.assertRaisesRegex(ValueError, 'Boolean'):
+            isa_specification(False, 1)
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            architectural_configuration('RV32ICZcb')
+
+    def test_compressed_selection_uses_declarations(self):
+        self.assertEqual(compressed_test_kind('misalign1-cjr-01.S', 'RVTEST_ISA("RV32IC")'), 'selected')
+        self.assertEqual(compressed_test_kind('cebreak-01.S', 'RVTEST_ISA("RV32IC_Zicsr")'), 'requires machine trap adapter')
+        for isa in ('RV32I_Zca_Zcb', 'RV32IM_Zca_Zcb', 'RV32I_Zca_Zcb_Zbb'):
+            self.assertEqual(compressed_test_kind('operation.S', f'RVTEST_ISA("{isa}")'), 'requires Zcb')
+        for text in ('', 'RVTEST_ISA("RV64IC")', 'RVTEST_ISA("RV32IC")\ndef rvtest_mtrap_routine=True'):
+            with self.assertRaises(ValueError):
+                compressed_test_kind('operation.S', text)
+
     def test_current_execution_checker_contract(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from verify import check
@@ -37,6 +69,7 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(normalized[36:40], b'\0\0\0\0')
         self.assertEqual(normalized[:36] + normalized[40:], data[:36] + data[40:])
         struct.pack_into('<I', data, 84, 0x00010001)
+        self.assertEqual(normalize_elf(bytes(data), enable_c=True), bytes(data))
         with self.assertRaisesRegex(ValueError, 'non-32-bit encoding'):
             normalize_elf(bytes(data))
         struct.pack_into('<I', data, 84, 0x0000001f)
@@ -48,6 +81,8 @@ class SignatureTests(unittest.TestCase):
         struct.pack_into('<I', data, 36, 3)
         with self.assertRaisesRegex(ValueError, 'Unsupported ELF flags'):
             normalize_elf(bytes(data))
+        with self.assertRaisesRegex(ValueError, 'Unsupported ELF flags'):
+            normalize_elf(bytes(data), enable_c=True)
 
     def test_signature_format(self):
         self.assertEqual(signature_words('12345678\nabcdef01\n'), (0x12345678, 0xabcdef01))

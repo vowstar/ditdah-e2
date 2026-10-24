@@ -12,15 +12,16 @@ import subprocess
 import sys
 import tempfile
 
-from model import Model, TIME_BASE, MASK64
+from model import Model, TIME_BASE, MASK64, M_INSTRUCTIONS, multiply_divide
 from programs import cases
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from build_rtl import INSTRUCTIONS, digest, sources
+from build_rtl import digest, sources
 
 
 def checker_inputs():
-    paths = ("test/model.py", "test/programs.py", "test/sim.cpp", "test/verify.py", "scripts/build_rtl.py")
+    paths = ("test/model.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
+             "test/compressed_unit.py", "test/sim.cpp", "test/verify.py", "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in paths}
 
 
@@ -30,25 +31,36 @@ class InputSchedule:
         self.fired = set()
         self.mask = 0
         self.pending = None
+        self.cycle = -1
+        self.delayed = []
 
     def event(self, kind, key):
-        for index, (trigger, value, mask) in enumerate(self.entries):
+        for index, entry in enumerate(self.entries):
+            trigger, value, mask, *delay = entry
             if index not in self.fired and (trigger, value) == (kind, key):
                 self.fired.add(index)
-                if kind == "C":
+                if kind == "M":
+                    self.delayed.append((self.cycle + delay[0], index, mask))
+                elif kind == "C":
                     self.mask = mask
                 else:
                     self.pending = mask
 
     def clock(self, cycle):
+        self.cycle = cycle
         if self.pending is not None:
             self.mask, self.pending = self.pending, None
+        for due, _, mask in sorted(self.delayed):
+            if due == cycle:
+                self.mask = mask
+        self.delayed = [entry for entry in self.delayed if entry[0] > cycle]
         self.event("C", cycle)
         return self.mask
 
 
 def check(case, text):
-    model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault)
+    model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault,
+                  enable_m=getattr(case, "enable_m", False), enable_c=getattr(case, "enable_c", False))
     outstanding = {}
     completed = deque()
     observed_memory = {}
@@ -66,12 +78,25 @@ def check(case, text):
     sleep_cycles = 0
     interrupt_deadline = None
     coverage = Counter()
+    arithmetic = None
+    arithmetic_done = deque()
+    arithmetic_counts = Counter()
+    arithmetic_cycle = -1
+    cancel_due = None
+    restart_pcs = set()
     for line in text.splitlines():
         fields = line.split()
         kind = fields[0]
         assert metrics is None or kind == "W", "Execution record after final metrics"
         if kind == "T":
             cycle, mask, time = map(int, fields[1:])
+            assert cancel_due is None, "Arithmetic operation survived cancellation"
+            if arithmetic:
+                assert arithmetic["resultCycle"] is not None or cycle - arithmetic["start"] <= 34, "Arithmetic result exceeded latency bound"
+                if arithmetic["resultCycle"] is not None:
+                    assert arithmetic_cycle == input_cycle, "Arithmetic result valid was withdrawn"
+                if "D" in outstanding:
+                    arithmetic_counts["mulDivMemoryOverlapCycles"] += 1
             assert cycle == input_cycle + 1, "Missing input clock record"
             assert interrupt_deadline is None or cycle <= interrupt_deadline, "Interrupt missed its commit boundary"
             assert mask == schedule.clock(cycle), "Interrupt input differs from schedule"
@@ -115,6 +140,10 @@ def check(case, text):
             if trap:
                 assert (cause, tval) == (expected.cause, expected.tval), "Fault metadata mismatch"
                 causes.append(cause)
+                if arithmetic:
+                    cancel_due = (cycle, "trap")
+            if expected.instruction in M_INSTRUCTIONS:
+                assert arithmetic_done and arithmetic_done.popleft() == pc, "Arithmetic retirement lacks a completed operation"
             if expected.memory:
                 assert completed, "Memory instruction retired before response"
                 request, response = completed.popleft()
@@ -143,6 +172,55 @@ def check(case, text):
             interrupt_deadline = None
             interrupts.append(cause)
             schedule.event("N", len(interrupts))
+            if arithmetic:
+                cancel_due = (cycle, "interrupt")
+        elif kind == "U":
+            cycle, pc, start, valid, finish, cancel, value = map(int, fields[1:])
+            assert getattr(case, "enable_m", False), "Arithmetic event with M disabled"
+            assert arithmetic_cycle != cycle, "Repeated arithmetic event"
+            arithmetic_cycle = cycle
+            assert all(bit in (0, 1) for bit in (start, valid, finish, cancel)), "Invalid arithmetic control"
+            assert start or valid or finish or cancel, "Empty arithmetic event"
+            if cancel:
+                assert arithmetic and cancel_due and cancel_due[0] == cycle, "Unowned arithmetic cancellation"
+                assert not start and not valid and not finish and pc == arithmetic["pc"], "Cancel did not suppress arithmetic completion"
+                arithmetic_counts["mulDivCancels"] += 1
+                arithmetic_counts["mulDivInterruptCancels" if cancel_due[1] == "interrupt" else "mulDivTrapCancels"] += 1
+                if cancel_due[1] == "interrupt":
+                    restart_pcs.add(pc)
+                arithmetic, cancel_due = None, None
+                continue
+            assert cancel_due is None, "Arithmetic completion crossed cancellation"
+            if start:
+                assert arithmetic is None and not arithmetic_done, "Arithmetic operation started before prior completion"
+                assert not valid and not finish, "Arithmetic start also completed"
+                addresses = {pc & ~3, ((pc + 2) & 0xFFFFFFFF) & ~3}
+                assert case.instruction_fault not in addresses, "Faulting instruction started arithmetic"
+                word = model.word(pc)
+                assert word & 0xFE00007F == 0x02000033, "Arithmetic start has a different instruction"
+                operation = (word >> 12) & 7
+                left, right = model.registers[(word >> 15) & 31], model.registers[(word >> 20) & 31]
+                arithmetic = {"pc": pc, "start": cycle, "resultCycle": None,
+                              "value": multiply_divide(operation, left, right)}
+                arithmetic_counts["mulDivStarts"] += 1
+                schedule.event("M", arithmetic_counts["mulDivStarts"])
+                if pc in restart_pcs:
+                    arithmetic_counts["mulDivRestarts"] += 1
+                    restart_pcs.remove(pc)
+            if valid:
+                assert arithmetic and pc == arithmetic["pc"], "Unowned arithmetic result"
+                assert value == arithmetic["value"], "Arithmetic value differs from operands"
+                assert cycle > arithmetic["start"], "Arithmetic result precedes its request"
+                if arithmetic["resultCycle"] is None:
+                    arithmetic["resultCycle"] = cycle
+                    arithmetic_counts["mulDivMaximumLatency"] = max(arithmetic_counts["mulDivMaximumLatency"], cycle - arithmetic["start"])
+                if not finish:
+                    arithmetic_counts["mulDivResultStalls"] += 1
+            if finish:
+                assert valid, "Arithmetic result accepted without valid"
+                arithmetic_done.append(pc)
+                arithmetic = None
+                arithmetic_counts["mulDivFinishes"] += 1
         elif kind == "H":
             assert held is None and completion_cycle is not None, "Unexpected final held offer"
             cycle, address, write, data, mask, size = map(int, fields[1:])
@@ -187,6 +265,9 @@ def check(case, text):
     else:
         assert held is None, "Held offer differs from final observation"
     assert not outstanding and not completed, "Unfinished or unretired transaction"
+    assert arithmetic is None and not arithmetic_done and cancel_due is None, "Unfinished arithmetic operation"
+    if case.name.startswith("m_interrupt_restart_"):
+        assert not restart_pcs and arithmetic_counts["mulDivRestarts"] == 1, "Interrupted arithmetic operation did not restart"
     assert {address & ~3 for address in model.memory} <= observed_memory.keys(), "Missing final memory word"
     for address, value in observed_memory.items():
         assert value == model.word(address), "Final memory mismatch"
@@ -194,6 +275,7 @@ def check(case, text):
         assert observed_memory.get(address, 0) == expected, "Program signature mismatch"
     metrics["cpi"] = round(metrics["cycles"] / max(1, metrics["retired"]), 4)
     metrics["instructions"] = dict(coverage)
+    metrics.update(arithmetic_counts)
     return metrics
 
 
@@ -260,6 +342,37 @@ def negative_controls(case, text):
 
 
 def feature_negative_controls(case, text):
+    if case.name in ("halfword_jump", "crossing_second_fault", "first_fault_upper"):
+        lines = text.splitlines()
+        link = case.name == "halfword_jump"
+        index = next(i for i, line in enumerate(lines) if line.startswith("R ") and
+                     (int(line.split()[3]) == 0x2011 if link else line.split()[8] == "1"))
+        parts = lines[index].split()
+        pc = int(parts[2])
+        parts[7 if link else 10] = str((pc + 4) & 0xFFFFFFFF if link else
+                                      pc if case.name == "crossing_second_fault" else pc & ~3)
+        lines[index] = " ".join(parts)
+        try:
+            check(case, "\n".join(lines))
+        except AssertionError as error:
+            expected = "Register result mismatch" if link else "Fault metadata mismatch"
+            assert expected in str(error), "Compressed negative control failed for a different reason"
+            return 1
+        raise AssertionError("Checker accepted a changed compressed link or fetch fault address")
+    if case.name in ("m_mulh_boundaries", "m_div_boundaries"):
+        lines = text.splitlines()
+        offset = 3 * 24 + 16 if case.name == "m_mulh_boundaries" else 16
+        pc = case.program_pc + offset
+        index = next(i for i, line in enumerate(lines) if line.startswith("R ") and int(line.split()[2]) == pc)
+        parts = lines[index].split()
+        parts[7] = str(0x7FFFFFFF if case.name == "m_mulh_boundaries" else 0)
+        lines[index] = " ".join(parts)
+        try:
+            check(case, "\n".join(lines))
+        except AssertionError as error:
+            assert "Register result mismatch" in str(error), "Arithmetic negative control failed for a different reason"
+            return 1
+        raise AssertionError("Checker accepted a changed multiply sign or divide by zero result")
     if case.name == "irq_external":
         selected = lambda line: line.startswith("N ")
         fields = (2, 3, 4)
@@ -346,7 +459,9 @@ def main():
         assert digest(args.rtl / name) == value, "Generated RTL changed"
     inputs = checker_inputs()
     args.output.mkdir(parents=True, exist_ok=True)
-    selected = [case for case in cases(manifest["parameters"]["resetVector"])
+    selected = [case for case in cases(manifest["parameters"]["resetVector"],
+                                       enable_m=manifest["parameters"].get("enableM", False),
+                                       enable_c=manifest["parameters"].get("enableC", False))
                 if not args.case or case.name in args.case]
     assert selected and set(args.case) <= {case.name for case in selected}, "Unknown case"
     scratch = "/data/tmp" if os.access("/data/tmp", os.W_OK) else None
@@ -361,7 +476,10 @@ def main():
         if compiled.returncode:
             raise RuntimeError(compiled.stdout + compiled.stderr)
         for case in selected:
-            for seed, delay in ((0, 0), (1, 24), (19, 40)):
+            timings = ((0, 0), (1, 24), (19, 40))
+            if case.name.startswith("m_older_"):
+                timings += ((7, 128),)
+            for seed, delay in timings:
                 image = work / "image.hex"
                 image.write_text("".join(f"{address:08x} {word:08x}\n" for address, word in sorted(case.words().items())))
                 args_run = [str(work / "obj/VDitDahE2"), str(image), str(seed), str(delay),
@@ -370,7 +488,7 @@ def main():
                             str(case.completion_pc)]
                 if case.interrupt_schedule:
                     schedule_path = work / "interrupts.txt"
-                    schedule_path.write_text("".join(f"{kind} {key} {mask}\n" for kind, key, mask in case.interrupt_schedule))
+                    schedule_path.write_text("".join(" ".join(map(str, entry)) + "\n" for entry in case.interrupt_schedule))
                     args_run.append(str(schedule_path))
                 run = subprocess.run(args_run, capture_output=True, text=True)
                 name = f"{case.name}-s{seed}-d{delay}"
@@ -402,13 +520,18 @@ def main():
         if not manifest["parameters"]["resetVector"]:
             for metric in ("forwards", "loadUseCycles", "redirects", "memoryWaitCycles", "blockedFetchRedirects", "fetchDrainsAfterCompletion"):
                 assert sum(result[metric] for result in results), f"Unreached coverage: {metric}"
+            if manifest["parameters"].get("enableM", False):
+                for metric in ("mulDivStarts", "mulDivFinishes", "mulDivMemoryOverlapCycles", "mulDivResultStalls",
+                               "mulDivTrapCancels", "mulDivInterruptCancels", "mulDivRestarts"):
+                    assert sum(result.get(metric, 0) for result in results), f"Unreached arithmetic coverage: {metric}"
         observed = set().union(*(set(result["instructions"]) for result in results))
         required = {"lui", "auipc", "addi", "sw", "jal", "csrrw", "csrrs", "csrrwi", "ecall", "ebreak", "mret"}
         if not manifest["parameters"]["resetVector"]:
-            required = set(INSTRUCTIONS)
+            required = set(manifest["instructions"])
         assert required <= observed, f"Unexecuted instructions: {required - observed}"
     summary = {"scope": "integer instructions, native memory, machine traps, interrupts, counters and WFI",
                "command": "python3 test/verify.py", "exitStatus": 0,
+               "parameters": manifest["parameters"], "instructions": manifest["instructions"],
                "rtlManifestHash": manifest_hash, "checkerHashes": inputs,
                "simulator": subprocess.check_output(["verilator", "--version"], text=True).strip(),
                "negativeControls": controls, "rtlNegativeControls": rtl_controls, "runs": results,

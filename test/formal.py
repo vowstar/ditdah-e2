@@ -31,6 +31,10 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("result/formal"))
     args = parser.parse_args()
     manifest = json.loads((args.rtl / "manifest.json").read_text())
+    if manifest["parameters"].get("enableC", False):
+        subprocess.run([sys.executable, "test/compressed_fetch_formal.py", "--rtl", str(args.rtl),
+                        "--source-root", ".", "--output", str(args.output)], check=True)
+        return
     assert manifest["sourceHashes"] == sources(), "Stale RTL inputs"
     source = args.rtl / "DitDahE2Fetch.sv"
     assert digest(source) == manifest["rtlHashes"][source.name], "Changed RTL"

@@ -79,6 +79,34 @@ class ElfTests(unittest.TestCase):
         self.assertEqual(self.load(data, reset_vector=0x40).words()[0x40], 0x13)
         self.reject(data, "entry does not match")
 
+    def test_compressed_flags_and_short_entry(self):
+        for flags in (0, 1):
+            data = executable()
+            struct.pack_into("<I", data, 36, flags)
+            struct.pack_into("<I", data, 52 + 16, 2)
+            struct.pack_into("<H", data, 0x100, 0x0001)
+            image = self.load(data, enable_c=True)
+            self.assertEqual((image.entry, image.flags, image.segments[0].data), (0, flags, b"\x01\x00"))
+            self.reject(data, "compatible flags|requires C")
+        for flags in (2, 4, 6, 8, 16, 32, 64, 0x01000000):
+            data = executable()
+            struct.pack_into("<I", data, 36, flags | 1)
+            self.reject(data, "compatible flags", enable_c=True)
+
+    def test_halfword_entry_width(self):
+        data = executable()
+        struct.pack_into("<I", data, 24, 2)
+        struct.pack_into("<H", data, 0x102, 1)
+        self.assertEqual(self.load(data, reset_vector=2, enable_c=True).entry, 2)
+        struct.pack_into("<I", data, 0x102, 0x13)
+        self.reject(data, "entry is outside", reset_vector=2, enable_c=True)
+        struct.pack_into("<II", data, 52 + 16, 6, 6)
+        self.assertEqual(self.load(data, reset_vector=2, enable_c=True).entry, 2)
+        struct.pack_into("<H", data, 0x102, 0x1F)
+        self.reject(data, "Unsupported instruction width", reset_vector=2, enable_c=True)
+        self.reject(data, "Boolean", enable_c=1)
+        self.reject(data, "Invalid reset", reset_vector=1, enable_c=True)
+
     def test_identification_and_machine(self):
         for offset, width, value in ((0, "I", 0), (4, "B", 2), (5, "B", 2), (6, "B", 2),
                                      (7, "B", 3), (8, "B", 1), (9, "B", 1),
@@ -220,13 +248,20 @@ class SoftwareBuildTests(unittest.TestCase):
         self.path = Path(self.directory.name)
 
     def test_reproducible_executable(self):
-        first = build_software.build(self.path / "first")
-        second = build_software.build(self.path / "second")
-        self.assertEqual(first, second)
-        image = load_elf(self.path / "first/program.elf")
-        self.assertEqual(image.words()[image.symbols["software_done"]], 0x6F)
-        self.assertEqual(image.words()[image.symbols["software_seed"]], 0x13579BDF)
-        self.assertEqual(image.words()[image.symbols["software_signature"]], 0)
+        for enable_m, enable_c in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(enable_m=enable_m, enable_c=enable_c):
+                first = build_software.build(self.path / "first", enable_m=enable_m, enable_c=enable_c)
+                second = build_software.build(self.path / "second", enable_m=enable_m, enable_c=enable_c)
+                self.assertEqual(first, second)
+                self.assertEqual(first["elfFlags"], int(enable_c))
+                self.assertEqual(first["codeBytes"], sum(item["length"] for item in first["instructions"]))
+                image = load_elf(self.path / "first/program.elf", enable_c=enable_c)
+                self.assertEqual(image.symbols["software_done"] & 3, 0)
+                self.assertEqual(image.words()[image.symbols["software_done"]], 0x6F)
+                self.assertEqual(image.words()[image.symbols["software_seed"]], 0x13579BDF)
+                self.assertEqual(image.words()[image.symbols["software_factor"]], 37)
+                self.assertEqual(image.words()[image.symbols["software_signature"]], 0)
+                self.assertEqual(image.words()[image.symbols["software_product"]], 0)
 
     def test_relocated_executable(self):
         report = build_software.build(self.path / "relocated", reset_vector=0x40)
@@ -234,6 +269,9 @@ class SoftwareBuildTests(unittest.TestCase):
         self.assertEqual(image.entry, 0x40)
         self.assertEqual(image.symbols["_start"], 0x40)
         self.assertEqual(report["resetVector"], 0x40)
+        report = build_software.build(self.path / "halfword", reset_vector=2, enable_c=True)
+        image = load_elf(self.path / "halfword/program.elf", reset_vector=2, enable_c=True)
+        self.assertEqual((image.entry, image.symbols["_start"], report["resetVector"]), (2, 2, 2))
 
     def test_changed_input_rejected(self):
         original = build_software.sources()

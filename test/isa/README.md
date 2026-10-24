@@ -20,3 +20,4 @@ Use a new `--output` directory for each run. Sources and versions are pinned in 
 | Suite | RTL configuration |
 | --- | --- |
 | `add`, `rv32i` | Default ADD test or the RV32I collection |
+| `rv32m`, `rv32c` | Enable M or C respectively |

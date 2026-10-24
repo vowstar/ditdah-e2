@@ -17,15 +17,25 @@ INSTRUCTIONS = ["lui", "auipc", "jal", "jalr", "beq", "bne", "blt", "bge", "bltu
                 "xori", "ori", "andi", "slli", "srli", "srai", "add", "sub", "sll", "slt",
                 "sltu", "xor", "srl", "sra", "or", "and", "fence", "ecall", "ebreak",
                 "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "mret", "wfi", "fence.i"]
+M_INSTRUCTIONS = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
+C_INSTRUCTIONS = ["c.addi4spn", "c.lw", "c.sw", "c.addi", "c.jal", "c.li", "c.lui", "c.addi16sp",
+                  "c.srli", "c.srai", "c.andi", "c.sub", "c.xor", "c.or", "c.and", "c.j", "c.beqz",
+                  "c.bnez", "c.slli", "c.lwsp", "c.jr", "c.mv", "c.ebreak", "c.jalr", "c.add", "c.swsp", "c.nop"]
 
 
 def configuration(value):
-    if not isinstance(value, dict) or value.keys() - {"resetVector"}:
-        raise ValueError("Only resetVector is supported")
+    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC"}:
+        raise ValueError("Only resetVector, enableM and enableC are supported")
+    enable_c = value.get("enableC", False)
+    if type(enable_c) is not bool:
+        raise ValueError("enableC must be a Boolean")
     reset = value.get("resetVector", 0)
-    if type(reset) is not int or not 0 <= reset <= 0xFFFFFFFF or reset % 4:
-        raise ValueError("resetVector must be a word-aligned unsigned 32-bit integer")
-    return {"resetVector": reset}
+    if type(reset) is not int or not 0 <= reset <= 0xFFFFFFFF or reset % (2 if enable_c else 4):
+        raise ValueError("resetVector must be unsigned RV32 and satisfy instruction alignment")
+    enable_m = value.get("enableM", False)
+    if type(enable_m) is not bool:
+        raise ValueError("enableM must be a Boolean")
+    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c}
 
 
 def digest(path):
@@ -67,8 +77,8 @@ def main():
             raise RuntimeError("Missing generated processor RTL")
         manifest = {
             "parameters": params, "top": "DitDahE2", "isaComplete": False,
-            "instructions": INSTRUCTIONS, "privilegedArchitecture": False,
-            "machineTrapHandling": True, "extensions": ["I", "Zicsr", "Zicntr", "Zifencei"],
+            "instructions": INSTRUCTIONS + (M_INSTRUCTIONS if params["enableM"] else []) + (C_INSTRUCTIONS if params["enableC"] else []), "privilegedArchitecture": False,
+            "machineTrapHandling": True, "extensions": ["I", "Zicsr", "Zicntr", "Zifencei"] + (["M"] if params["enableM"] else []) + (["C"] if params["enableC"] else []),
             "machineInterrupts": ["software", "timer", "external"],
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},

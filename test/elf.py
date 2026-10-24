@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 # SPDX-License-Identifier: MIT
-"""Load static RV32I executables into the verification platform."""
+"""Load static RV32 executables into the verification platform."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +32,7 @@ class ElfImage:
     segments: tuple[Segment, ...]
     symbols: dict[str, int]
     memory: dict[int, int]
+    flags: int = 0
 
     def words(self):
         result = {}
@@ -90,7 +91,9 @@ def _symbols(data, offset, count, entry_size):
     return symbols
 
 
-def load_elf(path, *, reset_vector=0, regions=REGIONS):
+def load_elf(path, *, reset_vector=0, regions=REGIONS, enable_c=False):
+    if type(enable_c) is not bool:
+        raise ValueError("enable_c must be a Boolean")
     data = Path(path).read_bytes()
     header = _extent(data, 0, 52, "ELF header")
     if header[:7] != b"\x7fELF\x01\x01\x01":
@@ -99,11 +102,11 @@ def load_elf(path, *, reset_vector=0, regions=REGIONS):
         raise ValueError("Unsupported ELF identification")
     (kind, machine, version, entry, phoff, shoff, flags, header_size,
      phsize, phnum, shsize, shnum, shstrings) = struct.unpack_from("<HHIIIIIHHHHHH", header, 16)
-    if kind != 2 or machine != 243 or version != 1 or flags:
-        raise ValueError("Expected a static RV32I executable with the soft-float ABI")
+    if kind != 2 or machine != 243 or version != 1 or flags & ~(1 if enable_c else 0):
+        raise ValueError("Expected a static RV32 executable with compatible flags and the soft-float ABI")
     if header_size != 52 or phsize != 32 or not 0 < phnum < 0xFFFF or phoff < 52:
         raise ValueError("Invalid ELF program table")
-    if type(reset_vector) is not int or not 0 <= reset_vector <= 0xFFFFFFFF or reset_vector % 4:
+    if type(reset_vector) is not int or not 0 <= reset_vector <= 0xFFFFFFFF or reset_vector % (2 if enable_c else 4):
         raise ValueError("Invalid reset vector")
     if entry != reset_vector:
         raise ValueError("ELF entry does not match the reset vector")
@@ -143,8 +146,18 @@ def load_elf(path, *, reset_vector=0, regions=REGIONS):
             raise ValueError("Load segments are not in address order")
         contents = _extent(data, offset, file_size, "load segment")
         segments.append(Segment(address, contents, memory_size, access))
-    if not any(segment.flags & 1 and segment.address <= entry and
-               entry + 4 <= segment.address + len(segment.data) for segment in segments):
+    entry_segment = next((segment for segment in segments if segment.flags & 1 and
+                          segment.address <= entry and entry + 2 <= segment.address + len(segment.data)), None)
+    if entry_segment is None:
+        raise ValueError("ELF entry is outside executable file data")
+    offset = entry - entry_segment.address
+    halfword = int.from_bytes(entry_segment.data[offset:offset + 2], "little")
+    if halfword & 3 != 3 and not enable_c:
+        raise ValueError("Compressed ELF entry requires C")
+    if halfword & 31 == 31:
+        raise ValueError("Unsupported instruction width at ELF entry")
+    length = 2 if halfword & 3 != 3 else 4
+    if offset + length > len(entry_segment.data):
         raise ValueError("ELF entry is outside executable file data")
     symbols = _symbols(data, shoff, shnum, shsize)
     memory = {}
@@ -152,4 +165,4 @@ def load_elf(path, *, reset_vector=0, regions=REGIONS):
         memory.update((segment.address + index, value) for index, value in enumerate(segment.data))
         memory.update((address, 0) for address in range(segment.address + len(segment.data),
                                                       segment.address + segment.memory_size))
-    return ElfImage(entry, tuple(segments), symbols, memory)
+    return ElfImage(entry, tuple(segments), symbols, memory, flags)

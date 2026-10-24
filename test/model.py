@@ -4,14 +4,32 @@
 
 from dataclasses import dataclass
 
+from compressed_model import decode as decode_instruction
+
 MASK = (1 << 32) - 1
 MASK64 = (1 << 64) - 1
 TIME_BASE = 0xFFFFFFF0
+M_INSTRUCTIONS = ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")
 
 
 def signed(value, width):
     value &= (1 << width) - 1
     return value - (1 << width) if value >> (width - 1) else value
+
+
+def multiply_divide(operation, left, right):
+    if operation < 4:
+        a = signed(left, 32) if operation in (1, 2) else left
+        b = signed(right, 32) if operation == 1 else right
+        product = a * b
+        return (product if operation == 0 else product >> 32) & MASK
+    if right == 0:
+        return MASK if operation in (4, 5) else left
+    a, b = (signed(left, 32), signed(right, 32)) if operation in (4, 6) else (left, right)
+    quotient = abs(a) // abs(b)
+    if (a < 0) != (b < 0):
+        quotient = -quotient
+    return (quotient if operation in (4, 5) else a - quotient * b) & MASK
 
 
 @dataclass
@@ -26,17 +44,20 @@ class Event:
     tval: int = 0
     memory: tuple | None = None
     instruction: str = "illegal"
+    length: int = 4
 
 
 class Model:
-    def __init__(self, words, reset=0, instruction_fault=None, data_fault=None):
+    def __init__(self, words, reset=0, instruction_fault=None, data_fault=None, *, enable_m=False, enable_c=False):
         self.memory = {address + lane: (word >> (8 * lane)) & 255
                        for address, word in words.items() for lane in range(4)}
         self.pc = reset
         self.registers = [0] * 32
         self.instruction_fault = instruction_fault
         self.data_fault = data_fault
-        self.csrs = {0x300: 0x1800, 0x301: 0x40000100, 0x304: 0,
+        self.enable_m = enable_m
+        self.enable_c = enable_c
+        self.csrs = {0x300: 0x1800, 0x301: 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2), 0x304: 0,
                      0x305: reset & ~3, 0x310: 0, 0x320: 0, 0x340: 0, 0x341: 0,
                      0x342: 0, 0x343: 0, 0x344: 0,
                      **dict.fromkeys(range(0xF11, 0xF16), 0)}
@@ -122,7 +143,7 @@ class Model:
             self.csrs[address] = (value & 0xFFFFFFFC) | int(value & 3 == 1)
             return
         masks = {0x300: 0x88, 0x301: 0, 0x304: 0x888,
-                 0x310: 0, 0x320: 5, 0x340: MASK, 0x341: 0xFFFFFFFC,
+                 0x310: 0, 0x320: 5, 0x340: MASK, 0x341: 0xFFFFFFFE if self.enable_c else 0xFFFFFFFC,
                  0x342: MASK, 0x343: MASK, 0x344: 0}
         mask = masks.get(address, 0)
         self.csrs[address] = (self.csrs[address] & ~mask) | (value & mask)
@@ -137,8 +158,20 @@ class Model:
         if self.sleeping:
             raise AssertionError("Retirement while WFI waits")
         pc = self.pc
-        insn = self.word(pc)
-        result = Event(pc, insn, (pc + 4) & MASK)
+        raw, length, decoded, fetch_fault = self.word(pc), 4, None, None
+        if self.enable_c:
+            if pc & ~3 == self.instruction_fault:
+                raw, length, fetch_fault = 0, 2, pc
+            else:
+                decoded = decode_instruction(raw)
+                raw, length = decoded.raw, decoded.length
+                second = (pc + 2) & MASK
+                if length == 4 and pc & 2 and second & ~3 == self.instruction_fault:
+                    raw, fetch_fault = 0, second
+        elif pc == self.instruction_fault:
+            fetch_fault = pc
+        insn = decoded.expanded if decoded is not None else raw
+        result = Event(pc, raw, (pc + length) & MASK, length=length)
 
         def fault(cause, value):
             result.trap, result.cause, result.tval = True, cause, value & MASK
@@ -147,11 +180,16 @@ class Model:
         op, rd, f3 = insn & 127, (insn >> 7) & 31, (insn >> 12) & 7
         a, b = self.registers[(insn >> 15) & 31], self.registers[(insn >> 20) & 31]
         imm = signed(insn >> 20, 12)
-        if pc == self.instruction_fault:
-            fault(1, pc)
+        if fetch_fault is not None:
+            fault(1, fetch_fault)
+        elif decoded is not None and not decoded.legal:
+            fault(2, raw)
         elif op in (0x37, 0x17):
             result.instruction = "lui" if op == 0x37 else "auipc"
             result.rd, result.value = rd, ((insn & 0xFFFFF000) + (pc if op == 0x17 else 0)) & MASK
+        elif self.enable_m and op == 0x33 and insn >> 25 == 1:
+            result.instruction = M_INSTRUCTIONS[f3]
+            result.rd, result.value = rd, multiply_divide(f3, a, b)
         elif (op == 0x13 and (f3 not in (1, 5) or insn >> 25 == 0 or
                              (f3 == 5 and insn >> 25 == 32))) or (
                 op == 0x33 and (insn >> 25 == 0 or (insn >> 25 == 32 and f3 in (0, 5)))):
@@ -196,7 +234,7 @@ class Model:
                      5: signed(a, 32) >= signed(b, 32), 6: a < b, 7: a >= b}[f3]
             if taken:
                 result.next_pc = (pc + offset) & MASK
-                if result.next_pc % 4:
+                if result.next_pc % (2 if self.enable_c else 4):
                     fault(0, result.next_pc)
         elif op in (0x6F, 0x67) and (op == 0x6F or f3 == 0):
             result.instruction = "jal" if op == 0x6F else "jalr"
@@ -204,10 +242,10 @@ class Model:
                             | (((insn >> 20) & 1) << 11) | (((insn >> 21) & 1023) << 1), 21)
             target = ((a + imm) & ~1) if op == 0x67 else pc + offset
             result.next_pc = target & MASK
-            if result.next_pc % 4:
+            if result.next_pc % (2 if self.enable_c else 4):
                 fault(0, result.next_pc)
             else:
-                result.rd, result.value = rd, (pc + 4) & MASK
+                result.rd, result.value = rd, (pc + length) & MASK
         elif op == 0x73 and f3 in (1, 2, 3, 5, 6, 7):
             address, source = insn >> 20, (insn >> 15) & 31
             result.instruction = {1: "csrrw", 2: "csrrs", 3: "csrrc",
@@ -238,7 +276,9 @@ class Model:
         elif op == 0x0F and f3 in (0, 1):
             result.instruction = "fence.i" if f3 else "fence"
         else:
-            fault(2, insn)
+            fault(2, raw)
+        if decoded is not None and decoded.legal and length == 2 and fetch_fault is None:
+            result.instruction = "c." + decoded.name
         if result.rd:
             self.registers[result.rd] = result.value
         else:

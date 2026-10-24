@@ -20,9 +20,16 @@ _start:
     j 1b
 2:
     call main
+    j software_done
+.size _start, .-_start
+
+.section .text.done, "ax", @progbits
+.balign 4
+.option push
+.option norvc
 .globl software_done
 .type software_done, @function
 software_done:
-    j software_done
+    jal zero, software_done
 .size software_done, .-software_done
-.size _start, .-_start
+.option pop

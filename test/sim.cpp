@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ struct InputEvent {
     uint64_t key;
     unsigned mask;
     bool fired = false;
+    uint64_t delay = 0, due = UINT64_MAX;
 };
 
 int main(int argc, char **argv) {
@@ -57,22 +59,31 @@ int main(int argc, char **argv) {
         if (argc == 9 && std::string(argv[8]) != "-") {
             std::ifstream events(argv[8]);
             if (!events) throw std::runtime_error("Cannot open input schedule");
-            InputEvent event{};
-            while (events >> event.trigger) {
-                if (!(events >> event.key >> event.mask)) throw std::runtime_error("Malformed input schedule");
-                if (std::string("CDRN").find(event.trigger) == std::string::npos || event.mask > 7 ||
+            std::string line;
+            while (std::getline(events, line)) {
+                std::istringstream fields(line);
+                InputEvent event{};
+                if (!(fields >> event.trigger)) continue;
+                if (!(fields >> event.key >> event.mask)) throw std::runtime_error("Malformed input schedule");
+                if (event.trigger == 'M' && (!(fields >> event.delay) || !event.delay || event.delay > limit))
+                    throw std::runtime_error("Invalid arithmetic interrupt delay");
+                std::string extra;
+                if (fields >> extra) throw std::runtime_error("Malformed input schedule");
+                if (std::string("CDRNM").find(event.trigger) == std::string::npos || event.mask > 7 ||
                     ((event.trigger == 'D' || event.trigger == 'R') && event.key > UINT32_MAX) ||
-                    (event.trigger == 'N' && !event.key))
+                    ((event.trigger == 'N' || event.trigger == 'M') && !event.key))
                     throw std::runtime_error("Invalid input schedule");
                 schedule.push_back(event);
             }
             if (!events.eof()) throw std::runtime_error("Malformed input schedule");
         }
         unsigned pending = 0;
+        uint64_t currentCycle = 0, arithmeticStarts = 0;
         auto apply = [&](char trigger, uint64_t key) {
             for (auto &event : schedule) {
                 if (!event.fired && event.trigger == trigger && event.key == key) {
-                    pending = event.mask;
+                    if (event.trigger == 'M') event.due = currentCycle + event.delay;
+                    else pending = event.mask;
                     event.fired = true;
                 }
             }
@@ -97,6 +108,13 @@ int main(int argc, char **argv) {
         Request finalOffer{};
         for (uint64_t cycle = 0; cycle < limit; ++cycle) {
             dut.clock = 0;
+            currentCycle = cycle;
+            for (auto &event : schedule) {
+                if (event.due == cycle) {
+                    pending = event.mask;
+                    event.due = UINT64_MAX;
+                }
+            }
             apply('C', cycle);
             dut.interrupts_software = pending & 1;
             dut.interrupts_timer = (pending >> 1) & 1;
@@ -179,6 +197,12 @@ int main(int argc, char **argv) {
                 std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target << ' '
                           << dut.interrupt_cause << '\n';
                 apply('N', interrupts);
+            }
+            if (dut.mulDiv_start || dut.mulDiv_resultValid || dut.mulDiv_finish || dut.mulDiv_cancel) {
+                std::cout << "U " << cycle << ' ' << dut.mulDiv_pc << ' ' << unsigned(dut.mulDiv_start) << ' '
+                          << unsigned(dut.mulDiv_resultValid) << ' ' << unsigned(dut.mulDiv_finish) << ' '
+                          << unsigned(dut.mulDiv_cancel) << ' ' << dut.mulDiv_value << '\n';
+                if (dut.mulDiv_start) apply('M', ++arithmeticStarts);
             }
             dut.clock = 1; dut.eval();
             if (completing && !instruction.active && !data.active) {

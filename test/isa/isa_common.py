@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 from riscof.pluginTemplate import pluginTemplate
-from isa_checks import LOCAL, RESET, digest, execution_case, load_program, normalize_elf, signature_words
+from isa_checks import LOCAL, RESET, architectural_configuration, digest, execution_case, load_program, normalize_elf, signature_words
 
 
 def execute(command, *, cwd, timeout=180, output=None):
@@ -36,15 +36,18 @@ class Adapter(pluginTemplate):
     def build(self, isa_yaml, platform_yaml):
         from riscof.utils import load_yaml
         spec = load_yaml(isa_yaml)['hart0']
-        if spec['ISA'] != 'RV32IZicsr' or spec['supported_xlen'] != [32]:
+        if spec['supported_xlen'] != [32]:
             raise ValueError("Unsupported architectural test configuration")
+        self.enable_m, self.enable_c, self.march = architectural_configuration(spec['ISA'])
 
     def compile(self, entry):
         directory = Path(entry['work_dir'])
         elf = directory / (self.__model__ + '.elf')
-        if entry['isa'].lower() != 'rv32i':
-            raise ValueError("Only RV32I tests are enabled")
-        command = ['riscv32-none-elf-gcc', '-march=rv32i_zicsr', '-mabi=ilp32',
+        isa = entry['isa'].lower()
+        if isa not in ('rv32i', 'rv32im', 'rv32ic', 'rv32imc') or (
+                'm' in isa[5:] and not self.enable_m) or ('c' in isa[5:] and not self.enable_c):
+            raise ValueError("Test exceeds the configured ISA")
+        command = ['riscv32-none-elf-gcc', '-march=' + self.march, '-mabi=ilp32',
                    '-mcmodel=medany', '-mno-relax', '-nostdlib', '-nostartfiles',
                    '-static', '-Wl,--build-id=none,--discard-all', '-T', str(LOCAL / 'env/link.ld'),
                    '-I', str(LOCAL / 'env'), '-I', str(self.environment),
@@ -53,7 +56,7 @@ class Adapter(pluginTemplate):
         execute(command, cwd=directory)
         original = elf.read_bytes()
         elf.with_suffix('.raw.elf').write_bytes(original)
-        elf.write_bytes(normalize_elf(original))
+        elf.write_bytes(normalize_elf(original, enable_c=self.enable_c))
         return elf
 
     def signature_path(self, entry):
@@ -70,13 +73,16 @@ class SpikeAdapter(Adapter):
             if digest(elf) != digest(shared):
                 raise ValueError('Reference and RTL compiled different executable images')
             elf = shared
-            _, begin, end, _ = load_program(elf)
+            _, begin, end, complete = load_program(elf, enable_c=self.enable_c)
             signature = self.signature_path(entry)
-            execute(['spike', '--isa=rv32i_zicsr', '--priv=m', '-m0x80000000:0x400000',
+            execute(['spike', '--isa=' + self.march, '--priv=m', '-m0x80000000:0x400000',
                      '+signature=' + str(signature), '+signature-granularity=4', str(elf)],
                     cwd=elf.parent)
             if len(signature_words(signature.read_text())) != (end - begin) // 4:
                 raise ValueError("Incomplete Spike signature")
+            (Path(entry['work_dir']) / 'spike_reference.json').write_text(json.dumps({
+                'exitStatus': 0, 'isa': self.march, 'elfHash': digest(elf),
+                'completionPc': complete, 'signatureHash': digest(signature)}, indent=2) + '\n')
 
 
 class RtlAdapter(Adapter):
@@ -87,7 +93,13 @@ class RtlAdapter(Adapter):
         rtl = Path(self.config['rtl'])
         self.inputs = Path(self.config['inputs'])
         manifest = json.loads((rtl / 'manifest.json').read_text())
-        if manifest['parameters'] != {'resetVector': RESET}:
+        parameters = manifest['parameters']
+        if any(type(parameters.get(name, False)) is not bool for name in ('enableM', 'enableC')):
+            raise ValueError("RTL ISA configuration must be Boolean")
+        if (self.enable_m, self.enable_c) != (parameters.get('enableM', False), parameters.get('enableC', False)):
+            raise ValueError("RTL ISA configuration mismatch")
+        if (parameters.get('resetVector') != RESET or parameters.keys() - {'resetVector', 'enableM', 'enableC'} or
+                type(self.enable_m) is not bool or type(self.enable_c) is not bool):
             raise ValueError("RTL reset configuration mismatch")
         for name, expected in manifest['sourceHashes'].items():
             if digest(self.inputs / name) != expected:
@@ -98,7 +110,7 @@ class RtlAdapter(Adapter):
         self.bound = {path: digest(path) for path in
                       [rtl / name for name in manifest['rtlHashes']] +
                       [rtl / 'manifest.json'] + [self.inputs / name for name in manifest['sourceHashes']] +
-                      [self.inputs / 'test' / name for name in ('sim.cpp', 'model.py', 'programs.py', 'verify.py')]}
+                      [self.inputs / 'test/sim.cpp'] + sorted((self.inputs / 'test').glob('*.py'))}
         self.binary = self.work / 'obj/VDitDahE2'
         execute(['verilator', '--cc', '--exe', '--build', '-j', '2', '--top-module', 'DitDahE2',
                  '--Mdir', str(self.binary.parent), '-CFLAGS', '-std=c++17',
@@ -110,17 +122,23 @@ class RtlAdapter(Adapter):
         from verify import check
         for entry in testlist.values():
             elf = self.compile(entry)
-            program, begin, end, complete = load_program(elf)
+            program, begin, end, complete = load_program(elf, enable_c=self.enable_c)
             image = elf.with_suffix('.hex')
             words = program.words()
             image.write_text(''.join(f'{address:08x} {word:08x}\n' for address, word in sorted(words.items())))
             trace = execute([str(self.binary), str(image), '19', '40', str(1 << 32),
                              str(1 << 32), '1000000', str(complete)], cwd=elf.parent,
                             output=elf.with_suffix('.trace'))
-            case = execution_case(words, RESET, complete)
+            case = execution_case(words, RESET, complete, enable_m=self.enable_m, enable_c=self.enable_c)
             metrics = check(case, trace)
             memory = {int(fields[1]): int(fields[2]) for line in trace.splitlines()
                       if (fields := line.split())[0] == 'W'}
+            if memory[program.symbols['tohost']] != 1:
+                raise ValueError('Test did not report success through tohost')
+            if self.enable_c and 'c' in entry['isa'].lower()[5:] and not any(
+                    name.startswith('c.') and count for name, count in metrics['instructions'].items()):
+                raise ValueError('Compressed test retired no compressed instructions')
+            metrics.update({'exitStatus': 0, 'completionPc': complete, 'completionWord': 0x6F, 'tohost': 1})
             self.signature_path(entry).write_text(''.join(f'{memory[address]:08x}\n' for address in range(begin, end, 4)))
             elf.with_suffix('.json').write_text(json.dumps(metrics, indent=2) + '\n')
         if any(digest(path) != expected for path, expected in self.bound.items()):

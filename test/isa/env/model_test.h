@@ -4,9 +4,15 @@
 #define DITDAH_E2_MODEL_TEST_H
 
 #define RVMODEL_BOOT
+#ifdef __riscv_compressed
+#define DITDAH_E2_HALT_ALIGN .option rvc; .balign 4
+#else
+#define DITDAH_E2_HALT_ALIGN .balign 4
+#endif
 #define RVMODEL_HALT \
+  .option push; DITDAH_E2_HALT_ALIGN; .option norvc; \
   li t0, 1; la t1, tohost; sw t0, 0(t1); \
-  .global test_complete; test_complete: j test_complete
+  .global test_complete; test_complete: jal zero, test_complete; .option pop
 #define RVMODEL_DATA_BEGIN \
   .section .signature,"aw",@progbits; .balign 4; \
   .global begin_signature; begin_signature:

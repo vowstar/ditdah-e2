@@ -102,7 +102,17 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     for i <- 1 to 31 do
       when(io.retire.writes & (m.rd === i.U(5))) { registers(i - 1) := writeback }
 
-    val bits = x.word.asBits
+    val decoded = Wire(UInt(32))
+    val encodingLegal = Wire(Bool())
+    decoded := x.word
+    encodingLegal := true.B
+    if p.enableC then
+      val compressed = Compressed.instantiate(p)
+      compressed.io.raw := x.word.asBits.bits(15, 0).asUInt
+      val short = x.length === 2.U(3)
+      decoded := short.?(compressed.io.instruction, x.word)
+      encodingLegal := short.?(compressed.io.legal, x.word.asBits.bits(4, 0) =/= 31.B(5))
+    val bits = decoded.asBits
     val opcode = bits.bits(6, 0)
     val rs1 = bits.bits(19, 15).asUInt
     val rs2 = bits.bits(24, 20).asUInt
@@ -113,6 +123,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       (funct7 === 0.B(7)) | ((funct3 === 5.B(3)) & (funct7 === 32.B(7))))
     val isRegister = (opcode === 0x33.B(7)) & ((funct7 === 0.B(7)) |
       ((funct7 === 32.B(7)) & ((funct3 === 0.B(3)) | (funct3 === 5.B(3)))))
+    val isMultiplyDivide = if p.enableM then (opcode === 0x33.B(7)) & (funct7 === 1.B(7)) else false.B
     val isLui = opcode === 0x37.B(7)
     val isAuipc = opcode === 0x17.B(7)
     val isLoad = (opcode === 0x03.B(7)) & ((funct3.asUInt <= 2.U(3)) |
@@ -121,16 +132,16 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isBranch = (opcode === 0x63.B(7)) & (funct3.bits(2, 1) =/= 1.B(2))
     val isJal = opcode === 0x6f.B(7)
     val isJalr = (opcode === 0x67.B(7)) & (funct3 === 0.B(3))
-    val isBreak = x.word === 0x00100073.U(32)
-    val isCall = x.word === 0x00000073.U(32)
+    val isBreak = decoded === 0x00100073.U(32)
+    val isCall = decoded === 0x00000073.U(32)
     val isFence = (opcode === 0x0f.B(7)) & (funct3 === 0.B(3))
     val isFenceI = (opcode === 0x0f.B(7)) & (funct3 === 1.B(3))
     val isCsr = (opcode === 0x73.B(7)) & (funct3.bits(1, 0) =/= 0.B(2))
-    val isMret = x.word === 0x30200073.U(32)
-    val isWfi = x.word === 0x10500073.U(32)
-    val legal = isImmediate | isRegister | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isFenceI | isCsr | isMret | isWfi
-    val use1 = isImmediate | isRegister | isLoad | isStore | isBranch | isJalr | (isCsr & !funct3.bit(2))
-    val use2 = isRegister | isStore | isBranch
+    val isMret = decoded === 0x30200073.U(32)
+    val isWfi = decoded === 0x10500073.U(32)
+    val legal = encodingLegal & (isImmediate | isRegister | isMultiplyDivide | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isFenceI | isCsr | isMret | isWfi)
+    val use1 = isImmediate | isRegister | isMultiplyDivide | isLoad | isStore | isBranch | isJalr | (isCsr & !funct3.bit(2))
+    val use2 = isRegister | isMultiplyDivide | isStore | isBranch
     val a = Wire(UInt(32))
     val b = Wire(UInt(32))
     a := 0.U(32)
@@ -145,8 +156,43 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(match2 & !m.load) { b := m.value }
     val loadUse = m.load & (match1 | match2)
     val serialM = mValid & (m.csr | m.mret | m.wfi | m.fenceI)
+    val arithmeticReady = Wire(Bool())
+    val arithmeticValue = Wire(UInt(32))
+    arithmeticReady := true.B
+    arithmeticValue := 0.U(32)
     val advance = xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
-      (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping
+      (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping &
+      (!isMultiplyDivide | x.fault | arithmeticReady)
+    io.mulDiv.start := false.B
+    io.mulDiv.resultValid := false.B
+    io.mulDiv.finish := false.B
+    io.mulDiv.cancel := false.B
+    io.mulDiv.pc := 0.U(32)
+    io.mulDiv.value := 0.U(32)
+    if p.enableM then
+      val multiplyDivide = MultiplyDivide.instantiate(p)
+      val arithmeticPending = RegInit(false.B)
+      multiplyDivide.io.clock := io.clock
+      multiplyDivide.io.reset := io.reset
+      multiplyDivide.io.cancel := trap | interrupt
+      multiplyDivide.io.request.valid := xValid & isMultiplyDivide & !arithmeticPending &
+        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault
+      multiplyDivide.io.request.bits.operation := funct3.asUInt
+      multiplyDivide.io.request.bits.left := a
+      multiplyDivide.io.request.bits.right := b
+      multiplyDivide.io.response.ready := advance & isMultiplyDivide
+      val started = multiplyDivide.io.request.valid & multiplyDivide.io.request.ready
+      val finished = multiplyDivide.io.response.valid & multiplyDivide.io.response.ready
+      arithmeticReady := arithmeticPending & multiplyDivide.io.response.valid
+      arithmeticValue := multiplyDivide.io.response.bits
+      io.mulDiv.start := started
+      io.mulDiv.resultValid := arithmeticPending & multiplyDivide.io.response.valid
+      io.mulDiv.finish := finished
+      io.mulDiv.cancel := arithmeticPending & (trap | interrupt)
+      io.mulDiv.pc := x.pc
+      io.mulDiv.value := multiplyDivide.io.response.valid.?(multiplyDivide.io.response.bits, 0.U(32))
+      when(started) { arithmeticPending := true.B }
+      when(finished | trap | interrupt) { arithmeticPending := false.B }
     io.loadUse := xValid & loadUse
     io.forward := advance & !m.load & (match1 | match2)
     io.memoryWait := mValid & memory & !complete
@@ -156,7 +202,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val immS = (sign.?(0xfffff.B(20), 0.B(20)) ## bits.bits(31, 25) ## bits.bits(11, 7)).asUInt
     val immB = (sign.?(0x7ffff.B(19), 0.B(19)) ## bits.bits(31, 31) ## bits.bits(7, 7) ## bits.bits(30, 25) ## bits.bits(11, 8) ## 0.B(1)).asUInt
     val immJ = (sign.?(0x7ff.B(11), 0.B(11)) ## bits.bits(31, 31) ## bits.bits(19, 12) ## bits.bits(20, 20) ## bits.bits(30, 21) ## 0.B(1)).asUInt
-    val sequential = (x.pc + 4.U(32)).asBits.bits(31, 0).asUInt
+    val sequential = (x.pc + x.length).asBits.bits(31, 0).asUInt
     val address = (a + isStore.?(immS, immI)).asBits.bits(31, 0).asUInt
     val compare = Wire(Bool())
     compare := a === b
@@ -166,7 +212,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val jump = isJal | isJalr | (isBranch & branchTaken)
     val relative = (x.pc + isJal.?(immJ, immB)).asBits.bits(31, 0).asUInt
     val target = isJalr.?((address.asBits.bits(31, 1) ## 0.B(1)).asUInt, relative)
-    val badTarget = jump & (target.asBits.bits(1, 0) =/= 0.B(2))
+    val badTarget = jump & (if p.enableC then target.asBits.bit(0) else target.asBits.bits(1, 0) =/= 0.B(2))
     val size = funct3.bits(1, 0).asUInt
     val badData = (isLoad | isStore) & (
       ((size === 2.U(2)) & (address.asBits.bits(1, 0) =/= 0.B(2))) |
@@ -180,7 +226,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(isCall) { cause := 11.U(4); tval := 0.U(32) }
     when(badData) { cause := isStore.?(6.U(32), 4.U(32)); tval := address }
     when(badTarget) { cause := 0.U(32); tval := target }
-    when(x.fault) { cause := 1.U(32); tval := x.pc }
+    when(x.fault) { cause := 1.U(32); tval := x.faultAddress }
     val value = Wire(UInt(32))
     val rhs = isRegister.?(b, immI)
     val amount = rhs.asBits.bits(4, 0).asUInt
@@ -196,6 +242,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(isLui) { value := (bits.bits(31, 12) ## 0.B(12)).asUInt }
     when(isAuipc) { value := (x.pc + (bits.bits(31, 12) ## 0.B(12)).asUInt).asBits.bits(31, 0).asUInt }
     when(isJal | isJalr) { value := sequential }
+    when(isMultiplyDivide) { value := arithmeticValue }
 
     val branchRedirect = advance & jump & !fault
     val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect
@@ -214,7 +261,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.instruction :<= x
       m.nextPc := jump.?(target, sequential)
       m.rd := bits.bits(11, 7).asUInt
-      m.writes := isImmediate | isRegister | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
+      m.writes := isImmediate | isRegister | isMultiplyDivide | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
       m.value := value
       m.load := isLoad
       m.store := isStore

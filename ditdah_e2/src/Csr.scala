@@ -69,7 +69,8 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     io.illegal := !implemented | (io.writeRequested & readOnly)
     io.readData := 0.U(32)
     when(io.address === 0x300.U(12)) { io.readData := status }
-    when(io.address === 0x301.U(12)) { io.readData := 0x40000100.U(32) }
+    val misa = 0x40000100L | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L)
+    when(io.address === 0x301.U(12)) { io.readData := misa.U(32) }
     when(io.address === 0x304.U(12)) { io.readData := interruptEnables }
     when(io.address === 0x305.U(12)) { io.readData := mtvec }
     when(io.address === 0x340.U(12)) { io.readData := mscratch }
@@ -113,7 +114,9 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
       }
       when(io.address === 0x320.U(12)) { inhibit := (writeData.asBits.bits(2, 0) & 5.B(3)).asUInt }
       when(io.address === 0x340.U(12)) { mscratch := writeData }
-      when(io.address === 0x341.U(12)) { mepc := (writeData.asBits.bits(31, 2) ## 0.B(2)).asUInt }
+      when(io.address === 0x341.U(12)) {
+        mepc := (if p.enableC then writeData.asBits.bits(31, 1) ## 0.B(1) else writeData.asBits.bits(31, 2) ## 0.B(2)).asUInt
+      }
       when(io.address === 0x342.U(12)) { mcause := writeData }
       when(io.address === 0x343.U(12)) { mtval := writeData }
     }
@@ -124,7 +127,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     when(io.trap) {
       mie := false.B
       mpie := mie
-      mepc := (io.trapPc.asBits.bits(31, 2) ## 0.B(2)).asUInt
+      mepc := (if p.enableC then io.trapPc.asBits.bits(31, 1) ## 0.B(1) else io.trapPc.asBits.bits(31, 2) ## 0.B(2)).asUInt
       mcause := io.cause
       mtval := io.tval
     }

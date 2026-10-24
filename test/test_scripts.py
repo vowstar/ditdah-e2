@@ -14,10 +14,21 @@ from model import Model
 class ConfigurationTests(unittest.TestCase):
     def test_reset_addresses(self):
         for address in (0, 4, 0x80000000, 0xFFFFFFFC):
-            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address})
+            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address, "enableM": False, "enableC": False})
+
+    def test_multiply_configuration(self):
+        for enabled in (False, True):
+            self.assertEqual(configuration({"enableM": enabled}), {"resetVector": 0, "enableM": enabled, "enableC": False})
+
+    def test_compressed_alignment(self):
+        for address in (0, 2, 0x80000002, 0xFFFFFFFE):
+            self.assertEqual(configuration({"resetVector": address, "enableC": True}),
+                             {"resetVector": address, "enableM": False, "enableC": True})
 
     def test_reject_invalid_or_inactive_configuration(self):
-        for value in ([], None, {"enableM": True}, {"resetVector": True},
+        for value in ([], None, {"enableC": 1}, {"enableC": "true"}, {"enableC": None},
+                      {"enableC": True, "resetVector": 1}, {"enableC": True, "resetVector": 1 << 32},
+                      {"unknown": True}, {"enableM": 1}, {"enableM": "true"}, {"enableM": None}, {"resetVector": True},
                       {"resetVector": "0"}, {"resetVector": -4}, {"resetVector": 2},
                       {"resetVector": 1 << 32}, {"resetVector": 4.0}):
             with self.assertRaises(ValueError):

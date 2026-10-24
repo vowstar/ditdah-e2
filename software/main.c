@@ -5,7 +5,9 @@ typedef unsigned int uint32_t;
 _Static_assert(sizeof(uint32_t) == 4, "Expected a 32-bit integer");
 
 volatile uint32_t software_seed = 0x13579bdf;
+volatile uint32_t software_factor = 37;
 volatile uint32_t software_signature;
+volatile uint32_t software_product;
 
 int main(void)
 {
@@ -16,6 +18,7 @@ int main(void)
         value = ((value << 5) | (value >> 27)) ^ input[index & 7] ^ index;
     }
     software_signature = value;
+    software_product = software_seed * software_factor;
     *console = 'E';
     *console = '2';
     *console = '\n';

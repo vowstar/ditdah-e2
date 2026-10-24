@@ -14,6 +14,10 @@ def add(rd, a, b):
     return (b << 20) | (a << 15) | (rd << 7) | 0x33
 
 
+def multiply(rd, a, b, operation=0):
+    return (1 << 25) | (b << 20) | (a << 15) | (operation << 12) | (rd << 7) | 0x33
+
+
 def store(rs2, rs1, offset=0, funct3=2):
     return (((offset & 4095) >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | ((offset & 31) << 7) | 0x23
 
@@ -54,7 +58,7 @@ def trap_handler(handler_pc=HANDLER_PC, completion_pc=COMPLETION_PC, record=TRAP
     return code
 
 
-def csr_cases():
+def csr_cases(enable_m=False, enable_c=False):
     def complete(name, code, signature=None):
         return Case(name, code + [jump(0, COMPLETION_PC - PROGRAM_PC - len(code) * 4)],
                     signature=signature or {}, expected_causes=())
@@ -71,10 +75,11 @@ def csr_cases():
         csr(7, 0x340)] + [store(i, 0, 256 + (i - 1) * 4) for i in range(1, 8)],
         dict(zip(range(256, 284, 4), (31, 31, 31, 31, 0, 7, 0)))))
     addresses = (0x300, 0x301, 0x304, 0x305, 0x310, 0x340, 0x341, 0x342, 0x343, 0x344)
-    expected = ((0x1800, 0x40000100, 0, 0, 0, 0, 0, 0, 0, 0),
-                (0x1888, 0x40000100, 0x888, 0xFFFFFFFC, 0, 0xFFFFFFFF,
-                 0xFFFFFFFC, 0xFFFFFFFF, 0xFFFFFFFF, 0),
-                (0x1880, 0x40000100, 0x80, 0x5A5, 0, 0x5A5, 0x5A4, 0x5A5, 0x5A5, 0))
+    misa = 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2)
+    expected = ((0x1800, misa, 0, 0, 0, 0, 0, 0, 0, 0),
+                (0x1888, misa, 0x888, 0xFFFFFFFC, 0, 0xFFFFFFFF,
+                 0xFFFFFFFE if enable_c else 0xFFFFFFFC, 0xFFFFFFFF, 0xFFFFFFFF, 0),
+                (0x1880, misa, 0x80, 0x5A5, 0, 0x5A5, 0x5A4, 0x5A5, 0x5A5, 0))
     for value, values in zip((0, -1, 0x5A5), expected):
         code = [immediate(1, 0, value)]
         for index, address in enumerate(addresses):
@@ -320,6 +325,99 @@ def counter_cases():
     return result
 
 
+M_RESULTS = (
+    (0, 0, (0, 0, 0, 0, MASK, MASK, 0, 0)),
+    (1, 0, (0, 0, 0, 0, MASK, MASK, 1, 1)),
+    (MASK, 0, (0, 0, 0, 0, MASK, MASK, MASK, MASK)),
+    (0x80000000, MASK, (0x80000000, 0, 0x80000000, 0x7FFFFFFF, 0x80000000, 0, 0, 0x80000000)),
+    (MASK, 2, (0xFFFFFFFE, MASK, MASK, 1, 0, 0x7FFFFFFF, MASK, 1)),
+    (0x80000000, 2, (0, MASK, MASK, 1, 0xC0000000, 0x40000000, 0, 0)),
+    (0x7FFFFFFF, MASK, (0x80000001, MASK, 0x7FFFFFFE, 0x7FFFFFFE, 0x80000001, 0, 0, 0x7FFFFFFF)),
+    (0xFFFFFFF9, 3, (0xFFFFFFEB, MASK, MASK, 2, 0xFFFFFFFE, 0x55555553, MASK, 0)),
+    (7, 0xFFFFFFFD, (0xFFFFFFEB, MASK, 6, 6, 0xFFFFFFFE, 0, 1, 7)),
+    (0x80000000, 0x80000000, (0, 0x40000000, 0xC0000000, 0x40000000, 1, 1, 0, 0)),
+    (MASK, MASK, (1, 0, MASK, 0xFFFFFFFE, 1, 1, 0, 0)),
+)
+
+
+def multiply_cases():
+    result = []
+    for operation, name in enumerate(("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")):
+        code, signature = [], {}
+        for index, (left, right, expected) in enumerate(M_RESULTS):
+            code += constant(1, left) + constant(2, right)
+            code += [multiply(3, 1, 2, operation), store(3, 0, 256 + index * 4)]
+            signature[256 + index * 4] = expected[operation]
+        result.append(Case(f"m_{name}_boundaries", finish(code), signature=signature, expected_causes=(), enable_m=True))
+    code = [immediate(1, 0, -7), immediate(2, 0, 3), multiply(3, 1, 2),
+            multiply(4, 3, 2, 4), multiply(5, 2, 4), immediate(6, 5, 22), multiply(7, 6, 2)]
+    code += [store(register, 0, 256 + 4 * (register - 3)) for register in range(3, 8)]
+    result.append(Case("m_forward_dependencies", finish(code), expected_causes=(), enable_m=True,
+                       signature=dict(zip(range(256, 276, 4), (0xFFFFFFEB, 0xFFFFFFF9, 0xFFFFFFEB, 1, 3)))))
+    code = [immediate(1, 0, 768, 3, 2), immediate(2, 0, 772, 3, 2), multiply(3, 1, 2, 4),
+            immediate(4, 0, 776, 3, 2), multiply(5, 3, 4), immediate(6, 0, 780, 3, 2),
+            multiply(7, 4, 6, 6), store(3, 0, 256), store(5, 0, 260), store(7, 0, 264)]
+    result.append(Case("m_load_dependencies", finish(code), expected_causes=(), enable_m=True,
+                       data={768: 0xFFFFFFF9, 772: 3, 776: 7, 780: 0xFFFFFFFD},
+                       signature={256: 0xFFFFFFFE, 260: 0xFFFFFFF2, 264: 1}))
+    code = [immediate(1, 0, -7), csr(0, 0x340, 1, 1), csr(2, 0x340),
+            immediate(3, 0, 3), multiply(4, 2, 3), store(4, 0, 256)]
+    result.append(Case("m_csr_dependency", finish(code), expected_causes=(), enable_m=True,
+                       signature={256: 0xFFFFFFEB}))
+    code = [immediate(1, 0, -7), immediate(2, 0, 3), multiply(0, 1, 2), multiply(3, 0, 2),
+            multiply(0, 1, 0, 4), multiply(4, 1, 0, 6), store(0, 0, 256), store(3, 0, 260), store(4, 0, 264)]
+    result.append(Case("m_zero_register", finish(code), expected_causes=(), enable_m=True,
+                       signature={256: 0, 260: 0, 264: 0xFFFFFFF9}))
+    code = [immediate(1, 0, 7), immediate(2, 0, 3), immediate(3, 0, 55),
+            multiply(3, 1, 2), store(3, 0, 256)]
+    handler = trap_handler()[:-1] + [store(3, 0, 260)]
+    handler += [jump(0, COMPLETION_PC - HANDLER_PC - len(handler) * 4)]
+    fault_pc = PROGRAM_PC + 12
+    result.append(Case("m_fetch_fault", code, instruction_fault=fault_pc, handler=handler,
+                       expected_causes=(1,), enable_m=True,
+                       signature={256: 0, 260: 55, TRAP_RECORD: fault_pc,
+                                  TRAP_RECORD + 4: 1, TRAP_RECORD + 8: fault_pc}))
+    for write in (False, True):
+        memory = store(1, 0, 768) if write else immediate(8, 0, 768, 3, 2)
+        code = [immediate(1, 0, 7), immediate(2, 0, 3), memory, multiply(3, 1, 2),
+                store(3, 0, 256), multiply(4, 3, 2, 4), store(4, 0, 260)]
+        result.append(Case(f"m_older_{'store' if write else 'load'}_wait", finish(code), expected_causes=(), enable_m=True,
+                           data={768: 11}, signature={256: 21, 260: 7, 768: 7 if write else 11}))
+        code = [immediate(1, 0, 7), immediate(2, 0, 3), immediate(3, 0, 55), immediate(4, 0, 66),
+                memory, multiply(3, 1, 2), store(3, 0, 264), multiply(4, 1, 2, 4)]
+        handler = trap_handler()[:-1] + [store(3, 0, 256), store(4, 0, 260)]
+        handler += [jump(0, COMPLETION_PC - HANDLER_PC - len(handler) * 4)]
+        result.append(Case(f"m_older_{'store' if write else 'load'}_fault", code, data_fault=768, handler=handler,
+                           expected_causes=(7 if write else 5,), enable_m=True, data={768: 11},
+                           signature={256: 55, 260: 66, 264: 0, 768: 11, TRAP_RECORD: PROGRAM_PC + 16}))
+    for operation, name, delay, left, expected in ((0, "mul", 1, 7, 33), (4, "div", 17, 7, 3),
+                                                  (1, "mulh", 33, MASK - 6, 0), (0, "result", 34, 7, 33)):
+        code = constant(5, 1 << 11) + [csr(0, 0x304, 5, 1), csr(0, 0x300, 8, 6)]
+        code += constant(1, left) + constant(2, 3) + [immediate(20, 0, 0)]
+        pc = PROGRAM_PC + len(code) * 4
+        code += [multiply(3, 1, 2, operation), store(3, 0, 256), store(20, 0, 260)]
+        handler = constant(25, TRAP_RECORD)
+        handler += [csr(26, 0x341), store(26, 25), csr(26, 0x342), store(26, 25, 4),
+                    immediate(20, 20, 1), immediate(1, 0, 11), MRET]
+        result.append(Case(f"m_interrupt_restart_{name}", finish(code), handler=handler,
+                           expected_causes=(), expected_interrupts=(0x8000000B,), enable_m=True,
+                           interrupt_schedule=(("M", 1, 4, delay), ("N", 1, 0)),
+                           signature={256: expected, 260: 1, TRAP_RECORD: pc, TRAP_RECORD + 4: 0x8000000B}))
+    return result
+
+
+def multiply_reset_case(layout):
+    base = next(iter(layout.signature))
+    left, right, values = M_RESULTS[7]
+    code = constant(31, base) + constant(1, left) + constant(2, right)
+    for operation in range(8):
+        code += [multiply(3, 1, 2, operation), store(3, 31, operation * 4)]
+    code += [jump(0, layout.completion_pc - layout.program_pc - len(code) * 4)]
+    return Case("m_reset_arithmetic", code, signature={base + 4 * index: value for index, value in enumerate(values)},
+                reset=layout.reset, program_pc=layout.program_pc, handler_pc=layout.handler_pc,
+                completion_pc=layout.completion_pc, expected_causes=(), enable_m=True)
+
+
 @dataclass
 class Case:
     name: str
@@ -334,15 +432,20 @@ class Case:
     handler: list[int] | None = None
     program_pc: int = PROGRAM_PC
     handler_pc: int = HANDLER_PC
-    interrupt_schedule: tuple[tuple[str, int, int], ...] = ()
+    interrupt_schedule: tuple[tuple[str, int, int] | tuple[str, int, int, int], ...] = ()
     expected_interrupts: tuple[int, ...] = ()
+    enable_m: bool = False
+    enable_c: bool = False
 
     def words(self):
-        for kind, key, mask in self.interrupt_schedule:
-            if kind not in ("C", "D", "R", "N") or key < 0 or not 0 <= mask <= 7:
+        for entry in self.interrupt_schedule:
+            kind, key, mask, *delay = entry
+            if kind not in ("C", "D", "R", "N", "M") or key < 0 or not 0 <= mask <= 7:
                 raise ValueError("Invalid interrupt schedule")
-            if (kind in ("D", "R") and key > MASK) or (kind == "N" and not key):
+            if (kind in ("D", "R") and key > MASK) or (kind in ("N", "M") and not key):
                 raise ValueError("Invalid interrupt trigger")
+            if (kind == "M" and (len(delay) != 1 or delay[0] < 1)) or (kind != "M" and delay):
+                raise ValueError("Invalid arithmetic interrupt delay")
         for address in (self.reset, self.program_pc, self.handler_pc, self.completion_pc):
             if address % 4 or not 0 <= address <= MASK:
                 raise ValueError("Region base must be a word-aligned 32-bit address")
@@ -415,9 +518,21 @@ def reset_cases(reset):
     return result
 
 
-def cases(reset=0):
+def cases(reset=0, enable_m=False, enable_c=False):
+    compressed = []
+    if enable_c:
+        from compressed_programs import cases as compressed_cases
+        compressed = compressed_cases(reset, enable_m)
+        if reset % 4:
+            return compressed
     if reset:
-        return reset_cases(reset)
+        result = reset_cases(reset)
+        if enable_m:
+            result.append(multiply_reset_case(result[0]))
+        for case in result:
+            case.enable_m = enable_m
+            case.enable_c = enable_c
+        return result + compressed
     a = immediate
     load = lambda rd, base, offset=0: a(rd, base, offset, 0x03, 2)
     result = [
@@ -454,7 +569,10 @@ def cases(reset=0):
     for index, word in enumerate([0, 0xFFFFFFFF, 0x02000033, 0x40001033, 0x02001013,
                                   0x00001067, 0x00003003, 0x00003023, 0x00002063,
                                   0x30001073, 0x02005013, 0x40001013, 0x0000200F]):
-        if word == 0x30001073:
+        if word == 0x02000033 and enable_m:
+            result.append(Case("m_zero_encoding", finish([word, store(0, 0, 256)]),
+                               signature={256: 0}, expected_causes=()))
+        elif word == 0x30001073:
             result.append(Case("csr_mstatus_zero_encoding", [word, store(0, 0, 256),
                 jump(0, COMPLETION_PC - PROGRAM_PC - 8)], expected_causes=()))
         else:
@@ -518,7 +636,14 @@ def cases(reset=0):
                         store(rs2, 31, rng.randrange(16) * 4) if choice == 2 else
                         load(rd, 31, rng.randrange(16) * 4))
         result.append(Case(f"random_{seed}", code + [BREAK]))
-    result += csr_cases() + [nested_case()] + interrupt_cases() + counter_cases()
+    result += csr_cases(enable_m, enable_c) + [nested_case()] + interrupt_cases() + counter_cases()
+    if enable_m:
+        result += multiply_cases()
+    if enable_c:
+        result = [case for case in result if case.name not in
+                  ("jump_misaligned", "jalr_misaligned", "branch_taken_misaligned")]
     for case in result:
         case.reset = reset
-    return result
+        case.enable_m = enable_m
+        case.enable_c = enable_c
+    return result + compressed

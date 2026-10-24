@@ -42,10 +42,20 @@ class InterruptEvent extends Bundle:
   val target = Aligned(UInt(32))
   val cause = Aligned(UInt(32))
 
+class ArithmeticActivity extends Bundle:
+  val start = Aligned(Bool())
+  val resultValid = Aligned(Bool())
+  val finish = Aligned(Bool())
+  val cancel = Aligned(Bool())
+  val pc = Aligned(UInt(32))
+  val value = Aligned(UInt(32))
+
 class Instruction extends Bundle:
   val pc = Aligned(UInt(32))
   val word = Aligned(UInt(32))
+  val length = Aligned(UInt(3))
   val fault = Aligned(Bool())
+  val faultAddress = Aligned(UInt(32))
 
 class Completion extends Bundle:
   val instruction = Aligned(new Instruction)
@@ -102,6 +112,7 @@ class CoreIO(p: Parameters) extends HWBundle(p):
   val data = Aligned(new MemoryPort)
   val retire = Aligned(new Retirement)
   val interrupt = Aligned(new InterruptEvent)
+  val mulDiv = Aligned(new ArithmeticActivity)
   val sleeping = Aligned(Bool())
   val loadUse = Aligned(Bool())
   val forward = Aligned(Bool())

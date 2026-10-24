@@ -32,7 +32,11 @@ def check_inputs(frozen):
 def freeze_design(rtl, root, wrapper, runner):
     manifest_bytes = (rtl / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
-    assert manifest["parameters"] == {"resetVector": 0}, "Formal ROM requires resetVector=0"
+    parameters = manifest["parameters"]
+    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC"}
+            and type(parameters.get("resetVector")) is int and parameters["resetVector"] == 0
+            and type(parameters.get("enableM", False)) is bool
+            and type(parameters.get("enableC", False)) is bool), "Unsupported formal ROM configuration"
     assert manifest["sourceHashes"] == source_hashes(root), "Stale RTL inputs"
     contents = {"manifest.json": manifest_bytes, "test/" + wrapper.name: wrapper.read_bytes(),
                 "test/" + runner.name: runner.read_bytes()}

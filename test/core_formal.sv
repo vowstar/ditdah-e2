@@ -26,6 +26,8 @@ module core_formal(input clock);
   wire [63:0] timeValue = 0;
   wire interrupt_valid, sleeping;
   wire [31:0] interrupt_pc, interrupt_target, interrupt_cause;
+  wire mulDiv_start, mulDiv_resultValid, mulDiv_finish, mulDiv_cancel;
+  wire [31:0] mulDiv_pc, mulDiv_value;
   DitDahE2 dut (.*);
 
   function [31:0] rom(input [31:0] address);

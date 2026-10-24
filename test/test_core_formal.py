@@ -39,6 +39,22 @@ class FrozenDesignTests(unittest.TestCase):
     def freeze(self):
         return freeze_design(self.rtl, self.root, self.wrapper, self.runner)
 
+    def test_formal_configuration_is_explicit(self):
+        path = self.rtl / "manifest.json"
+        manifest = json.loads(path.read_text())
+        for enabled in (False, True):
+            for compressed in (False, True):
+                manifest["parameters"] = {"resetVector": 0, "enableM": enabled, "enableC": compressed}
+                path.write_text(json.dumps(manifest))
+                self.assertEqual(self.freeze()[2]["parameters"], manifest["parameters"])
+        for parameters in ({"resetVector": 4}, {"resetVector": False},
+                           {"resetVector": 0, "enableM": 1},
+                           {"resetVector": 0, "enableC": 1}):
+            manifest["parameters"] = parameters
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(AssertionError, "configuration"):
+                self.freeze()
+
     def test_snapshot_survives_later_source_changes(self):
         manifest, contents, bindings = self.freeze()
         frozen = write_snapshot(self.work / "snapshot", contents)

@@ -11,6 +11,8 @@ module fetch_formal(input clock);
   wire [3:0] memory_request_bits_mask;
   wire [1:0] memory_request_bits_size;
   wire output_bits_fault;
+  wire [2:0] output_bits_length;
+  wire [31:0] output_bits_faultAddress;
   wire formal_active, formal_sent, formal_discarded, formal_buffered;
   wire [31:0] formal_next_pc;
   DitDahE2Fetch dut (.*);
@@ -76,6 +78,8 @@ module fetch_formal(input clock);
         assert(output_bits_pc == expected_pc);
         assert(output_bits_word == expected_word);
         assert(output_bits_fault == expected_fault);
+        assert(output_bits_length == 4);
+        assert(output_bits_faultAddress == expected_pc);
       end
       if (memory_request_valid) begin
         assert(memory_request_bits_address[1:0] == 0);
