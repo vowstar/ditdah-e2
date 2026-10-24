@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 
 MASK = (1 << 32) - 1
+MASK64 = (1 << 64) - 1
+TIME_BASE = 0xFFFFFFF0
 
 
 def signed(value, width):
@@ -35,15 +37,94 @@ class Model:
         self.instruction_fault = instruction_fault
         self.data_fault = data_fault
         self.csrs = {0x300: 0x1800, 0x301: 0x40000100, 0x304: 0,
-                     0x305: reset & ~3, 0x310: 0, 0x340: 0, 0x341: 0,
+                     0x305: reset & ~3, 0x310: 0, 0x320: 0, 0x340: 0, 0x341: 0,
                      0x342: 0, 0x343: 0, 0x344: 0,
                      **dict.fromkeys(range(0xF11, 0xF16), 0)}
+        self.csrs.update(dict.fromkeys((*range(0xB03, 0xB20), *range(0xB83, 0xBA0),
+                                       *range(0x323, 0x340), 0xB00, 0xB80, 0xB02, 0xB82,
+                                       0xC00, 0xC80, 0xC01, 0xC81, 0xC02, 0xC82), 0))
+        self.counters = {0xB00: 0, 0xB02: 0}
+        self.cycle = -1
+        self.time = TIME_BASE
+        self.sleeping = False
+        self.external_clock = False
+        self.edge_inhibit = 0
+        self.retired = False
+        self.counter_writes = {}
+
+    def _begin_cycle(self, cycle, mask):
+        if cycle != self.cycle + 1:
+            raise AssertionError("Missing model clock edge")
+        if self.cycle >= 0:
+            for address, bit in ((0xB00, 0), (0xB02, 2)):
+                value = self.counters[address]
+                if address in self.counter_writes:
+                    high, data = self.counter_writes[address]
+                    upper, lower = divmod(value, 1 << 32)
+                    value = data * (1 << 32) + lower if high else upper * (1 << 32) + data
+                elif not (self.edge_inhibit >> bit) & 1 and (address == 0xB00 or self.retired):
+                    value = (value + 1) & MASK64
+                self.counters[address] = value
+        self.cycle, self.time = cycle, (TIME_BASE + cycle) & MASK64
+        self.csrs[0x344] = sum(((mask >> lane) & 1) << bit for lane, bit in enumerate((3, 7, 11)))
+        self.edge_inhibit = self.csrs[0x320]
+        self.retired = False
+        self.counter_writes = {}
+        if self.csrs[0x344] & self.csrs[0x304]:
+            self.sleeping = False
+
+    def clock(self, cycle, mask=0):
+        self.external_clock = True
+        self._begin_cycle(cycle, mask)
+
+    def read_csr(self, address):
+        if address in (0xB00, 0xB80, 0xC00, 0xC80):
+            value = self.counters[0xB00]
+        elif address in (0xB02, 0xB82, 0xC02, 0xC82):
+            value = self.counters[0xB02]
+        elif address in (0xC01, 0xC81):
+            value = self.time
+        else:
+            return self.csrs[address]
+        return (value >> (32 if address & 0x80 else 0)) & MASK
+
+    def interrupt_cause(self):
+        if self.csrs[0x300] & 8:
+            pending = self.csrs[0x344] & self.csrs[0x304]
+            for bit in (11, 3, 7):
+                if pending & (1 << bit):
+                    return (1 << 31) | bit
+        return None
+
+    def enter_trap(self, pc, cause, value):
+        vector = self.csrs[0x305]
+        target = vector & ~3
+        if cause & (1 << 31) and vector & 3 == 1:
+            target = (target + 4 * (cause & 0x7FFFFFFF)) & MASK
+        self.csrs[0x341], self.csrs[0x342], self.csrs[0x343] = pc, cause, value & MASK
+        self.csrs[0x300] = 0x1800 | ((self.csrs[0x300] & 8) << 4)
+        self.sleeping = False
+        return target
+
+    def interrupt(self):
+        cause = self.interrupt_cause()
+        if cause is None:
+            raise AssertionError("Interrupt without an enabled pending source")
+        pc = self.pc
+        self.pc = self.enter_trap(pc, cause, 0)
+        return pc, self.pc, cause
 
     def write_csr(self, address, value):
-        masks = {0x300: 0x88, 0x301: 0, 0x304: 0, 0x305: 0xFFFFFFFC,
-                 0x310: 0, 0x340: MASK, 0x341: 0xFFFFFFFC,
+        if address in (0xB00, 0xB80, 0xB02, 0xB82):
+            self.counter_writes[address & ~0x80] = (bool(address & 0x80), value & MASK)
+            return
+        if address == 0x305:
+            self.csrs[address] = (value & 0xFFFFFFFC) | int(value & 3 == 1)
+            return
+        masks = {0x300: 0x88, 0x301: 0, 0x304: 0x888,
+                 0x310: 0, 0x320: 5, 0x340: MASK, 0x341: 0xFFFFFFFC,
                  0x342: MASK, 0x343: MASK, 0x344: 0}
-        mask = masks[address]
+        mask = masks.get(address, 0)
         self.csrs[address] = (self.csrs[address] & ~mask) | (value & mask)
 
     def word(self, address):
@@ -51,15 +132,17 @@ class Model:
                    for lane in range(4))
 
     def step(self):
+        if not self.external_clock:
+            self._begin_cycle(self.cycle + 1, 0)
+        if self.sleeping:
+            raise AssertionError("Retirement while WFI waits")
         pc = self.pc
         insn = self.word(pc)
         result = Event(pc, insn, (pc + 4) & MASK)
 
         def fault(cause, value):
             result.trap, result.cause, result.tval = True, cause, value & MASK
-            result.next_pc, result.rd, result.value = self.csrs[0x305], 0, 0
-            self.csrs[0x341], self.csrs[0x342], self.csrs[0x343] = pc, cause, value & MASK
-            self.csrs[0x300] = 0x1800 | ((self.csrs[0x300] & 8) << 4)
+            result.next_pc, result.rd, result.value = self.enter_trap(pc, cause, value), 0, 0
 
         op, rd, f3 = insn & 127, (insn >> 7) & 31, (insn >> 12) & 7
         a, b = self.registers[(insn >> 15) & 31], self.registers[(insn >> 20) & 31]
@@ -133,7 +216,7 @@ class Model:
             if address not in self.csrs or (write and address >> 10 == 3):
                 fault(2, insn)
             else:
-                old = self.csrs[address]
+                old = self.read_csr(address)
                 operand = source if f3 >= 5 else a
                 updated = operand if f3 & 3 == 1 else old | operand if f3 & 3 == 2 else old & ~operand
                 if write:
@@ -143,14 +226,17 @@ class Model:
             result.instruction = "mret"
             result.next_pc = self.csrs[0x341]
             self.csrs[0x300] = 0x1880 | ((self.csrs[0x300] >> 4) & 8)
+        elif insn == 0x10500073:
+            result.instruction = "wfi"
+            self.sleeping = not bool(self.csrs[0x344] & self.csrs[0x304])
         elif insn == 0x00100073:
             result.instruction = "ebreak"
             fault(3, pc)
         elif insn == 0x00000073:
             result.instruction = "ecall"
             fault(11, 0)
-        elif op == 0x0F and f3 == 0:
-            result.instruction = "fence"
+        elif op == 0x0F and f3 in (0, 1):
+            result.instruction = "fence.i" if f3 else "fence"
         else:
             fault(2, insn)
         if result.rd:
@@ -158,4 +244,5 @@ class Model:
         else:
             result.value = 0
         self.pc = result.next_pc
+        self.retired = not result.trap
         return result

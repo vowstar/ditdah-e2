@@ -8,6 +8,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 struct Request {
     uint32_t address, data, mask, size;
@@ -26,9 +27,17 @@ struct Port {
     bool fault = false;
 };
 
+struct InputEvent {
+    char trigger;
+    uint64_t key;
+    unsigned mask;
+    bool fired = false;
+};
+
 int main(int argc, char **argv) {
     try {
-        if (argc != 8) throw std::runtime_error("Expected image seed delay instruction-fault data-fault limit completion-pc");
+        if (argc != 8 && argc != 9)
+            throw std::runtime_error("Expected image seed delay instruction-fault data-fault limit completion-pc and optional input schedule");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
@@ -44,23 +53,55 @@ int main(int argc, char **argv) {
         const uint64_t dataFault = std::stoull(argv[5]);
         const auto limit = std::stoul(argv[6]);
         const uint32_t completionPc = std::stoul(argv[7]);
+        std::vector<InputEvent> schedule;
+        if (argc == 9 && std::string(argv[8]) != "-") {
+            std::ifstream events(argv[8]);
+            if (!events) throw std::runtime_error("Cannot open input schedule");
+            InputEvent event{};
+            while (events >> event.trigger) {
+                if (!(events >> event.key >> event.mask)) throw std::runtime_error("Malformed input schedule");
+                if (std::string("CDRN").find(event.trigger) == std::string::npos || event.mask > 7 ||
+                    ((event.trigger == 'D' || event.trigger == 'R') && event.key > UINT32_MAX) ||
+                    (event.trigger == 'N' && !event.key))
+                    throw std::runtime_error("Invalid input schedule");
+                schedule.push_back(event);
+            }
+            if (!events.eof()) throw std::runtime_error("Malformed input schedule");
+        }
+        unsigned pending = 0;
+        auto apply = [&](char trigger, uint64_t key) {
+            for (auto &event : schedule) {
+                if (!event.fired && event.trigger == trigger && event.key == key) {
+                    pending = event.mask;
+                    event.fired = true;
+                }
+            }
+        };
         Port instruction, data;
         dut.reset = 1;
         dut.instruction_request_ready = dut.data_request_ready = 0;
         dut.instruction_response_valid = dut.data_response_valid = 0;
         dut.instruction_response_bits_data = dut.data_response_bits_data = 0;
         dut.instruction_response_bits_fault = dut.data_response_bits_fault = 0;
+        dut.interrupts_software = dut.interrupts_timer = dut.interrupts_external = 0;
+        dut.timeValue = 0xfffffff0ULL;
         for (int edge = 0; edge != 4; ++edge) {
             dut.clock = edge & 1; dut.eval();
         }
         dut.reset = 0;
         uint64_t retired = 0, traps = 0, forwards = 0, loadUse = 0, redirects = 0;
         uint64_t memoryWait = 0, blockedRedirect = 0, drainAfterCompletion = 0, quietCycles = 0;
+        uint64_t interrupts = 0, sleepCycles = 0;
         bool finished = false, completing = false;
         bool finalOfferValid = false;
         Request finalOffer{};
         for (uint64_t cycle = 0; cycle < limit; ++cycle) {
             dut.clock = 0;
+            apply('C', cycle);
+            dut.interrupts_software = pending & 1;
+            dut.interrupts_timer = (pending >> 1) & 1;
+            dut.interrupts_external = (pending >> 2) & 1;
+            dut.timeValue = 0xfffffff0ULL + cycle;
             dut.instruction_request_ready = !completing && !instruction.active && (!delay || random() % 3 == 0);
             dut.data_request_ready = !data.active && (!delay || random() % 3 == 0);
             dut.instruction_response_valid = instruction.active && cycle >= instruction.due;
@@ -70,10 +111,12 @@ int main(int argc, char **argv) {
             dut.data_response_bits_data = data.data;
             dut.data_response_bits_fault = data.fault;
             dut.eval();
+            std::cout << "T " << cycle << ' ' << pending << ' ' << dut.timeValue << '\n';
             if (completing && dut.data_request_valid)
                 throw std::runtime_error("Data request after program completion");
             forwards += dut.forward; loadUse += dut.loadUse; redirects += dut.redirect;
             memoryWait += dut.memoryWait;
+            sleepCycles += dut.sleeping;
             blockedRedirect += dut.redirect && dut.instruction_request_valid && !dut.instruction_request_ready;
             drainAfterCompletion += completing && dut.instruction_response_valid && dut.instruction_response_ready;
             auto observe = [&](Port &port, char name, bool valid, bool ready, Request request,
@@ -105,6 +148,7 @@ int main(int argc, char **argv) {
                     port.due = cycle + 1 + (delay ? random() % (name == 'I' ? 3 : delay) : 0);
                     std::cout << "Q " << cycle << ' ' << name << ' ' << request.address << ' '
                               << request.write << ' ' << request.data << ' ' << request.mask << ' ' << request.size << '\n';
+                    if (name == 'D') apply('D', request.address);
                 }
             };
             observe(instruction, 'I', dut.instruction_request_valid, dut.instruction_request_ready,
@@ -116,17 +160,25 @@ int main(int argc, char **argv) {
                      dut.data_request_bits_mask, dut.data_request_bits_size, bool(dut.data_request_bits_write)},
                     dut.data_response_valid, dut.data_response_ready, dataFault);
             if (dut.retire_valid) {
+                if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
                 retired += !dut.retire_trap; traps += dut.retire_trap;
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '
                           << dut.retire_nextPc << ' ' << unsigned(dut.retire_rd) << ' '
                           << unsigned(dut.retire_writes) << ' ' << dut.retire_value << ' '
                           << unsigned(dut.retire_trap) << ' ' << unsigned(dut.retire_cause) << ' '
                           << dut.retire_tval << '\n';
+                apply('R', dut.retire_pc);
                 if (!dut.retire_trap && dut.retire_pc == completionPc) {
                     if (dut.retire_word != 0x0000006f || dut.retire_nextPc != completionPc)
                         throw std::runtime_error("Invalid program completion instruction");
                     completing = true;
                 }
+            }
+            if (dut.interrupt_valid) {
+                ++interrupts;
+                std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target << ' '
+                          << dut.interrupt_cause << '\n';
+                apply('N', interrupts);
             }
             dut.clock = 1; dut.eval();
             if (completing && !instruction.active && !data.active) {
@@ -150,7 +202,8 @@ int main(int argc, char **argv) {
                 }
                 std::cout << "C " << cycle + 1 << ' ' << retired << ' ' << traps << ' '
                           << forwards << ' ' << loadUse << ' ' << redirects << ' '
-                          << memoryWait << ' ' << blockedRedirect << ' ' << drainAfterCompletion << '\n';
+                          << memoryWait << ' ' << blockedRedirect << ' ' << drainAfterCompletion << ' '
+                          << interrupts << ' ' << sleepCycles << '\n';
                 finished = true;
                 break;
             }

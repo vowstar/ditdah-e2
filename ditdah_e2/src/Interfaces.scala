@@ -31,6 +31,17 @@ class MemoryPort extends Bundle:
   val request = Aligned(new Channel(new MemoryRequest))
   val response = Flipped(new Channel(new MemoryResponse))
 
+class InterruptLevels extends Bundle:
+  val software = Aligned(Bool())
+  val timer = Aligned(Bool())
+  val external = Aligned(Bool())
+
+class InterruptEvent extends Bundle:
+  val valid = Aligned(Bool())
+  val pc = Aligned(UInt(32))
+  val target = Aligned(UInt(32))
+  val cause = Aligned(UInt(32))
+
 class Instruction extends Bundle:
   val pc = Aligned(UInt(32))
   val word = Aligned(UInt(32))
@@ -54,6 +65,8 @@ class Completion extends Bundle:
   val csrOperand = Aligned(UInt(32))
   val csrWrite = Aligned(Bool())
   val mret = Aligned(Bool())
+  val wfi = Aligned(Bool())
+  val fenceI = Aligned(Bool())
   val trap = Aligned(Bool())
   val cause = Aligned(UInt(32))
   val tval = Aligned(UInt(32))
@@ -83,9 +96,13 @@ class FetchIO(p: Parameters) extends HWBundle(p):
 class CoreIO(p: Parameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
+  val interrupts = Flipped(new InterruptLevels)
+  val timeValue = Flipped(UInt(64))
   val instruction = Aligned(new MemoryPort)
   val data = Aligned(new MemoryPort)
   val retire = Aligned(new Retirement)
+  val interrupt = Aligned(new InterruptEvent)
+  val sleeping = Aligned(Bool())
   val loadUse = Aligned(Bool())
   val forward = Aligned(Bool())
   val redirect = Aligned(Bool())

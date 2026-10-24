@@ -26,6 +26,14 @@ Completed stores must be visible to later instruction fetches.
 Cold reset is synchronous and active high. Apply it only with no offered or outstanding peer requests.
 It clears integer registers and protocol state. Core reset does not initialize memory contents.
 
+FENCE.I drains fetch and restarts at its saved next PC.
+
 `misa` is fixed by configuration.
+HPM state and `mstatush` read zero and ignore writes. Identification registers are read-only zero.
+
+Interrupt inputs are synchronous and require external synchronization.
+Interrupt priority is external, software, then timer. Older synchronous exceptions complete first.
+The platform supplies coherent 64-bit time.
 
 The retirement port reports completed instructions and synchronous exceptions.
+A separate interrupt event carries the interrupted PC, target and cause.

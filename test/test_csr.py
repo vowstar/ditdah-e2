@@ -4,50 +4,93 @@
 
 import unittest
 
-from model import Model
+from copy import deepcopy
+
+from model import Model, TIME_BASE
 from programs import Case, PROGRAM_PC, TRAP_RECORD, cases, csr, immediate
-from verify import check, negative_controls
+from verify import InputSchedule, check, negative_controls
 
 
 def execute(case):
     model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault)
     events = []
-    for _ in range(10000):
+    schedule = InputSchedule(case.interrupt_schedule)
+    interrupts = []
+    for cycle in range(10000):
+        model.clock(cycle, schedule.clock(cycle))
+        if model.interrupt_cause() is not None:
+            interrupts.append(model.interrupt()[2])
+            schedule.event("N", len(interrupts))
+            continue
+        if model.sleeping:
+            continue
         event = model.step()
         events.append(event)
+        if event.memory:
+            schedule.event("D", event.memory[0])
+        schedule.event("R", event.pc)
         if event.pc == case.completion_pc:
+            if tuple(interrupts) != case.expected_interrupts:
+                raise AssertionError("Unexpected model interrupt sequence")
             return model, events
     raise AssertionError(f"Model did not complete {case.name}")
 
 
 def trace(case):
     model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault)
-    lines, cycle, traps, retired = [], 0, 0, 0
+    lines, cycle, traps, retired, interrupts, sleep_cycles = [], -1, 0, 0, 0, 0
+    schedule = InputSchedule(case.interrupt_schedule)
+
+    def clock():
+        nonlocal cycle, sleep_cycles
+        cycle += 1
+        mask = schedule.clock(cycle)
+        lines.append(f"T {cycle} {mask} {TIME_BASE + cycle}")
+        sleep_cycles += model.sleeping
+        model.clock(cycle, mask)
+
+    clock()
     for _ in range(10000):
+        if model.interrupt_cause() is not None:
+            pc, target, cause = model.interrupt()
+            lines.append(f"N {cycle} {pc} {target} {cause}")
+            interrupts += 1
+            schedule.event("N", interrupts)
+            clock()
+            continue
+        if model.sleeping:
+            clock()
+            continue
         pc = model.pc
         word = model.word(pc)
-        lines += [f"Q {cycle} I {pc} 0 0 0 2",
-                  f"S {cycle + 1} I {word} {int(pc == case.instruction_fault)}"]
-        cycle += 2
-        event = model.step()
-        if event.memory:
-            address, write, data, mask, size = event.memory
+        lines.append(f"Q {cycle} I {pc} 0 0 0 2")
+        clock()
+        lines.append(f"S {cycle} I {word} {int(pc == case.instruction_fault)}")
+        clock()
+        preview = deepcopy(model).step()
+        if preview.memory:
+            address, write, data, mask, size = preview.memory
             lines.append(f"Q {cycle} D {address} {write} {data} {mask} {size}")
-            cycle += 1
+            schedule.event("D", address)
+            clock()
             lines.append(f"S {cycle} D {model.word(address & ~3)} {int(address == case.data_fault)}")
+        event = model.step()
         lines.append(f"R {cycle} {event.pc} {event.word} {event.next_pc} {event.rd} "
                      f"{int(bool(event.rd))} {event.value} {int(event.trap)} {event.cause} {event.tval}")
         traps += event.trap
         retired += not event.trap
-        cycle += 1
+        schedule.event("R", event.pc)
         if event.pc == case.completion_pc:
             break
+        clock()
     else:
         raise AssertionError("Synthetic trace did not complete")
-    lines += [f"O {sample} 1 {(case.completion_pc + 4) & 0xFFFFFFFF} 0 0 0 2"
-              for sample in range(cycle - 1, cycle + 7)]
-    lines += [f"H {cycle + 6} {(case.completion_pc + 4) & 0xFFFFFFFF} 0 0 0 2",
-              f"C {cycle + 7} {retired} {traps} 0 0 0 0 0 0"]
+    for index in range(8):
+        if index:
+            clock()
+        lines.append(f"O {cycle} 1 {(case.completion_pc + 4) & 0xFFFFFFFF} 0 0 0 2")
+    lines += [f"H {cycle} {(case.completion_pc + 4) & 0xFFFFFFFF} 0 0 0 2",
+              f"C {cycle + 1} {retired} {traps} 0 0 0 0 0 0 {interrupts} {sleep_cycles}"]
     lines += [f"W {address} {model.word(address)}" for address in sorted({a & ~3 for a in model.memory})]
     return "\n".join(lines)
 
@@ -143,7 +186,7 @@ class CompletionTests(unittest.TestCase):
 
     def test_completion_and_semantic_negative_controls(self):
         self.assertEqual(check(self.case, self.text)["traps"], 1)
-        self.assertEqual(negative_controls(self.case, self.text), 9)
+        self.assertEqual(negative_controls(self.case, self.text), 11)
 
     def test_missing_completion_retirement(self):
         text = "\n".join(line for line in self.text.splitlines()
@@ -154,6 +197,13 @@ class CompletionTests(unittest.TestCase):
 
     def test_short_observation_window(self):
         lines = self.text.splitlines()
+        final_cycle = max(int(line.split()[1]) for line in lines if line.startswith("T "))
+        lines = [line for line in lines if not (line.startswith(("T ", "O "))
+                 and int(line.split()[1]) == final_cycle)]
+        held = next(i for i, line in enumerate(lines) if line.startswith("H "))
+        held_fields = lines[held].split()
+        held_fields[1] = str(final_cycle - 1)
+        lines[held] = " ".join(held_fields)
         index = next(i for i, line in enumerate(lines) if line.startswith("C "))
         fields = lines[index].split()
         fields[1] = str(int(fields[1]) - 1)

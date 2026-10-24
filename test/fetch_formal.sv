@@ -70,7 +70,7 @@ module fetch_formal(input clock);
       assert(!memory_request_valid || !outstanding);
       if (outstanding) assert(memory_request_bits_address == accepted_pc);
       assert(!memory_response_ready || outstanding);
-      assert(!idle || (!outstanding && !expected));
+      assert(idle == (!memory_request_valid && !outstanding && !expected));
       assert(output_valid == (expected && !flush));
       if (expected) begin
         assert(output_bits_pc == expected_pc);

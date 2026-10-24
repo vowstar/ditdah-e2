@@ -30,9 +30,11 @@
             "$DITDAH_E2_SOURCE" -- "$@"
         '';
         maven = pkgs.mkMavenRepository { lockFile = "${zaozi}/mtf.lock.json"; };
+        crossCompiler = pkgs.pkgsCross.riscv32-embedded.stdenv.cc;
+        softwareTools = [ crossCompiler crossCompiler.bintools pkgs.python3 ];
         tools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install
           pkgs.verilator pkgs.iverilog pkgs.yosys pkgs.sby pkgs.z3 pkgs.reuse
-          pkgs.python3 pkgs.gnumake maven ];
+          pkgs.python3 pkgs.gnumake maven ] ++ softwareTools;
       in {
         packages.default = pkgs.runCommand "ditdah-e2-rtl" {
           nativeBuildInputs = tools;
@@ -45,6 +47,16 @@
           chmod -R u+w .
           export COURSIER_CACHE="$NIX_BUILD_TOP/coursier-cache"
           python3 scripts/build_rtl.py --output "$out"
+        '';
+        packages.software = pkgs.runCommand "ditdah-e2-software" {
+          nativeBuildInputs = softwareTools;
+        } ''
+          cp -R ${./software} software
+          mkdir scripts test
+          cp ${./scripts/build_software.py} scripts/build_software.py
+          cp ${./test/elf.py} test/elf.py
+          cp ${./flake.lock} flake.lock
+          python3 scripts/build_software.py --output "$out"
         '';
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = tools;

@@ -21,12 +21,23 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val csr = Csr.instantiate(p)
     csr.io.clock := io.clock
     csr.io.reset := io.reset
+    csr.io.interrupts :<= io.interrupts
+    csr.io.timeValue := io.timeValue
     val xValid = RegInit(false.B)
     val x = Reg(new Instruction)
     val mValid = RegInit(false.B)
     val m = Reg(new Completion)
     val sent = RegInit(false.B)
+    val architecturalPc = RegInit(BigInt(p.resetVector).U(32))
+    val sleeping = RegInit(false.B)
     val registers = Seq.fill(31)(RegInit(0.U(32)))
+
+    val localWake = csr.io.interruptPending =/= 0.U(12)
+    val eligibleInterrupt = localWake & csr.io.interruptsEnabled
+    val interrupt = !mValid & eligibleInterrupt
+    val interruptCause = csr.io.interruptPending.asBits.bit(11).?(0x8000000bL.U(32),
+      csr.io.interruptPending.asBits.bit(3).?(0x80000003L.U(32), 0x80000007L.U(32)))
+    val waking = sleeping & localWake
 
     val memory = m.load | m.store
     io.data.request.valid := mValid & memory & !m.trap & !sent
@@ -40,11 +51,14 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.data.request.bits.size := m.size
     io.data.response.ready := mValid & memory & sent
     val response = io.data.response.valid & io.data.response.ready
-    val complete = mValid & (m.trap | !memory | response)
+    val synchronizing = mValid & m.fenceI & !m.trap
+    val complete = mValid & (m.trap | (!memory & (!m.fenceI | fetch.io.idle)) | response)
     val csrError = m.csr & csr.io.illegal
     val failed = m.trap | csrError | (response & io.data.response.bits.fault)
     val trap = complete & failed
     val returning = complete & m.mret & !failed
+    val waiting = complete & m.wfi & !failed
+    val synchronized = complete & m.fenceI & !failed
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
     val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
     csr.io.address := m.csrAddress
@@ -52,11 +66,17 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.io.operation := m.csrOperation
     csr.io.writeRequested := m.csrWrite
     csr.io.commit := complete & m.csr & !failed
-    csr.io.trap := trap
-    csr.io.trapPc := m.instruction.pc
-    csr.io.cause := finalCause
-    csr.io.tval := finalTval
+    csr.io.trap := trap | interrupt
+    csr.io.trapPc := interrupt.?(architecturalPc, m.instruction.pc)
+    csr.io.cause := interrupt.?(interruptCause, finalCause)
+    csr.io.tval := interrupt.?(0.U(32), finalTval)
     csr.io.mret := returning
+    csr.io.retire := complete & !failed
+    io.interrupt.valid := interrupt
+    io.interrupt.pc := architecturalPc
+    io.interrupt.target := csr.io.trapTarget
+    io.interrupt.cause := interruptCause
+    io.sleeping := sleeping
     val loaded = (io.data.response.bits.data >> shift).asBits
     val loadValue = Wire(UInt(32))
     loadValue := loaded.asUInt
@@ -77,6 +97,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.retire.trap := trap
     io.retire.cause := finalCause
     io.retire.tval := finalTval
+    when(complete) { architecturalPc := io.retire.nextPc }
+    when(interrupt) { architecturalPc := csr.io.trapTarget }
     for i <- 1 to 31 do
       when(io.retire.writes & (m.rd === i.U(5))) { registers(i - 1) := writeback }
 
@@ -102,9 +124,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isBreak = x.word === 0x00100073.U(32)
     val isCall = x.word === 0x00000073.U(32)
     val isFence = (opcode === 0x0f.B(7)) & (funct3 === 0.B(3))
+    val isFenceI = (opcode === 0x0f.B(7)) & (funct3 === 1.B(3))
     val isCsr = (opcode === 0x73.B(7)) & (funct3.bits(1, 0) =/= 0.B(2))
     val isMret = x.word === 0x30200073.U(32)
-    val legal = isImmediate | isRegister | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isCsr | isMret
+    val isWfi = x.word === 0x10500073.U(32)
+    val legal = isImmediate | isRegister | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isFenceI | isCsr | isMret | isWfi
     val use1 = isImmediate | isRegister | isLoad | isStore | isBranch | isJalr | (isCsr & !funct3.bit(2))
     val use2 = isRegister | isStore | isBranch
     val a = Wire(UInt(32))
@@ -120,8 +144,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(match1 & !m.load) { a := m.value }
     when(match2 & !m.load) { b := m.value }
     val loadUse = m.load & (match1 | match2)
-    val serialM = mValid & (m.csr | m.mret)
-    val advance = xValid & (!mValid | complete) & !loadUse & !trap & !serialM & (!(isCsr | isMret) | !mValid)
+    val serialM = mValid & (m.csr | m.mret | m.wfi | m.fenceI)
+    val advance = xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
+      (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping
     io.loadUse := xValid & loadUse
     io.forward := advance & !m.load & (match1 | match2)
     io.memoryWait := mValid & memory & !complete
@@ -173,11 +198,12 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(isJal | isJalr) { value := sequential }
 
     val branchRedirect = advance & jump & !fault
-    val redirect = trap | returning | branchRedirect
+    val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect
     fetch.io.redirect := redirect
-    fetch.io.target := trap.?(csr.io.trapTarget, returning.?(csr.io.returnPc, target))
-    fetch.io.pause := trap
-    fetch.io.output.ready := (!xValid | advance) & !redirect
+    fetch.io.target := (trap | interrupt).?(csr.io.trapTarget,
+      returning.?(csr.io.returnPc, (waiting | synchronized).?(m.nextPc, waking.?(architecturalPc, target))))
+    fetch.io.pause := trap | interrupt | sleeping | waiting | synchronizing | (advance & isFenceI & !fault)
+    fetch.io.output.ready := (!xValid | advance) & !redirect & !sleeping & !eligibleInterrupt
     io.redirect := redirect
     when(complete) { mValid := false.B }
     when(io.data.request.valid & io.data.request.ready) { sent := true.B }
@@ -202,6 +228,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.csrOperand := funct3.bit(2).?((0.B(27) ## bits.bits(19, 15)).asUInt, a)
       m.csrWrite := (funct3.bits(1, 0) === 1.B(2)) | (rs1 =/= 0.U(5))
       m.mret := isMret
+      m.wfi := isWfi
+      m.fenceI := isFenceI
       m.trap := fault
       m.cause := cause
       m.tval := tval
@@ -210,4 +238,6 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       xValid := true.B
       x :<= fetch.io.output.bits
     }
-    when(trap | returning) { xValid := false.B; mValid := false.B }
+    when(waiting) { sleeping := !localWake }
+    when(waking | trap | interrupt) { sleeping := false.B }
+    when(trap | interrupt | returning | waiting | waking | synchronized) { xValid := false.B; mValid := false.B }

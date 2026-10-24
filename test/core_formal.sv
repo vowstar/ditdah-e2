@@ -22,6 +22,10 @@ module core_formal(input clock);
   wire [31:0] retire_pc, retire_word, retire_nextPc, retire_value, retire_cause, retire_tval;
   wire [4:0] retire_rd;
   wire loadUse, forward, redirect, memoryWait;
+  wire interrupts_software = 0, interrupts_timer = 0, interrupts_external = 0;
+  wire [63:0] timeValue = 0;
+  wire interrupt_valid, sleeping;
+  wire [31:0] interrupt_pc, interrupt_target, interrupt_cause;
   DitDahE2 dut (.*);
 
   function [31:0] rom(input [31:0] address);
@@ -61,6 +65,14 @@ module core_formal(input clock);
   wire data_request = data_request_valid && data_request_ready;
   wire data_response = data_response_valid && data_response_ready;
 
+`ifdef REACHABILITY
+  always @(posedge clock) begin
+    assume(accept_instruction && accept_data);
+    assume(release_instruction == (instruction_address != 16 || data_busy));
+    assume(release_data == (data_age >= 6));
+  end
+`endif
+
   reg past_valid = 0, saw_request = 0, saw_fault = 0, saw_younger = 0, delayed_younger = 0;
   reg [1:0] younger_age = 0;
   reg [3:0] event_index = 0;
@@ -97,6 +109,7 @@ module core_formal(input clock);
       younger_age <= 0;
       event_index <= 0;
     end else begin
+      assert(!interrupt_valid && !sleeping);
       if (instruction_request) begin
         assert(!instruction_busy);
         instruction_busy <= 1;

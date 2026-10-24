@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Reject malformed or changed architectural signatures."""
+
+import unittest
+import struct
+import sys
+from pathlib import Path
+
+from isa_checks import compare_signatures, execution_case, normalize_elf, signature_words
+
+
+class SignatureTests(unittest.TestCase):
+    def test_current_execution_checker_contract(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from verify import check
+        lines = []
+        for cycle in range(8):
+            lines.append(f'T {cycle} 0 {0xFFFFFFF0 + cycle}')
+            if cycle == 0:
+                lines.append('R 0 0 111 0 0 0 0 0 0 0')
+            lines.append(f'O {cycle} 0 0 0 0 0 2')
+        lines += ['C 8 1 0 0 0 0 0 0 0 0 0', 'W 0 111']
+        result = check(execution_case({0: 111}, 0, 0), '\n'.join(lines))
+        self.assertEqual(result['retired'], 1)
+        self.assertEqual(result['interrupts'], 0)
+
+    def test_rvc_metadata(self):
+        data = bytearray(88)
+        data[:7] = b'\x7fELF\x01\x01\x01'
+        struct.pack_into('<I', data, 28, 52)
+        struct.pack_into('<I', data, 36, 1)
+        struct.pack_into('<HH', data, 42, 32, 1)
+        struct.pack_into('<8I', data, 52, 1, 84, 0x80000000, 0x80000000, 4, 4, 5, 4)
+        struct.pack_into('<I', data, 84, 0x13)
+        normalized = normalize_elf(bytes(data))
+        self.assertEqual(normalized[36:40], b'\0\0\0\0')
+        self.assertEqual(normalized[:36] + normalized[40:], data[:36] + data[40:])
+        struct.pack_into('<I', data, 84, 0x00010001)
+        with self.assertRaisesRegex(ValueError, 'non-32-bit encoding'):
+            normalize_elf(bytes(data))
+        struct.pack_into('<I', data, 84, 0x0000001f)
+        with self.assertRaisesRegex(ValueError, 'non-32-bit encoding'):
+            normalize_elf(bytes(data))
+        struct.pack_into('<I', data, 68, 2)
+        with self.assertRaisesRegex(ValueError, 'not word aligned'):
+            normalize_elf(bytes(data))
+        struct.pack_into('<I', data, 36, 3)
+        with self.assertRaisesRegex(ValueError, 'Unsupported ELF flags'):
+            normalize_elf(bytes(data))
+
+    def test_signature_format(self):
+        self.assertEqual(signature_words('12345678\nabcdef01\n'), (0x12345678, 0xabcdef01))
+        for text in ('', '0\n', '1234567g\n', '123456789\n', '12345678\n\n'):
+            with self.assertRaises(ValueError):
+                signature_words(text)
+
+    def test_changed_signature(self):
+        compare_signatures('12345678\n', '12345678\n')
+        with self.assertRaisesRegex(ValueError, 'Architectural signature mismatch'):
+            compare_signatures('12345678\n', '12345679\n')
+        with self.assertRaisesRegex(ValueError, 'Architectural signature mismatch'):
+            compare_signatures('12345678\n', '12345678\n00000000\n')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -16,7 +16,7 @@ INSTRUCTIONS = ["lui", "auipc", "jal", "jalr", "beq", "bne", "blt", "bge", "bltu
                 "lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw", "addi", "slti", "sltiu",
                 "xori", "ori", "andi", "slli", "srli", "srai", "add", "sub", "sll", "slt",
                 "sltu", "xor", "srl", "sra", "or", "and", "fence", "ecall", "ebreak",
-                "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "mret"]
+                "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "mret", "wfi", "fence.i"]
 
 
 def configuration(value):
@@ -68,7 +68,8 @@ def main():
         manifest = {
             "parameters": params, "top": "DitDahE2", "isaComplete": False,
             "instructions": INSTRUCTIONS, "privilegedArchitecture": False,
-            "machineTrapHandling": True, "extensions": ["I", "Zicsr"],
+            "machineTrapHandling": True, "extensions": ["I", "Zicsr", "Zicntr", "Zifencei"],
+            "machineInterrupts": ["software", "timer", "external"],
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},
             "firtool": subprocess.check_output(["firtool", "--version"], text=True).strip(),

@@ -29,6 +29,7 @@ def jump(rd, offset):
 
 BREAK = 0x00100073
 MRET = 0x30200073
+WFI = 0x10500073
 PROGRAM_PC = 0x1000
 HANDLER_PC = 0x2000
 COMPLETION_PC = 0x3000
@@ -71,9 +72,9 @@ def csr_cases():
         dict(zip(range(256, 284, 4), (31, 31, 31, 31, 0, 7, 0)))))
     addresses = (0x300, 0x301, 0x304, 0x305, 0x310, 0x340, 0x341, 0x342, 0x343, 0x344)
     expected = ((0x1800, 0x40000100, 0, 0, 0, 0, 0, 0, 0, 0),
-                (0x1888, 0x40000100, 0, 0xFFFFFFFC, 0, 0xFFFFFFFF,
+                (0x1888, 0x40000100, 0x888, 0xFFFFFFFC, 0, 0xFFFFFFFF,
                  0xFFFFFFFC, 0xFFFFFFFF, 0xFFFFFFFF, 0),
-                (0x1880, 0x40000100, 0, 0x5A4, 0, 0x5A5, 0x5A4, 0x5A5, 0x5A5, 0))
+                (0x1880, 0x40000100, 0x80, 0x5A5, 0, 0x5A5, 0x5A4, 0x5A5, 0x5A5, 0))
     for value, values in zip((0, -1, 0x5A5), expected):
         code = [immediate(1, 0, value)]
         for index, address in enumerate(addresses):
@@ -90,7 +91,7 @@ def csr_cases():
         result.append(Case(f"csr_readonly_write_{operation}", [word, store(2, 0, 256)],
                            signature={256: 0, TRAP_RECORD: PROGRAM_PC,
                                       TRAP_RECORD + 4: 2, TRAP_RECORD + 8: word}, expected_causes=(2,)))
-    for address in (0x302, 0x306, 0xB00, 0xC00, 0x7B0):
+    for address in (0x302, 0x306, 0xB01, 0xC03, 0x7B0):
         word = csr(1, address)
         result.append(Case(f"csr_unimplemented_{address:x}", [word],
                            signature={TRAP_RECORD + 8: word}, expected_causes=(2,)))
@@ -150,6 +151,175 @@ def nested_case():
     return Case("nested_trap_return", code, signature=signature, handler=handler, expected_causes=(11, 3))
 
 
+def finish(code):
+    return code + [jump(0, COMPLETION_PC - PROGRAM_PC - len(code) * 4)]
+
+
+def interrupt_cases():
+    code = constant(1, 1 << 11) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6),
+                                  immediate(2, 0, 99), store(2, 0, 256)]
+    result = [Case("irq_external", finish(code), expected_causes=(),
+                   interrupt_schedule=(("C", 0, 4), ("N", 1, 0)), expected_interrupts=(0x8000000B,),
+                   signature={256: 0, TRAP_RECORD: PROGRAM_PC + 16,
+                              TRAP_RECORD + 4: 0x8000000B, TRAP_RECORD + 8: 0, TRAP_RECORD + 12: 0x1880})]
+    code = [immediate(1, 0, 128), csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6), WFI]
+    result.append(Case("wfi_timer", finish(code), expected_causes=(),
+                       interrupt_schedule=(("R", PROGRAM_PC + 12, 2), ("N", 1, 0)),
+                       expected_interrupts=(0x80000007,),
+                       signature={TRAP_RECORD: PROGRAM_PC + 16, TRAP_RECORD + 4: 0x80000007}))
+    code = [immediate(1, 0, 128), csr(0, 0x304, 1, 1), WFI,
+            csr(2, 0x344), store(2, 0, 256), csr(3, 0x300), store(3, 0, 260)]
+    result.append(Case("wfi_local_wake", finish(code), expected_causes=(),
+                       interrupt_schedule=(("R", PROGRAM_PC + 8, 2),), signature={256: 128, 260: 0x1800}))
+    for clear_global in (True, False):
+        clear = csr(0, 0x300, 8, 7) if clear_global else csr(0, 0x304, 0, 1)
+        code = constant(1, 1 << 11) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6), clear,
+            WFI if clear_global else immediate(0, 0, 0), immediate(2, 0, 77), store(2, 0, 256),
+            csr(3, 0x300), store(3, 0, 260), csr(4, 0x304), store(4, 0, 264)]
+        result.append(Case(f"irq_disable_{'global' if clear_global else 'source'}", finish(code),
+            expected_causes=(), interrupt_schedule=(("R", PROGRAM_PC + 16, 4),),
+            signature={256: 77, 260: 0x1800 if clear_global else 0x1808, 264: 0x800 if clear_global else 0}))
+    for pending in range(8):
+        for enabled in range(8):
+            for global_enable in range(2):
+                pending_bits = sum(((pending >> lane) & 1) << bit for lane, bit in enumerate((3, 7, 11)))
+                enable_bits = sum(((enabled >> lane) & 1) << bit for lane, bit in enumerate((3, 7, 11)))
+                code = constant(1, enable_bits) + [csr(0, 0x304, 1, 1), csr(2, 0x344), store(2, 0, 256),
+                    csr(3, 0x304), store(3, 0, 260), csr(0, 0x300, global_enable * 8, 5),
+                    immediate(4, 0, 77), store(4, 0, 264)]
+                active = pending & enabled if global_enable else 0
+                cause = 0x8000000B if active & 4 else 0x80000003 if active & 1 else 0x80000007
+                signature = {256: pending_bits, 260: enable_bits, 264: 0 if active else 77}
+                if active:
+                    signature.update({TRAP_RECORD: PROGRAM_PC + 32, TRAP_RECORD + 4: cause})
+                result.append(Case(f"irq_matrix_p{pending}_e{enabled}_g{global_enable}", finish(code),
+                    expected_causes=(), signature=signature, interrupt_schedule=(("C", 0, pending), ("N", 1, 0)),
+                    expected_interrupts=(cause,) if active else ()))
+    for global_enable in (0, 1):
+        code = [immediate(1, 0, 128), csr(0, 0x304, 1, 1), csr(0, 0x300, global_enable * 8, 5), WFI,
+                csr(2, 0x344), store(2, 0, 256)]
+        signature = {TRAP_RECORD: PROGRAM_PC + 16} if global_enable else {256: 0x88}
+        result.append(Case(f"wfi_masked_until_timer_{global_enable}", finish(code), expected_causes=(),
+            interrupt_schedule=(("C", 0, 1), ("C", 500, 3), ("N", 1, 0)), signature=signature,
+            expected_interrupts=(0x80000007,) if global_enable else ()))
+    code = [immediate(1, 0, 128), csr(0, 0x304, 1, 1), WFI, csr(2, 0x344), store(2, 0, 256)]
+    result.append(Case("wfi_pending_local", finish(code), expected_causes=(),
+                       interrupt_schedule=(("C", 0, 2),), signature={256: 128}))
+    handler = constant(25, TRAP_RECORD) + [csr(24, 0x340), immediate(27, 24, 2, funct3=1), add(25, 25, 27),
+        csr(26, 0x342), store(26, 25), csr(26, 0x341), store(26, 25, 32),
+        immediate(24, 24, 1), csr(0, 0x340, 24, 1), MRET]
+    code = constant(1, 0x888) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6),
+        immediate(4, 0, 77), store(4, 0, 256), csr(5, 0x340), store(5, 0, 260)]
+    result.append(Case("irq_priority_mret", finish(code), handler=handler, expected_causes=(),
+        interrupt_schedule=(("C", 0, 7), ("N", 1, 3), ("N", 2, 2), ("N", 3, 0)),
+        expected_interrupts=(0x8000000B, 0x80000003, 0x80000007),
+        signature={256: 77, 260: 3, TRAP_RECORD: 0x8000000B, TRAP_RECORD + 4: 0x80000003,
+                   TRAP_RECORD + 8: 0x80000007, TRAP_RECORD + 32: PROGRAM_PC + 16,
+                   TRAP_RECORD + 36: PROGRAM_PC + 16, TRAP_RECORD + 40: PROGRAM_PC + 16}))
+    for source, cause in ((1, 3), (2, 7), (4, 11), (0, 11)):
+        routine = HANDLER_PC + 128
+        handler = [0] * 32
+        for slot in (0, 3, 7, 11):
+            handler[slot] = jump(0, routine - HANDLER_PC - slot * 4)
+        handler += trap_handler(routine, COMPLETION_PC)
+        code = constant(1, HANDLER_PC | 1) + [csr(0, 0x305, 1, 1)]
+        if source:
+            code += constant(2, 1 << cause) + [csr(0, 0x304, 2, 1), csr(0, 0x300, 8, 6)]
+        else:
+            code += [0x73]
+        signature = {TRAP_RECORD: PROGRAM_PC + (28 if source else 12),
+                     TRAP_RECORD + 4: (1 << 31) | cause if source else cause}
+        result.append(Case(f"irq_vector_{source}", finish(code), handler=handler, signature=signature,
+            expected_causes=() if source else (11,), interrupt_schedule=(("C", 0, source), ("N", 1, 0)),
+            expected_interrupts=((1 << 31) | cause,) if source else ()))
+    for write in (False, True):
+        for failed in (False, True):
+            code = constant(1, 1 << 11) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6), immediate(2, 0, 23)]
+            memory_pc = PROGRAM_PC + len(code) * 4
+            code += [store(2, 0, 256) if write else immediate(2, 0, 256, 3, 2), store(2, 0, 260)]
+            cause = 7 if write else 5
+            signature = {256: 17 if failed or not write else 23, 260: 0,
+                TRAP_RECORD: memory_pc if failed else memory_pc + 4,
+                TRAP_RECORD + 4: cause if failed else 0x8000000B,
+                TRAP_RECORD + 8: 256 if failed else 0}
+            result.append(Case(f"irq_{'store' if write else 'load'}_{'fault' if failed else 'wait'}", finish(code),
+                data={256: 17}, data_fault=256 if failed else None, signature=signature,
+                expected_causes=(cause,) if failed else (), expected_interrupts=() if failed else (0x8000000B,),
+                interrupt_schedule=(("D", 256, 4), ("N", 1, 0))))
+    for seed in range(4):
+        rng = random.Random(seed)
+        code = constant(1, 0x888) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6)]
+        schedule, causes, signature = [], [], {}
+        for index in range(8):
+            value, mask = rng.randrange(2048), rng.randrange(1, 8)
+            pc = PROGRAM_PC + len(code) * 4
+            code += [immediate(2, 0, value), store(2, 0, 256 + index * 4), csr(3, 0xC00)]
+            schedule += [("R", pc, mask) if index % 2 else ("D", 256 + index * 4, mask), ("N", index + 1, 0)]
+            causes.append(0x8000000B if mask & 4 else 0x80000003 if mask & 1 else 0x80000007)
+            signature[256 + index * 4] = value
+        result.append(Case(f"irq_random_{seed}", finish(code), handler=[csr(26, 0x342), csr(27, 0x341), MRET],
+            signature=signature, expected_causes=(), expected_interrupts=tuple(causes), interrupt_schedule=tuple(schedule)))
+    return result
+
+
+def counter_cases():
+    code = [csr(0, 0x320, 5, 5), immediate(1, 0, -1), csr(0, 0xB00, 1, 1),
+            csr(0, 0xB80, 7, 5), csr(0, 0xB02, 11, 5), csr(0, 0xB82, 3, 5)]
+    addresses = (0xB00, 0xB80, 0xC00, 0xC80, 0xB02, 0xB82, 0xC02, 0xC82, 0xC01, 0xC81)
+    for index, address in enumerate(addresses):
+        code += [csr(2, address), store(2, 0, 256 + index * 4)]
+    values = (MASK, 7, MASK, 7, 11, 3, 11, 3)
+    result = [Case("counter_aliases", finish(code), expected_causes=(),
+                   signature=dict(zip(range(256, 288, 4), values)))]
+    code = [csr(0, 0x320, 1, 5), csr(0, 0xB02, 0, 1), csr(2, 0xC02),
+            csr(3, 0xB02), csr(4, 0xB02, 0, 1), csr(5, 0xC02)]
+    code += [store(index, 0, 256 + (index - 2) * 4) for index in range(2, 6)]
+    result.append(Case("counter_self_retirement", finish(code), expected_causes=(),
+                       signature={256: 0, 260: 1, 264: 2, 268: 0}))
+    code = [csr(0, 0x320, 5, 5), csr(0, 0xB02, 10, 5), csr(0, 0x320, 1, 5),
+            csr(2, 0xC02), csr(0, 0x320, 5, 5), csr(3, 0xC02), store(2, 0, 256), store(3, 0, 260)]
+    result.append(Case("counter_inhibit_boundary", finish(code), expected_causes=(), signature={256: 10, 260: 12}))
+    code = [immediate(1, 0, -1), csr(0, 0x320, 1, 1), csr(2, 0x320), store(2, 0, 256),
+            csr(0, 0x320, 2, 5), csr(3, 0x320), store(3, 0, 260)]
+    result.append(Case("counter_inhibit_warl", finish(code), expected_causes=(), signature={256: 5, 260: 0}))
+    code = [csr(0, 0x320, 1, 5), immediate(1, 0, -2), immediate(2, 0, -1),
+            csr(0, 0xB82, 2, 1), csr(0, 0xB02, 1, 1), csr(3, 0xC02), csr(4, 0xC82), csr(5, 0xC02),
+            store(3, 0, 256), store(4, 0, 260), store(5, 0, 264)]
+    result.append(Case("counter_instret_wrap", finish(code), expected_causes=(),
+                       signature={256: 0xFFFFFFFE, 260: MASK, 264: 0}))
+    code = [csr(0, 0x320, 5, 5), immediate(1, 0, -1), csr(0, 0xB80, 1, 1), csr(0, 0xB00, 1, 1),
+            csr(0, 0x320, 4, 5), immediate(0, 0, 0), csr(2, 0xC80), csr(3, 0xC00),
+            store(2, 0, 256), store(3, 0, 260)]
+    result.append(Case("counter_cycle_wrap", finish(code), expected_causes=(), signature={256: 0}))
+    handler = [csr(26, 0xC02), store(26, 0, 256), csr(27, 0x341), immediate(27, 27, 4),
+               csr(0, 0x341, 27, 1), MRET]
+    code = [csr(0, 0x320, 1, 5), csr(0, 0xB02, 0, 1), 0x73, csr(2, 0xC02), store(2, 0, 260)]
+    result.append(Case("counter_exception", finish(code), handler=handler, expected_causes=(11,), signature={256: 0, 260: 6}))
+    code = constant(1, 1 << 11) + [csr(0, 0x304, 1, 1), csr(0, 0x300, 8, 6), csr(0, 0x320, 1, 5),
+        csr(0, 0xB02, 0, 1), csr(2, 0xC02), store(2, 0, 260)]
+    result.append(Case("counter_interrupt", finish(code), handler=[csr(26, 0xC02), store(26, 0, 256), MRET],
+        expected_causes=(), expected_interrupts=(0x8000000B,), signature={256: 0, 260: 3},
+        interrupt_schedule=(("R", PROGRAM_PC + 20, 4), ("N", 1, 0))))
+    code = [immediate(1, 0, 128), csr(0, 0x304, 1, 1), csr(0, 0x320, 1, 5),
+        csr(0, 0xB02, 0, 1), WFI, csr(2, 0xC02), store(2, 0, 256)]
+    result.append(Case("counter_wfi", finish(code), expected_causes=(), signature={256: 1},
+                       interrupt_schedule=(("R", PROGRAM_PC + 16, 2),)))
+    code = [csr(2, 0xC81), csr(3, 0xC01), csr(4, 0xC81), branch(2, 4, -12, True),
+            store(3, 0, 256), store(4, 0, 260)]
+    result.append(Case("counter_time", finish(code), expected_causes=()))
+    code = [immediate(1, 0, -1)]
+    addresses = (*range(0xB03, 0xB20), *range(0xB83, 0xBA0), *range(0x323, 0x340))
+    for index, address in enumerate(addresses):
+        code += [csr(0, address, 1, 1), csr(2, address), store(2, 0, 256 + index * 4)]
+    result.append(Case("counter_hpm_zero", finish(code), expected_causes=(),
+                       signature=dict.fromkeys(range(256, 256 + len(addresses) * 4, 4), 0)))
+    for address in (0xC00, 0xC80, 0xC01, 0xC81, 0xC02, 0xC82):
+        word = csr(0, address, 0, 1)
+        result.append(Case(f"counter_readonly_{address:x}", [word], expected_causes=(2,),
+                           signature={TRAP_RECORD + 4: 2, TRAP_RECORD + 8: word}))
+    return result
+
+
 @dataclass
 class Case:
     name: str
@@ -164,8 +334,15 @@ class Case:
     handler: list[int] | None = None
     program_pc: int = PROGRAM_PC
     handler_pc: int = HANDLER_PC
+    interrupt_schedule: tuple[tuple[str, int, int], ...] = ()
+    expected_interrupts: tuple[int, ...] = ()
 
     def words(self):
+        for kind, key, mask in self.interrupt_schedule:
+            if kind not in ("C", "D", "R", "N") or key < 0 or not 0 <= mask <= 7:
+                raise ValueError("Invalid interrupt schedule")
+            if (kind in ("D", "R") and key > MASK) or (kind == "N" and not key):
+                raise ValueError("Invalid interrupt trigger")
         for address in (self.reset, self.program_pc, self.handler_pc, self.completion_pc):
             if address % 4 or not 0 <= address <= MASK:
                 raise ValueError("Region base must be a word-aligned 32-bit address")
@@ -276,13 +453,17 @@ def cases(reset=0):
     ]
     for index, word in enumerate([0, 0xFFFFFFFF, 0x02000033, 0x40001033, 0x02001013,
                                   0x00001067, 0x00003003, 0x00003023, 0x00002063,
-                                  0x30001073, 0x02005013, 0x40001013, 0x0000100F]):
+                                  0x30001073, 0x02005013, 0x40001013, 0x0000200F]):
         if word == 0x30001073:
             result.append(Case("csr_mstatus_zero_encoding", [word, store(0, 0, 256),
                 jump(0, COMPLETION_PC - PROGRAM_PC - 8)], expected_causes=()))
         else:
             result.append(Case(f"illegal_{index}", [word, store(0, 0, 256)], expected_causes=(2,)))
     result += [
+        Case("fence_i_fields", finish([a(1, 0, 67), 0xFFFF9F8F, store(1, 0, 256),
+             0x0000100F, 0x0000100F]), signature={256: 67}, expected_causes=()),
+        Case("fence_i_older_fault", [load(1, 0, 256), 0x0000100F, store(1, 0, 260)],
+             data_fault=256, signature={260: 0, TRAP_RECORD: PROGRAM_PC}, expected_causes=(5,)),
         Case("ecall", [0x00000073, store(0, 0, 256)], expected_causes=(11,)),
         Case("fence_order", [a(1, 0, 87), store(1, 0, 256), 0x0FF0000F,
              load(2, 0, 256), 0x8330000F, store(2, 0, 260), BREAK], signature={260: 87}),
@@ -300,6 +481,12 @@ def cases(reset=0):
         Case("reset_entry", [a(1, 0, 42), store(1, 0, 256), BREAK], signature={256: 42}),
         Case("auipc", [0x80000097, a(1, 1, -1), store(1, 0, 256), BREAK], signature={256: 0x80000FFF}),
     ]
+    target_pc = PROGRAM_PC + 24
+    replacement = a(3, 0, 77)
+    code = constant(1, target_pc) + constant(2, replacement)
+    code += [store(2, 1), 0x0000100F, a(3, 0, 99), store(3, 0, 256)]
+    result.append(Case("fence_i_self_modify", finish(code),
+                       signature={256: 77}, expected_causes=()))
     for f3 in range(8):
         variants = (0, 32) if f3 in (0, 5) else (0,)
         for f7 in variants:
@@ -331,7 +518,7 @@ def cases(reset=0):
                         store(rs2, 31, rng.randrange(16) * 4) if choice == 2 else
                         load(rd, 31, rng.randrange(16) * 4))
         result.append(Case(f"random_{seed}", code + [BREAK]))
-    result += csr_cases() + [nested_case()]
+    result += csr_cases() + [nested_case()] + interrupt_cases() + counter_cases()
     for case in result:
         case.reset = reset
     return result

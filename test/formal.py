@@ -44,7 +44,8 @@ def main():
         (work / "fetch_formal.sv").write_bytes(frozen[wrapper])
         for name, mode, depth, negative in (("prove", "prove", 12, False),
                                             ("cover", "cover", 24, False),
-                                            ("negative", "bmc", 12, True)):
+                                            ("negative", "bmc", 12, True),
+                                            ("idle-negative", "bmc", 12, True)):
             rtl = frozen[source].decode()
             declaration = "module DitDahE2Fetch("
             assert rtl.count(declaration) == 1 and rtl.count("endmodule") == 1
@@ -56,9 +57,11 @@ def main():
                 "  assign formal_discarded = discarded;\n  assign formal_buffered = buffered;\n"
                 "  assign formal_next_pc = nextPc;\nendmodule")
             if negative:
-                old = "assign memory_request_bits_address = address;"
-                assert old in rtl, "Negative control does not match generated RTL"
-                rtl = rtl.replace(old, "assign memory_request_bits_address = redirect ? target : address;")
+                old, changed = ("assign idle = ~active & ~buffered;", "assign idle = ~(active & sent) & ~buffered;") if name == "idle-negative" else (
+                    "assign memory_request_bits_address = address;",
+                    "assign memory_request_bits_address = redirect ? target : address;")
+                assert rtl.count(old) == 1, "Negative control does not match generated RTL"
+                rtl = rtl.replace(old, changed)
             (work / "DitDahE2Fetch.sv").write_text(rtl)
             config = (f"[options]\nmode {mode}\ndepth {depth}\n"
                       "[engines]\nsmtbmc z3\n[script]\n"
@@ -94,7 +97,7 @@ def main():
               "solver": subprocess.check_output(["z3", "--version"], text=True).strip(),
               "excluded": ["execution and retirement proof", "data port proof", "eventual memory response"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("PASS: fetch induction, reachable covers and a semantic negative control")
+    print("PASS: fetch induction, reachable covers and two semantic negative controls")
 
 
 if __name__ == "__main__":
