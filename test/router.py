@@ -253,6 +253,7 @@ int main(int argc, char **argv) {
         body += f'''        if (!dut.reset && !offered[{owner}] && position[{owner}] < requests[{owner}].size()
             && (!mode || random() % 4)) offered[{owner}] = true;
         {io(port, 'request', 'valid')} = offered[{owner}];
+        dut.{port}_request_bits_operation = 0;
         {io(port, 'response', 'ready')} = !dut.reset && (!mode || ((cycle + {owner} * 11) % 41 >= 17 && random() % 4));
         if (offered[{owner}]) {{
             const auto &request = requests[{owner}][position[{owner}]];

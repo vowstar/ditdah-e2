@@ -57,6 +57,21 @@ class FrozenDesignTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "configuration"):
                 self.freeze()
 
+    def test_bit_configuration_binding(self):
+        path = self.rtl / "manifest.json"
+        manifest = json.loads(path.read_text())
+        for subset in range(8):
+            manifest["parameters"].update({"enable" + name: bool(subset & (1 << index))
+                for index, name in enumerate(("Zba", "Zbb", "Zbs"))})
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(self.freeze()[2]["parameters"], manifest["parameters"])
+        for key in ("enableZba", "enableZbb", "enableZbs"):
+            manifest["parameters"][key] = 1
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(AssertionError, "configuration"):
+                self.freeze()
+            manifest["parameters"][key] = False
+
     def test_snapshot_survives_later_source_changes(self):
         manifest, contents, bindings = self.freeze()
         frozen = write_snapshot(self.work / "snapshot", contents)

@@ -181,6 +181,9 @@ int main(int argc, char **argv) {
                     if (name == 'D') apply('D', request.address);
                 }
             };
+            if ((dut.instruction_request_valid && dut.instruction_request_bits_operation) ||
+                (dut.data_request_valid && dut.data_request_bits_operation))
+                throw std::runtime_error("Atomic request requires the shared memory harness");
             observe(instruction, 'I', dut.instruction_request_valid, dut.instruction_request_ready,
                     {dut.instruction_request_bits_address, dut.instruction_request_bits_data,
                      dut.instruction_request_bits_mask, dut.instruction_request_bits_size, bool(dut.instruction_request_bits_write), bool(dut.instruction_request_bits_machine)},

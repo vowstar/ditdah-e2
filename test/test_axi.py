@@ -18,7 +18,7 @@ def sample(cycle, **values):
 
 
 def transaction():
-    request = dict(zip(FIELDS, (1, 1, 0x20000003, 0x11223344, 8, 0, 1, 0, 0, 0, 0, 0, 2), strict=True))
+    request = dict(zip(FIELDS, (1, 1, 0x20000003, 0x11223344, 8, 0, 1, 0, 0, 0, 0, 0, 0, 2), strict=True))
     samples = [sample(0, reset=1), sample(1, dv=1, dr=1, da=request["address"], dw=1,
                                         dd=request["data"], dm=8, dp=1),
                sample(2, av=1, ay=1, aa=0x20000000, ap=1, wv=1, wy=1, wd=request["data"], wm=8),
@@ -27,6 +27,22 @@ def transaction():
 
 
 class AxiTests(unittest.TestCase):
+    def test_atomic_request_fails_without_bus_access(self):
+        for owner in (0, 1):
+            for operation in range(1, 16):
+                request = dict.fromkeys(FIELDS, 0)
+                request.update(owner=owner, address=0x20000000, size=2, operation=operation)
+                prefix, response = ("d", "p") if owner else ("i", "o")
+                rows = [sample(0, reset=1), sample(1, **{
+                    prefix + "v": 1, prefix + "r": 1, prefix + "a": request["address"],
+                    prefix + "z": 2, prefix + "x": operation}),
+                    sample(2, **{response + "v": 1, response + "r": 1, response + "f": 1}), sample(3)]
+                counts = check([request], [0] * 256, rows)
+                self.assertEqual(counts[f"owner{owner}Rejected{operation}"], 1)
+                rows[2]["rv"] = 1
+                with self.assertRaisesRegex(AssertionError, "Atomic request reached AXI"):
+                    check([request], [0] * 256, rows)
+
     def test_write_error(self):
         counts = check(*transaction())
         self.assertEqual(counts["responses"], 1)

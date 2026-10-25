@@ -67,6 +67,9 @@ int main(int argc, char **argv) {
             dut.axi_b_valid = b && cycle >= writeDue;
             dut.axi_b_bits_response = writeFault ? 3 : 0;
             dut.eval();
+            if ((dut.o_i_request_valid && dut.o_i_request_bits_operation) ||
+                (dut.o_d_request_valid && dut.o_d_request_bits_operation))
+                throw std::runtime_error("Atomic request requires the shared memory platform");
             if (completed && dut.o_d_request_valid)
                 throw std::runtime_error("Data request after program completion");
             std::cout << "T " << cycle << ' ' << unsigned(dut.tick) << ' '

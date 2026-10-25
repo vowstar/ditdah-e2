@@ -62,7 +62,7 @@ object Pmp extends Generator[Parameters, UnitLayers, PmpIO, UnitProbe]:
       val begin = (0.B(1) ## query.address.asBits).asUInt
       val count = (query.size === 0.U(2)).?(1.U(33), (query.size === 1.U(2)).?(2.U(33), 4.U(33)))
       val end = begin + count
-      val valid = (query.size =/= 3.U(2)) & (query.kind =/= 3.U(2)) & (end <= 0x100000000L.U(33))
+      val valid = (query.size =/= 3.U(2)) & ((query.kind =/= 3.U(2)) | (if p.enableA then true.B else false.B)) & (end <= 0x100000000L.U(33))
       val permitted = Wire(Bool())
       permitted := query.machine
       // A partial match denies even an unlocked M access.
@@ -72,6 +72,7 @@ object Pmp extends Generator[Parameters, UnitLayers, PmpIO, UnitProbe]:
         val complete = (begin >= lower) & (end <= upper)
         val config = configs(index).asBits
         val permission = (query.kind === 0.U(2)).?(config.bit(0),
-          (query.kind === 1.U(2)).?(config.bit(1), config.bit(2)))
+          (query.kind === 1.U(2)).?(config.bit(1),
+            (query.kind === 2.U(2)).?(config.bit(2), config.bit(0) & config.bit(1))))
         when(overlap) { permitted := complete & ((query.machine & !config.bit(7)) | permission) }
       query.allowed := valid & permitted

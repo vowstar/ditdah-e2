@@ -52,33 +52,42 @@ object DitDahE2 extends Generator[PlatformParameters, PlatformLayers, PlatformIO
 """
 
 
-def compilation_sources(contents):
+def compilation_sources(contents, atomic=False):
     result = dict(contents)
-    for name, before, after in (
-            ("DitDahE2.scala", "object DitDahE2 extends", "object CoreImplementation extends"),
-            ("DitDahE2Platform.scala", "DitDahE2.instantiate(p.core)", "CoreImplementation.instantiate(p.core)")):
+    substitutions = [("DitDahE2.scala", "object DitDahE2 extends", "object CoreImplementation extends")]
+    for name in ("DitDahE2Platform.scala", "DitDahE2AtomicPlatform.scala"):
+        if name in result:
+            substitutions.append((name, "DitDahE2.instantiate(p.core)", "CoreImplementation.instantiate(p.core)"))
+    for name, before, after in substitutions:
         if result[name].count(before) != 1:
             raise ValueError(f"Expected one generator reference in {name}")
         result[name] = result[name].replace(before, after)
     if "PlatformEntry.scala" in result:
         raise ValueError("PlatformEntry.scala is reserved for the generated wrapper")
-    result["PlatformEntry.scala"] = WRAPPER
+    result["PlatformEntry.scala"] = (WRAPPER.replace("PlatformIO", "AtomicPlatformIO")
+        .replace("DitDahE2Platform", "DitDahE2AtomicPlatform") +
+        "    platform.io.competitor :<>= io.competitor\n") if atomic else WRAPPER
     return result
 
 
-def build(output, platform_path=ROOT / "platform.json", core=None):
+def build(output, platform_path=ROOT / "platform.json", core=None, *, atomic=False):
     output, platform_path = Path(output), Path(platform_path)
     if output.exists() and any(output.iterdir()):
         raise ValueError("Platform output directory must be empty")
     raw_map = platform_path.read_bytes()
     regions = platform_map.validate(json.loads(raw_map))
     params = platform_map.parameters(regions, {} if core is None else core)
+    if params["core"]["enableA"] != atomic:
+        raise ValueError("A instructions require the atomic platform")
+    top = "DitDahE2AtomicPlatformTop" if atomic else TOP
     paths = sorted((ROOT / "ditdah_e2/src").glob("*.scala")) + sorted((ROOT / "nix").glob("*.nix"))
     paths += [ROOT / name for name in ("flake.nix", "flake.lock", "scripts/build_rtl.py",
                                       "scripts/build_platform.py", "scripts/platform_map.py", "test/test_platform_map.py")]
+    if atomic:
+        paths += [ROOT / "ditdah_e2/src/AtomicSram.sv", ROOT / "scripts/build_atomic_platform.py"]
     originals = {str(path.relative_to(ROOT)): path.read_bytes() for path in paths}
     compiled = compilation_sources({path.name: originals[str(path.relative_to(ROOT))].decode()
-                                    for path in paths if path.suffix == ".scala"})
+                                    for path in paths if path.suffix == ".scala"}, atomic)
     output.mkdir(parents=True, exist_ok=True)
     inputs = output / "inputs"
     for name, content in {**originals, "platform.json": raw_map}.items():
@@ -96,7 +105,7 @@ def build(output, platform_path=ROOT / "platform.json", core=None):
     tools = ("elaborate-ditdah-e2", "firld", "firtool")
     tool_hashes = {name: digest(Path(shutil.which(name))) for name in tools}
     commands = []
-    report = {"top": TOP, "parameters": params, "regions": regions, "exitStatus": None,
+    report = {"top": top, "parameters": params, "regions": regions, "exitStatus": None,
               "scope": "platform RTL generation", "commands": commands,
               "sourceHashes": {name: hashlib.sha256(content).hexdigest() for name, content in originals.items()},
               "platformHash": hashlib.sha256(raw_map).hexdigest(),
@@ -126,11 +135,13 @@ def build(output, platform_path=ROOT / "platform.json", core=None):
                 raise RuntimeError(f"{command[0]} failed with status {result.returncode}")
 
         run(["elaborate-ditdah-e2", "design", "parameters.json"])
-        run(["firld", *[path.name for path in sorted(work.glob("*.mlirbc"))], "--base-circuit", TOP,
+        run(["firld", *[path.name for path in sorted(work.glob("*.mlirbc"))], "--base-circuit", top,
              "--no-mangle", "--emit-bytecode", "-o", "linked.mlirbc"])
         run(["firtool", "linked.mlirbc", "--split-verilog", "-disable-all-randomization",
              "--lowering-options=noAlwaysComb,disallowLocalVariables,locationInfoStyle=none", "-o", "rtl"])
-        if not (work / "rtl" / f"{TOP}.sv").is_file() or not (work / "rtl/DitDahE2.sv").is_file():
+        if atomic:
+            (work / "rtl/AtomicSram.sv").write_bytes(originals["ditdah_e2/src/AtomicSram.sv"])
+        if not (work / "rtl" / f"{top}.sv").is_file() or not (work / "rtl/DitDahE2.sv").is_file():
             raise RuntimeError("Missing generated platform or core RTL")
         shutil.copytree(work / "rtl", output / "rtl")
         shutil.copyfile(work / "linked.mlirbc", output / "linked.mlirbc")

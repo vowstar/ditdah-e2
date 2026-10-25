@@ -15,13 +15,14 @@ struct Port {
     std::array<uint32_t, 6> request{}, previous{};
     uint64_t due = 0;
     uint32_t data = 0;
+    bool fault = false;
 };
 
 struct Action { unsigned kind; uint32_t address, value, mask; };
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 6) throw std::runtime_error("Expected image actions seed delay cycle-limit");
+        if (argc != 7) throw std::runtime_error("Expected image actions seed delay cycle-limit data-fault");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
@@ -34,13 +35,14 @@ int main(int argc, char **argv) {
         std::vector<Action> actions;
         Action action{};
         while (script >> action.kind >> action.address >> action.value >> action.mask) {
-            if (action.kind > 5) throw std::runtime_error("Unknown debug action");
+            if (action.kind > 9) throw std::runtime_error("Unknown debug action");
             actions.push_back(action);
         }
         if (!script.eof() || actions.empty()) throw std::runtime_error("Malformed debug actions");
         uint32_t state = std::stoul(argv[3]) + 1;
         const unsigned delay = std::stoul(argv[4]);
         const uint64_t limit = std::stoull(argv[5]);
+        const uint64_t dataFault = std::stoull(argv[6]);
         auto random = [&]() { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state; };
         Port instruction, data;
         bool dmiOwned = false, dmiHeld = false;
@@ -49,6 +51,7 @@ int main(int argc, char **argv) {
         size_t index = 0;
         uint64_t idleStart = 0, completion = 0;
         bool completing = false, finished = false;
+        unsigned busControl = 0, interruptMask = 0;
         dut.reset = 1;
         dut.instruction_request_ready = dut.data_request_ready = 0;
         dut.instruction_response_valid = dut.data_response_valid = 0;
@@ -63,39 +66,51 @@ int main(int argc, char **argv) {
         for (uint64_t cycle = 0; cycle < limit; ++cycle) {
             dut.clock = 0;
             const auto current = actions.at(index);
+            if (current.kind == 6) busControl = current.value;
+            if (current.kind == 9) {
+                if (current.value > 7) throw std::runtime_error("Invalid interrupt mask");
+                interruptMask = current.value;
+            }
+            dut.interrupts_software = interruptMask & 1;
+            dut.interrupts_timer = (interruptMask >> 1) & 1;
+            dut.interrupts_external = (interruptMask >> 2) & 1;
             dut.timeValue = cycle;
-            dut.instruction_request_ready = !completing && !instruction.active && (!delay || random() % 3 == 0);
-            dut.data_request_ready = !data.active && (!delay || random() % 3 == 0);
+            dut.instruction_request_ready = !completing && !instruction.active && (!delay || cycle % 8 == 7 || random() % 3 == 0);
+            dut.data_request_ready = !(busControl & 1) && !data.active && (!delay || cycle % 8 == 7 || random() % 3 == 0);
             dut.instruction_response_valid = instruction.active && cycle >= instruction.due;
-            dut.data_response_valid = data.active && cycle >= data.due;
+            dut.data_response_valid = !(busControl & 2) && data.active && cycle >= data.due;
             dut.instruction_response_bits_data = instruction.data;
             dut.data_response_bits_data = data.data;
+            dut.data_response_bits_fault = data.fault;
             dut.dmi_request_valid = !dmiOwned && current.kind >= 1 && current.kind <= 3;
             dut.dmi_request_bits_address = current.address;
             dut.dmi_request_bits_data = current.kind == 2 ? current.value : 0;
             dut.dmi_request_bits_op = current.kind == 2 ? 2 : 1;
-            dut.dmi_response_ready = !delay || random() % 4 == 0;
+            dut.dmi_response_ready = !delay || cycle % 8 == 7 || random() % 4 == 0;
             dut.eval();
             if (!delay && !completing && instruction.active && dut.instruction_response_valid && dut.instruction_response_ready) {
                 dut.instruction_request_ready = 1;
                 dut.eval();
             }
-            std::cout << "T " << cycle << ' ' << dut.timeValue << ' ' << unsigned(dut.systemReset) << '\n';
+            std::cout << "T " << cycle << ' ' << dut.timeValue << ' ' << unsigned(dut.systemReset) << ' ' << interruptMask << '\n';
             if (dut.systemReset && (instruction.active || data.active))
                 throw std::runtime_error("System reset preceded accepted memory completion");
+            if ((dut.instruction_request_valid && dut.instruction_request_bits_operation) ||
+                (dut.data_request_valid && dut.data_request_bits_operation))
+                throw std::runtime_error("Atomic request requires the shared memory harness");
             auto native = [&](Port &port, char name, bool valid, bool ready, std::array<uint32_t, 6> request,
                               bool responseValid, bool responseReady) {
                 if (port.held && (!valid || request != port.previous))
                     throw std::runtime_error("Native request changed under backpressure");
                 if (responseValid && responseReady) {
                     if (!port.active) throw std::runtime_error("Unowned native response");
-                    if (port.request[1]) {
+                    if (port.request[1] && !port.fault) {
                         auto &word = memory[port.request[0] & ~3u];
                         for (unsigned lane = 0; lane < 4; ++lane)
                             if (port.request[3] & (1u << lane))
                                 word = (word & ~(255u << (8 * lane))) | (port.request[2] & (255u << (8 * lane)));
                     }
-                    std::cout << "S " << cycle << ' ' << name << ' ' << port.data << " 0\n";
+                    std::cout << "S " << cycle << ' ' << name << ' ' << port.data << ' ' << port.fault << '\n';
                     port.active = false;
                 }
                 if (valid && !port.held) {
@@ -115,6 +130,7 @@ int main(int argc, char **argv) {
                     port.active = true;
                     port.request = request;
                     port.data = memory[request[0] & ~3u];
+                    port.fault = name == 'D' && request[0] == dataFault;
                     port.due = cycle + 1 + (delay ? random() % delay : 0);
                     std::cout << "Q " << cycle << ' ' << name;
                     for (auto part : request) std::cout << ' ' << part;
@@ -157,6 +173,9 @@ int main(int argc, char **argv) {
                 advance = current.kind != 3 || (response[1] & current.mask) == current.value;
             }
             if (current.kind == 4) advance = cycle - idleStart >= current.value;
+            if (current.kind == 6 || current.kind == 9) advance = true;
+            if (current.kind == 7) advance = data.active && data.request[0] == current.address;
+            if (current.kind == 8) advance = data.held && data.previous[0] == current.address;
             if (current.kind == 5 && !completing) { completing = true; completion = cycle; }
             if (completing && dut.data_request_valid) throw std::runtime_error("Data offer after completion");
             dut.clock = 1;

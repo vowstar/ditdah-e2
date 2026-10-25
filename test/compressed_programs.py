@@ -23,6 +23,11 @@ class CompressedCase:
     expected_interrupts: tuple[int, ...] = ()
     enable_m: bool = False
     enable_c: bool = True
+    enable_a: bool = False
+    protected_mode: bool = False
+    enable_zba: bool = False
+    enable_zbb: bool = False
+    enable_zbs: bool = False
 
     def words(self):
         return dict(self.image)

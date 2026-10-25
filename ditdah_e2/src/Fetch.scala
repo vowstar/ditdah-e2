@@ -92,6 +92,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
     io.memory.request.bits.data := 0.U(32)
     io.memory.request.bits.mask := 0.U(4)
     io.memory.request.bits.size := 2.U(2)
+    io.memory.request.bits.operation := 0.U(4)
     val request = io.memory.request.valid & io.memory.request.ready
     io.idle := !held & !outstanding & !firstValid & !secondValid & !buffered
     when(response) { outstanding := false.B }

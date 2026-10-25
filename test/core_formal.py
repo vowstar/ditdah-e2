@@ -19,6 +19,7 @@ def digest(path):
 
 def source_hashes(root):
     paths = sorted((root / "ditdah_e2/src").glob("*.scala"))
+    paths += sorted((root / "ditdah_e2/src").glob("*.sv"))
     paths += sorted((root / "nix").glob("*.nix"))
     paths += [root / name for name in ("flake.nix", "flake.lock", "scripts/build_rtl.py")]
     return {str(path.relative_to(root)): digest(path) for path in paths}
@@ -33,12 +34,14 @@ def freeze_design(rtl, root, wrapper, runner):
     manifest_bytes = (rtl / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
     parameters = manifest["parameters"]
-    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug"}
+    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs"}
             and type(parameters.get("resetVector")) is int and parameters["resetVector"] == 0
             and type(parameters.get("enableM", False)) is bool
             and type(parameters.get("enableC", False)) is bool
             and type(parameters.get("protectedMode", False)) is bool
-            and type(parameters.get("enableDebug", False)) is bool), "Unsupported formal ROM configuration"
+            and type(parameters.get("enableDebug", False)) is bool
+            and type(parameters.get("enableA", False)) is bool
+            and all(type(parameters.get(key, False)) is bool for key in ("enableZba", "enableZbb", "enableZbs"))), "Unsupported formal ROM configuration"
     assert manifest["sourceHashes"] == source_hashes(root), "Stale RTL inputs"
     contents = {"manifest.json": manifest_bytes, "test/" + wrapper.name: wrapper.read_bytes(),
                 "test/" + runner.name: runner.read_bytes()}

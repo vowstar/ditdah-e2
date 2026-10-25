@@ -12,7 +12,7 @@ module fetch_latency #(parameter COMPRESSED = 1)(input clock);
   wire memory_request_bits_machine;
   wire idle, memory_request_valid, memory_request_bits_write, memory_response_ready, output_valid;
   wire [31:0] memory_request_bits_address, memory_request_bits_data, output_bits_pc, output_bits_word;
-  wire [3:0] memory_request_bits_mask;
+  wire [3:0] memory_request_bits_mask, memory_request_bits_operation;
   wire [1:0] memory_request_bits_size;
   wire [2:0] output_bits_length;
   wire output_bits_fault;

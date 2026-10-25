@@ -20,7 +20,7 @@ from build_rtl import digest, sources
 
 
 def checker_inputs():
-    paths = ("test/model.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
+    paths = ("test/model.py", "test/bit_model.py", "test/bit_programs.py", "test/bit_pipeline.py", "test/bit_operations.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
              "test/compressed_unit.py", "test/sim.cpp", "test/inactive_debug.hpp", "test/verify.py", "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in paths}
 
@@ -61,7 +61,9 @@ class InputSchedule:
 def check(case, text):
     model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault,
                   enable_m=getattr(case, "enable_m", False), enable_c=getattr(case, "enable_c", False),
-                  protected_mode=getattr(case, "protected_mode", False))
+                  protected_mode=getattr(case, "protected_mode", False), enable_a=getattr(case, "enable_a", False),
+                  enable_zba=getattr(case, "enable_zba", False), enable_zbb=getattr(case, "enable_zbb", False),
+                  enable_zbs=getattr(case, "enable_zbs", False))
     outstanding = {}
     offered = {}
     completed = deque()
@@ -493,7 +495,11 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     selected = [case for case in cases(manifest["parameters"]["resetVector"],
                                        enable_m=manifest["parameters"].get("enableM", False),
-                                       enable_c=manifest["parameters"].get("enableC", False))
+                                       enable_c=manifest["parameters"].get("enableC", False),
+                                       enable_a=manifest["parameters"].get("enableA", False),
+                                       enable_zba=manifest["parameters"].get("enableZba", False),
+                                       enable_zbb=manifest["parameters"].get("enableZbb", False),
+                                       enable_zbs=manifest["parameters"].get("enableZbs", False))
                 if not args.case or case.name in args.case]
     assert selected and set(args.case) <= {case.name for case in selected}, "Unknown case"
     scratch = "/data/tmp" if os.access("/data/tmp", os.W_OK) else None
@@ -509,7 +515,7 @@ def main():
             raise RuntimeError(compiled.stdout + compiled.stderr)
         for case in selected:
             timings = ((0, 0), (1, 24), (19, 40))
-            if case.name.startswith("m_older_"):
+            if case.name.startswith("m_older_") or (case.name.startswith("bit_") and "_older_" in case.name):
                 timings += ((7, 128),)
             for seed, delay in timings:
                 image = work / "image.hex"
@@ -528,6 +534,8 @@ def main():
                 assert run.returncode == 0, f"{name}: {run.stderr}"
                 try:
                     metrics = check(case, run.stdout)
+                    if case.name.startswith("bit_") and case.name.endswith("_no_false_load"):
+                        assert metrics["loadUseCycles"] == 0, "False bit operand interlock"
                 except AssertionError as error:
                     raise AssertionError(f"{name}: {error}") from error
                 control_case = "reset_entry" if manifest["parameters"]["resetVector"] else "sum_loop"
@@ -543,11 +551,18 @@ def main():
             if case.name == "fence_i_self_modify":
                 rtl_controls.append(fence_negative_control(case, args.rtl, manifest, command, work, args.output))
                 controls += 1
+        from bit_pipeline import negative_controls as bit_negative_controls
+        bit_controls = bit_negative_controls(selected, args.rtl, manifest, command, work, args.output, check)
+        rtl_controls.extend(bit_controls)
+        controls += len(bit_controls)
         assert manifest["sourceHashes"] == sources(), "Inputs changed during verification"
         assert inputs == checker_inputs(), "Checker inputs changed"
         assert digest(args.rtl / "manifest.json") == manifest_hash, "RTL manifest changed"
         for name, value in manifest["rtlHashes"].items():
             assert digest(args.rtl / name) == value, "Generated RTL changed during verification"
+    for case in selected:
+        if case.name.startswith("bit_") and case.name.endswith("_load") and not case.name.endswith("_no_false_load"):
+            assert sum(run["loadUseCycles"] for run in results if run["case"] == case.name), "Unreached bit load interlock"
     if not args.case:
         if not manifest["parameters"]["resetVector"]:
             for metric in ("forwards", "loadUseCycles", "redirects", "memoryWaitCycles", "blockedFetchRedirects", "fetchDrainsAfterCompletion"):

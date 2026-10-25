@@ -23,6 +23,10 @@ class ProtectedCase:
     reset: int = 0
     enable_m: bool = False
     enable_c: bool = False
+    enable_a: bool = False
+    enable_zba: bool = False
+    enable_zbb: bool = False
+    enable_zbs: bool = False
     protected_mode: bool = True
     program_pc: int = PROGRAM
     handler_pc: int = HANDLER
@@ -107,9 +111,9 @@ def _handler(count, recovery=(), resume_step=4):
     return code.code
 
 
-def _case(name, program, signature, *, reset=0, enable_m=False, enable_c=False, enter_user=True,
+def _case(name, program, signature, *, reset=0, enable_m=False, enable_c=False, enable_a=False, enter_user=True,
           status=0, setup=(), data=None, schedule=(), memory_machine=None, grant_all=True, recovery=(),
-          resume_step=4, initial_registers=()):
+          resume_step=4, initial_registers=(), enable_zba=False, enable_zbb=False, enable_zbs=False):
     boot = Program(reset)
     boot.write_csr(0x305, HANDLER)
     boot.load(20, SIGNATURE)
@@ -134,7 +138,8 @@ def _case(name, program, signature, *, reset=0, enable_m=False, enable_c=False, 
     image = _image(((reset, boot.code), (program.start, program.code),
                     (HANDLER, _handler(len(program.traps), recovery, resume_step)), (COMPLETION, [(0x6F, 4)])), data or {})
     return ProtectedCase(name, image, expected, tuple(item[0] for item in program.traps if item[0] < 1 << 31),
-                         reset=reset, enable_m=enable_m, enable_c=enable_c,
+                         reset=reset, enable_m=enable_m, enable_c=enable_c, enable_a=enable_a,
+                         enable_zba=enable_zba, enable_zbb=enable_zbb, enable_zbs=enable_zbs,
                          program_pc=program.start,
                          interrupt_schedule=tuple(schedule), expected_interrupts=tuple(item[0] for item in program.traps if item[0] >> 31),
                          expected_memory_machine=memory_machine or {})
@@ -502,10 +507,11 @@ def _mret_machine_mprv(common):
     return case
 
 
-def cases(reset=0, enable_m=False, enable_c=False):
+def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba=False, enable_zbb=False, enable_zbs=False):
     if type(reset) is not int or not 0 <= reset <= MASK or reset % (2 if enable_c else 4):
         raise ValueError("Protected reset must satisfy instruction alignment")
-    common = dict(reset=reset, enable_m=enable_m, enable_c=enable_c)
+    common = dict(reset=reset, enable_m=enable_m, enable_c=enable_c, enable_a=enable_a,
+                  enable_zba=enable_zba, enable_zbb=enable_zbb, enable_zbs=enable_zbs)
     result = []
     program = Program()
     for index, value in enumerate((0, 0x800, 0x1000, 0x1800, 0xFFFFFFFF)):
@@ -521,7 +527,8 @@ def cases(reset=0, enable_m=False, enable_c=False):
     program.trap(0x73, 11, status=0x1800)
     result.append(_case("protected_status_warl", program,
                         {0: 0, 4: 0x1800, 8: 0x1800, 12: 0x1800, 16: 0x221888,
-                         20: 0x40100100 | (int(enable_m) << 12) | (int(enable_c) << 2), 24: 7},
+                         20: 0x40100100 | (int(enable_m) << 12) | (int(enable_c) << 2) | int(enable_a) |
+                         (2 if enable_zba and enable_zbb and enable_zbs else 0), 24: 7},
                         enter_user=False, **common))
     for name, status in (("protected_user_ecall", 0), ("protected_mret_clears_mprv", 1 << 17)):
         program = Program()
@@ -601,4 +608,21 @@ def cases(reset=0, enable_m=False, enable_c=False):
     result.extend(_pmp_compressed_cases(common))
     result.append(_user_compute(common))
     result.append(_mret_machine_mprv(common))
+    from bit_operations import ENCODINGS, encode
+    from bit_programs import FIXED
+    subset = int(enable_zba) | (int(enable_zbb) << 1) | (int(enable_zbs) << 2)
+    for name, (_, extension, _) in ENCODINGS.items():
+        program = Program()
+        program.load(1, 0x80000001)
+        program.emit(immediate(2, 0, 31))
+        word = encode(name, shift=7)
+        if subset & extension:
+            program.emit(word)
+        else:
+            program.trap(word, 2, word)
+        saved = program.save(3)
+        program.trap(0x73, 8)
+        result.append(_case(f"protected_bit_{name}", program,
+                           {0: FIXED[name] if subset & extension else 0},
+                           memory_machine={saved: False}, **common))
     return result

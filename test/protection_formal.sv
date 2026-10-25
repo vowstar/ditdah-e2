@@ -6,7 +6,7 @@ module protection_formal(input clock);
   (* anyseq *) reg allowed, input_request_valid, input_response_ready, output_request_ready;
   (* anyseq *) reg [31:0] input_request_bits_address, input_request_bits_data;
   (* anyseq *) reg input_request_bits_write, input_request_bits_machine;
-  (* anyseq *) reg [3:0] input_request_bits_mask;
+  (* anyseq *) reg [3:0] input_request_bits_mask, input_request_bits_operation;
   (* anyseq *) reg [1:0] input_request_bits_size;
   (* anyseq *) reg output_response_valid, output_response_bits_fault;
   (* anyseq *) reg [31:0] output_response_bits_data;
@@ -14,14 +14,14 @@ module protection_formal(input clock);
   wire [31:0] input_response_bits_data;
   wire output_request_valid, output_request_bits_write, output_request_bits_machine, output_response_ready;
   wire [31:0] output_request_bits_address, output_request_bits_data;
-  wire [3:0] output_request_bits_mask;
+  wire [3:0] output_request_bits_mask, output_request_bits_operation;
   wire [1:0] output_request_bits_size;
   DitDahE2MemoryProtection dut(.*);
 
-  wire [71:0] offered_payload = {input_request_bits_address, input_request_bits_data,
-    input_request_bits_write, input_request_bits_mask, input_request_bits_size, input_request_bits_machine};
-  wire [71:0] external_payload = {output_request_bits_address, output_request_bits_data,
-    output_request_bits_write, output_request_bits_mask, output_request_bits_size, output_request_bits_machine};
+  wire [75:0] offered_payload = {input_request_bits_address, input_request_bits_data,
+    input_request_bits_write, input_request_bits_mask, input_request_bits_size, input_request_bits_machine, input_request_bits_operation};
+  wire [75:0] external_payload = {output_request_bits_address, output_request_bits_data,
+    output_request_bits_write, output_request_bits_mask, output_request_bits_size, output_request_bits_machine, output_request_bits_operation};
   reg occupied = 0, admitted = 0, first_offer = 0, first_permission = 0, past_valid = 0;
   wire permission = first_offer ? first_permission : allowed;
   wire accepted = input_request_valid && input_request_ready;

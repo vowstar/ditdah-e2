@@ -10,7 +10,7 @@
 #include <vector>
 
 struct Request {
-    uint32_t owner, write, address, data, mask, size, machine;
+    uint32_t owner, write, address, data, mask, size, machine, operation;
     uint32_t awDelay, wDelay, arDelay, responseDelay, nativeDelay, response;
 };
 
@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
     std::ifstream vectors(argv[1]), initial(argv[2]);
     std::array<std::vector<Request>, 2> queues;
     Request row;
-    while (vectors >> row.owner >> row.write >> row.address >> row.data >> row.mask >> row.size >> row.machine
+    while (vectors >> row.owner >> row.write >> row.address >> row.data >> row.mask >> row.size >> row.machine >> row.operation
                    >> row.awDelay >> row.wDelay >> row.arDelay >> row.responseDelay
                    >> row.nativeDelay >> row.response) {
         if (row.owner > 1) throw std::runtime_error("Invalid owner");
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     uint32_t busAddress = 0, busData = 0, busMask = 0;
     Request current{};
     unsigned idle = 0;
-    std::cout << "cycle reset iv ir ia iw id im iz ip ov or od of dv dr da dw dd dm dz dp pv pr pd pf "
+    std::cout << "cycle reset iv ir ia iw id im iz ip ix ov or od of dv dr da dw dd dm dz dp dx pv pr pd pf "
                  "av ay aa ap wv wy wd wm bv by br rv ry ra rp qv qy qd qr\n";
     for (uint32_t cycle = 0; cycle < 1000000; ++cycle) {
         dut.clock = 0;
@@ -53,6 +53,7 @@ int main(int argc, char **argv) {
         dut.instruction_request_bits_mask = i.mask;
         dut.instruction_request_bits_size = i.size;
         dut.instruction_request_bits_machine = i.machine;
+        dut.instruction_request_bits_operation = i.operation;
         dut.data_request_valid = offerD;
         dut.data_request_bits_address = d.address;
         dut.data_request_bits_write = d.write;
@@ -60,6 +61,7 @@ int main(int argc, char **argv) {
         dut.data_request_bits_mask = d.mask;
         dut.data_request_bits_size = d.size;
         dut.data_request_bits_machine = d.machine;
+        dut.data_request_bits_operation = d.operation;
         dut.instruction_response_ready = !active || current.owner != 0 ||
             (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
         dut.data_response_ready = !active || current.owner != 1 ||
@@ -79,11 +81,11 @@ int main(int argc, char **argv) {
         P(reset);
         P(instruction_request_valid); P(instruction_request_ready); P(instruction_request_bits_address);
         P(instruction_request_bits_write); P(instruction_request_bits_data);
-        P(instruction_request_bits_mask); P(instruction_request_bits_size); P(instruction_request_bits_machine);
+        P(instruction_request_bits_mask); P(instruction_request_bits_size); P(instruction_request_bits_machine); P(instruction_request_bits_operation);
         P(instruction_response_valid); P(instruction_response_ready);
         P(instruction_response_bits_data); P(instruction_response_bits_fault);
         P(data_request_valid); P(data_request_ready); P(data_request_bits_address); P(data_request_bits_write);
-        P(data_request_bits_data); P(data_request_bits_mask); P(data_request_bits_size); P(data_request_bits_machine);
+        P(data_request_bits_data); P(data_request_bits_mask); P(data_request_bits_size); P(data_request_bits_machine); P(data_request_bits_operation);
         P(data_response_valid); P(data_response_ready); P(data_response_bits_data); P(data_response_bits_fault);
         P(axi_aw_valid); P(axi_aw_ready); P(axi_aw_bits_address); P(axi_aw_bits_protection);
         P(axi_w_valid); P(axi_w_ready); P(axi_w_bits_data); P(axi_w_bits_strobe);

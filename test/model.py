@@ -5,11 +5,16 @@
 from dataclasses import dataclass
 
 from compressed_model import decode as decode_instruction
+from bit_model import execute as execute_bit
 
 MASK = (1 << 32) - 1
 MASK64 = (1 << 64) - 1
 TIME_BASE = 0xFFFFFFF0
 M_INSTRUCTIONS = ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")
+ATOMIC_FUNCTIONS = {2: ("lr.w", 1), 3: ("sc.w", 2), 1: ("amoswap.w", 3),
+                    0: ("amoadd.w", 4), 4: ("amoxor.w", 5), 12: ("amoand.w", 6),
+                    8: ("amoor.w", 7), 16: ("amomin.w", 8), 20: ("amomax.w", 9),
+                    24: ("amominu.w", 10), 28: ("amomaxu.w", 11)}
 
 
 def signed(value, width):
@@ -32,6 +37,15 @@ def multiply_divide(operation, left, right):
     return (quotient if operation in (4, 5) else a - quotient * b) & MASK
 
 
+def atomic_value(function, old, operand):
+    values = {1: operand, 0: old + operand, 4: old ^ operand, 12: old & operand,
+              8: old | operand, 16: min(signed(old, 32), signed(operand, 32)),
+              20: max(signed(old, 32), signed(operand, 32)), 24: min(old, operand), 28: max(old, operand)}
+    if function not in values:
+        raise ValueError("Unknown atomic arithmetic function")
+    return values[function] & MASK
+
+
 @dataclass
 class Event:
     pc: int
@@ -47,11 +61,14 @@ class Event:
     length: int = 4
     user_mode: bool = False
     memory_machine: bool = True
+    memory_operation: int = 0
+    acquire: bool = False
+    release: bool = False
 
 
 class Model:
     def __init__(self, words, reset=0, instruction_fault=None, data_fault=None, *, enable_m=False, enable_c=False,
-                 protected_mode=False):
+                 protected_mode=False, enable_a=False, memory_access=None, enable_zba=False, enable_zbb=False, enable_zbs=False):
         self.memory = {address + lane: (word >> (8 * lane)) & 255
                        for address, word in words.items() for lane in range(4)}
         self.pc = reset
@@ -61,13 +78,17 @@ class Model:
         self.enable_m = enable_m
         self.enable_c = enable_c
         self.protected_mode = protected_mode
+        self.enable_a = enable_a
+        self.memory_access = memory_access
+        self.reservation = None
+        self.bit_extensions = enable_zba, enable_zbb, enable_zbs
         self.user_mode = False
         self.pmp = None
         if protected_mode:
             from pmp import Reference
             self.pmp = Reference()
         self.csrs = {0x300: 0x1800, 0x301: 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2) |
-                     (int(protected_mode) << 20), 0x304: 0,
+                     (int(protected_mode) << 20) | int(enable_a) | (2 if all(self.bit_extensions) else 0), 0x304: 0,
                      0x305: reset & ~3, 0x310: 0, 0x320: 0, 0x340: 0, 0x341: 0,
                      0x342: 0, 0x343: 0, 0x344: 0,
                      **dict.fromkeys(range(0xF11, 0xF16), 0)}
@@ -134,6 +155,7 @@ class Model:
         return None
 
     def enter_trap(self, pc, cause, value):
+        self.reservation = None
         vector = self.csrs[0x305]
         target = vector & ~3
         if cause & (1 << 31) and vector & 3 == 1:
@@ -157,6 +179,8 @@ class Model:
         return pc, self.pc, cause
 
     def write_csr(self, address, value):
+        if address == 0x300 or 0x3A0 <= address <= 0x3A3 or 0x3B0 <= address <= 0x3BF:
+            self.reservation = None
         if self.pmp is not None and self.pmp.read(address)[0]:
             self.pmp.write(address, value & MASK)
             return
@@ -181,6 +205,15 @@ class Model:
     def word(self, address):
         return sum(self.memory.get((address + lane) & MASK, 0) << (lane * 8)
                    for lane in range(4))
+
+    def complete_memory(self, event):
+        if self.memory_access is not None:
+            value, fault = self.memory_access(event)
+            assert type(value) is int and 0 <= value <= MASK and fault in (False, True), "Invalid reference memory completion"
+            return value, bool(fault)
+        address = event.memory[0]
+        value = int(self.reservation != address) if event.memory_operation == 2 else self.word(address & ~3)
+        return value, address == self.data_fault
 
     def step(self):
         if not self.external_clock:
@@ -215,6 +248,7 @@ class Model:
         op, rd, f3 = insn & 127, (insn >> 7) & 31, (insn >> 12) & 7
         a, b = self.registers[(insn >> 15) & 31], self.registers[(insn >> 20) & 31]
         imm = signed(insn >> 20, 12)
+        bit = execute_bit(insn, a, b, *self.bit_extensions)
         if fetch_fault is not None:
             fault(1, fetch_fault)
         elif decoded is not None and not decoded.legal:
@@ -225,6 +259,9 @@ class Model:
         elif self.enable_m and op == 0x33 and insn >> 25 == 1:
             result.instruction = M_INSTRUCTIONS[f3]
             result.rd, result.value = rd, multiply_divide(f3, a, b)
+        elif bit is not None:
+            result.instruction, result.value = bit
+            result.rd = rd
         elif (op == 0x13 and (f3 not in (1, 5) or insn >> 25 == 0 or
                              (f3 == 5 and insn >> 25 == 32))) or (
                 op == 0x33 and (insn >> 25 == 0 or (insn >> 25 == 32 and f3 in (0, 5)))):
@@ -256,15 +293,51 @@ class Model:
                 lane = address % 4
                 result.memory = (address, int(write), (b << (8 * lane)) & MASK if write else 0,
                                  ((1 << count) - 1) << lane if write else 0, f3 & 3)
-                if address == self.data_fault:
+                completed_value, completed_fault = self.complete_memory(result)
+                if completed_fault:
                     fault(7 if write else 5, address)
                 elif write:
                     for index in range(count):
                         self.memory[(address + index) & MASK] = (b >> (8 * index)) & 255
+                    if self.reservation == address & ~3:
+                        self.reservation = None
                 else:
-                    value = sum(self.memory.get((address + index) & MASK, 0) << (index * 8) for index in range(count))
+                    value = completed_value >> (8 * lane) & ((1 << (8 * count)) - 1)
                     result.rd = rd
                     result.value = (value if f3 >= 4 else signed(value, count * 8)) & MASK
+        elif self.enable_a and op == 0x2F and f3 == 2 and insn >> 27 in ATOMIC_FUNCTIONS and (
+                insn >> 27 != 2 or insn >> 20 & 31 == 0):
+            function = insn >> 27
+            result.instruction, result.memory_operation = ATOMIC_FUNCTIONS[function]
+            result.acquire, result.release = bool(insn & (1 << 26)), bool(insn & (1 << 25))
+            load_reserved, conditional = function == 2, function == 3
+            result.memory_machine = not self.user_mode and (not self.protected_mode or
+                not self.csrs[0x300] & (1 << 17) or self.csrs[0x300] & 0x1800 == 0x1800)
+            denied = self.pmp is not None and any(not self.pmp.allowed((a, 2, int(result.memory_machine), kind))
+                                                 for kind in ((0,) if load_reserved else (1,) if conditional else (0, 1)))
+            if a % 4:
+                fault(4 if load_reserved else 6, a)
+            elif denied:
+                fault(5 if load_reserved else 7, a)
+            else:
+                result.memory = (a, int(not load_reserved), 0 if load_reserved else b, 0 if load_reserved else 15, 2)
+                old, failed = self.complete_memory(result)
+                if failed:
+                    fault(5 if load_reserved else 7, a)
+                else:
+                    result.rd, result.value = rd, old
+                    if load_reserved:
+                        self.reservation = a
+                    else:
+                        if conditional:
+                            assert old in (0, 1), "Invalid reference SC status"
+                            self.reservation = None
+                        if not conditional or old == 0:
+                            updated = b if conditional else atomic_value(function, old, b)
+                            for lane in range(4):
+                                self.memory[a + lane] = updated >> (8 * lane) & 255
+                            if self.reservation == a:
+                                self.reservation = None
         elif op == 0x63 and f3 in (0, 1, 4, 5, 6, 7):
             result.instruction = {0: "beq", 1: "bne", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}[f3]
             offset = signed(((insn >> 31) << 12) | (((insn >> 7) & 1) << 11)
@@ -305,6 +378,7 @@ class Model:
                 result.rd, result.value = rd, old
         elif insn == 0x30200073:
             result.instruction = "mret"
+            self.reservation = None
             if self.user_mode:
                 fault(2, insn)
             else:

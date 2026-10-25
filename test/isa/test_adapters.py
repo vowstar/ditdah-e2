@@ -15,12 +15,14 @@ class SignatureTests(unittest.TestCase):
         for enable_m in (False, True):
             for enable_c in (False, True):
                 config = {"resetVector": 0x80000000, "enableM": enable_m,
-                          "enableC": enable_c, "protectedMode": False, "enableDebug": False}
+                          "enableC": enable_c, "protectedMode": False, "enableDebug": False, "enableA": False, "enableZba": False, "enableZbb": False, "enableZbs": False}
                 validate_rtl_configuration(config, enable_m, enable_c)
                 for change in ({"protectedMode": True}, {"protectedMode": 1},
                                {"enableDebug": True}, {"enableDebug": 1},
+                               {"enableA": True}, {"enableA": 1},
                                {"enableM": not enable_m}, {"enableC": not enable_c},
-                               {"resetVector": 0}, {"unknown": False}):
+                               {"resetVector": 0}, {"unknown": False}, {"enableZba": True},
+                               {"enableZbb": True}, {"enableZbs": True}, {"enableZba": 1}):
                     with self.subTest(change=change), self.assertRaises(ValueError):
                         validate_rtl_configuration(config | change, enable_m, enable_c)
 

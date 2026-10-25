@@ -63,10 +63,12 @@ def freeze(args):
     assert type(parameters.get("enableC", False)) is bool, "Invalid C configuration"
     assert type(parameters["resetVector"]) is int and 0 <= parameters["resetVector"] <= 0xFFFFFFFF, "Invalid reset address"
     assert parameters["resetVector"] % (2 if parameters.get("enableC", False) else 4) == 0, "Misaligned reset address"
-    assert set(parameters) <= {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug"}, "Unknown fetch configuration"
+    assert set(parameters) <= {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs"}, "Unknown fetch configuration"
     assert type(parameters.get("protectedMode", False)) is bool, "Invalid protection configuration"
     assert type(parameters.get("enableDebug", False)) is bool, "Invalid debug configuration"
+    assert type(parameters.get("enableA", False)) is bool, "Invalid atomic configuration"
     assert isinstance(parameters.get("enableM", False), bool), "Invalid M configuration"
+    assert all(type(parameters.get(key, False)) is bool for key in ("enableZba", "enableZbb", "enableZbs")), "Invalid bit configuration"
     assert manifest["sourceHashes"] == source_hashes(args.source_root), "Stale RTL inputs"
     contents = {"manifest.json": raw_manifest, "rtl/manifest.json": raw_manifest,
                 "test/" + wrapper.name: wrapper.read_bytes(), "test/" + Path(__file__).name: Path(__file__).read_bytes(),

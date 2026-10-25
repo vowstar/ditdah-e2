@@ -10,6 +10,8 @@ module interrupt_formal #(parameter integer SCENARIO = -1)(input clock);
   wire [31:0] instruction_request_bits_address, instruction_request_bits_data;
   wire instruction_request_bits_write, instruction_request_bits_machine;
   wire data_request_bits_machine, retire_userMode;
+  wire [3:0] instruction_request_bits_operation, data_request_bits_operation;
+  wire reservationClear, dataDebug;
   wire [3:0] instruction_request_bits_mask;
   wire [1:0] instruction_request_bits_size;
   wire instruction_response_valid, instruction_response_ready, instruction_response_bits_fault;
@@ -183,12 +185,12 @@ module interrupt_formal #(parameter integer SCENARIO = -1)(input clock);
         if ($past(instruction_request_valid && !instruction_request_ready)) begin
           assert(instruction_request_valid);
           assert($stable({instruction_request_bits_address, instruction_request_bits_write,
-                          instruction_request_bits_data, instruction_request_bits_mask, instruction_request_bits_size, instruction_request_bits_machine}));
+                          instruction_request_bits_data, instruction_request_bits_mask, instruction_request_bits_size, instruction_request_bits_machine, instruction_request_bits_operation}));
         end
         if ($past(data_request_valid && !data_request_ready)) begin
           assert(data_request_valid);
           assert($stable({data_request_bits_address, data_request_bits_write,
-                          data_request_bits_data, data_request_bits_mask, data_request_bits_size, data_request_bits_machine}));
+                          data_request_bits_data, data_request_bits_mask, data_request_bits_size, data_request_bits_machine, data_request_bits_operation}));
         end
         if ($past(data_response && !data_response_bits_fault)) assert(interrupt_valid);
         if ($past(data_response && data_response_bits_fault)) assert(!interrupt_valid);

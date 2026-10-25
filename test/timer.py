@@ -42,6 +42,7 @@ module TimerBench;
   reg clock = 0;
   reg reset, tick, memory_request_valid, memory_response_ready;
   wire memory_request_bits_machine = 1;
+  wire [3:0] memory_request_bits_operation = 0;
   reg memory_request_bits_write;
   reg [31:0] memory_request_bits_address, memory_request_bits_data;
   reg [3:0] memory_request_bits_mask;

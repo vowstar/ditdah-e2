@@ -40,6 +40,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     debugAccess := false.B
     debugBreakMachine := false.B
     debugBreakUser := false.B
+    val debugDataOwner = Wire(Bool())
+    debugDataOwner := false.B
     val programData = Wire(new MemoryPort)
     io.data :<>= programData
     val fetch = Fetch.instantiate(p)
@@ -88,7 +90,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.io.dataProtection.address := m.address
     csr.io.dataProtection.size := m.size
     csr.io.dataProtection.machine := csr.io.dataMachine
-    csr.io.dataProtection.kind := m.store.?(1.U(2), 0.U(2))
+    csr.io.dataProtection.kind := (m.atomicOperation >= 3.U(4)).?(3.U(2), m.store.?(1.U(2), 0.U(2)))
     val denied = mValid & memory & !m.trap & !csr.io.dataProtection.allowed
     programData.request.valid := mValid & memory & !m.trap & !sent & !denied
     programData.request.bits.address := m.address
@@ -100,6 +102,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val mask = (m.size === 0.U(2)).?(1.U(4), (m.size === 1.U(2)).?(3.U(4), 15.U(4)))
     programData.request.bits.mask := m.store.?((mask << lane).asBits.bits(3, 0).asUInt, 0.U(4))
     programData.request.bits.size := m.size
+    programData.request.bits.operation := m.atomicOperation
     programData.response.ready := mValid & memory & sent
     val response = programData.response.valid & programData.response.ready
     val csrError = m.csr & csr.io.illegal
@@ -113,6 +116,12 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val waiting = complete & m.wfi & !failed
     val synchronized = complete & synchronize & !failed
     val debugBreakpoint = complete & m.debugBreak & !failed
+    if p.enableA then
+      val permissionWrite = complete & m.csr & m.csrWrite & !failed &
+        (csr.io.protectionSelected | (m.csrAddress === 0x300.U(12)))
+      io.reservationClear.get := io.reset.asBool | systemReset | trap | interrupt | returning |
+        permissionWrite | debugAccess | debugResume
+      io.dataDebug.get := debugDataOwner
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
     val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
     csr.io.address := m.csrAddress
@@ -180,6 +189,26 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isRegister = (opcode === 0x33.B(7)) & ((funct7 === 0.B(7)) |
       ((funct7 === 32.B(7)) & ((funct3 === 0.B(3)) | (funct3 === 5.B(3)))))
     val isMultiplyDivide = if p.enableM then (opcode === 0x33.B(7)) & (funct7 === 1.B(7)) else false.B
+    val isAtomic = Wire(Bool())
+    val atomicOperation = Wire(UInt(4))
+    val atomicFunction = bits.bits(31, 27)
+    val isLr = atomicFunction === 2.B(5)
+    isAtomic := false.B
+    atomicOperation := 0.U(4)
+    if p.enableA then
+      val validFunction = Seq(0, 1, 2, 3, 4, 8, 12, 16, 20, 24, 28)
+        .map(code => atomicFunction === code.B(5)).reduce(_ | _)
+      isAtomic := (opcode === 0x2f.B(7)) & (funct3 === 2.B(3)) & validFunction &
+        (!isLr | (rs2 === 0.U(5)))
+      for (function, operation) <- Seq(2 -> 1, 3 -> 2, 1 -> 3, 0 -> 4, 4 -> 5,
+          12 -> 6, 8 -> 7, 16 -> 8, 20 -> 9, 24 -> 10, 28 -> 11) do
+        when(isAtomic & (atomicFunction === function.B(5))) { atomicOperation := operation.U(4) }
+    val isBit = Wire(Bool())
+    val bitUsesRs2 = Wire(Bool())
+    val bitValue = Wire(UInt(32))
+    isBit := false.B
+    bitUsesRs2 := false.B
+    bitValue := 0.U(32)
     val isLui = opcode === 0x37.B(7)
     val isAuipc = opcode === 0x17.B(7)
     val isLoad = (opcode === 0x03.B(7)) & ((funct3.asUInt <= 2.U(3)) |
@@ -196,9 +225,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isCsr = (opcode === 0x73.B(7)) & (funct3.bits(1, 0) =/= 0.B(2))
     val isMret = decoded === 0x30200073.U(32)
     val isWfi = decoded === 0x10500073.U(32)
-    val legal = encodingLegal & (isImmediate | isRegister | isMultiplyDivide | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isFenceI | isCsr | isMret | isWfi)
-    val use1 = isImmediate | isRegister | isMultiplyDivide | isLoad | isStore | isBranch | isJalr | (isCsr & !funct3.bit(2))
-    val use2 = isRegister | isMultiplyDivide | isStore | isBranch
+    val legal = encodingLegal & (isImmediate | isRegister | isMultiplyDivide | isBit | isAtomic | isLui | isAuipc | isLoad | isStore | isBranch | isJal | isJalr | isBreak | isCall | isFence | isFenceI | isCsr | isMret | isWfi)
+    val use1 = isImmediate | isRegister | isMultiplyDivide | isBit | isAtomic | isLoad | isStore | isBranch | isJalr | (isCsr & !funct3.bit(2))
+    val use2 = isRegister | isMultiplyDivide | bitUsesRs2 | (isAtomic & !isLr) | isStore | isBranch
     val a = Wire(UInt(32))
     val b = Wire(UInt(32))
     a := 0.U(32)
@@ -211,6 +240,14 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val match2 = producer & use2 & (rs2 === m.rd)
     when(match1 & !m.load) { a := m.value }
     when(match2 & !m.load) { b := m.value }
+    if p.enableZba || p.enableZbb || p.enableZbs then
+      val bit = BitOperations.instantiate(BitParameters(p.enableZba, p.enableZbb, p.enableZbs))
+      bit.io.word := decoded
+      bit.io.a := a
+      bit.io.b := b
+      isBit := bit.io.valid
+      bitUsesRs2 := bit.io.usesRs2
+      bitValue := bit.io.result
     val loadUse = m.load & (match1 | match2)
     val serialM = mValid & (m.csr | m.mret | m.wfi | m.fenceI)
     val arithmeticReady = Wire(Bool())
@@ -260,7 +297,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val immB = (sign.?(0x7ffff.B(19), 0.B(19)) ## bits.bits(31, 31) ## bits.bits(7, 7) ## bits.bits(30, 25) ## bits.bits(11, 8) ## 0.B(1)).asUInt
     val immJ = (sign.?(0x7ff.B(11), 0.B(11)) ## bits.bits(31, 31) ## bits.bits(19, 12) ## bits.bits(20, 20) ## bits.bits(30, 21) ## 0.B(1)).asUInt
     val sequential = (x.pc + x.length).asBits.bits(31, 0).asUInt
-    val address = (a + isStore.?(immS, immI)).asBits.bits(31, 0).asUInt
+    val address = isAtomic.?(a, (a + isStore.?(immS, immI)).asBits.bits(31, 0).asUInt)
     val compare = Wire(Bool())
     compare := a === b
     when(funct3.bits(2, 1) === 2.B(2)) { compare := a.asBits.asSInt < b.asBits.asSInt }
@@ -271,7 +308,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val target = isJalr.?((address.asBits.bits(31, 1) ## 0.B(1)).asUInt, relative)
     val badTarget = jump & (if p.enableC then target.asBits.bit(0) else target.asBits.bits(1, 0) =/= 0.B(2))
     val size = funct3.bits(1, 0).asUInt
-    val badData = (isLoad | isStore) & (
+    val badData = (isLoad | isStore | isAtomic) & (
       ((size === 2.U(2)) & (address.asBits.bits(1, 0) =/= 0.B(2))) |
       ((size === 1.U(2)) & address.asBits.bit(0)))
     val systemFault = (isMret & xUser) | (isWfi & csr.io.wfiIllegal)
@@ -282,7 +319,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     tval := x.word
     when(isBreak) { cause := 3.U(4); tval := x.pc }
     when(isCall) { cause := xUser.?(8.U(32), 11.U(32)); tval := 0.U(32) }
-    when(badData) { cause := isStore.?(6.U(32), 4.U(32)); tval := address }
+    when(badData) { cause := (isStore | (isAtomic & !isLr)).?(6.U(32), 4.U(32)); tval := address }
     when(badTarget) { cause := 0.U(32); tval := target }
     when(x.fault) { cause := 1.U(32); tval := x.faultAddress }
     val value = Wire(UInt(32))
@@ -301,6 +338,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(isAuipc) { value := (x.pc + (bits.bits(31, 12) ## 0.B(12)).asUInt).asBits.bits(31, 0).asUInt }
     when(isJal | isJalr) { value := sequential }
     when(isMultiplyDivide) { value := arithmeticValue }
+    when(isBit) { value := bitValue }
 
     val branchRedirect = advance & jump & !fault
     val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect | debugResume
@@ -321,10 +359,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.debugBreak := isDebugBreak
       m.nextPc := jump.?(target, sequential)
       m.rd := bits.bits(11, 7).asUInt
-      m.writes := isImmediate | isRegister | isMultiplyDivide | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
+      m.writes := isImmediate | isRegister | isMultiplyDivide | isBit | isAtomic | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
       m.value := value
-      m.load := isLoad
-      m.store := isStore
+      m.load := isLoad | isAtomic
+      m.store := isStore | (isAtomic & !isLr)
+      m.atomicOperation := atomicOperation
       m.address := address
       m.storeData := b
       m.size := size
@@ -400,6 +439,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       debug.io.protection.allowed := csr.io.dataProtection.allowed
       debug.io.protection.machine := csr.io.dataMachine
       val debugMemory = debugAccess | debug.io.memory.request.valid | debug.io.memory.response.ready
+      debugDataOwner := debugMemory
       debug.io.memory.request.ready := io.data.request.ready & debugMemory
       debug.io.memory.response.valid := io.data.response.valid & debugMemory
       debug.io.memory.response.bits :<= io.data.response.bits

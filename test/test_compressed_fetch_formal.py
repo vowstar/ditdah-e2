@@ -82,6 +82,19 @@ class CompressedFetchInputTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Invalid debug"):
             freeze(self.args)
 
+    def test_bit_configuration_binding(self):
+        for subset in range(8):
+            self.manifest["parameters"].update({"enable" + name: bool(subset & (1 << index))
+                for index, name in enumerate(("Zba", "Zbb", "Zbs"))})
+            self.save_manifest()
+            self.assertEqual(freeze(self.args)[1]["parameters"], self.manifest["parameters"])
+        for key in ("enableZba", "enableZbb", "enableZbs"):
+            self.manifest["parameters"][key] = 1
+            self.save_manifest()
+            with self.assertRaisesRegex(AssertionError, "Invalid bit"):
+                freeze(self.args)
+            self.manifest["parameters"][key] = False
+
     def test_observations_preserve_the_original_implementation(self):
         original = example_rtl()
         observed = observe(original)

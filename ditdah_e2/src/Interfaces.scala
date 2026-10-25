@@ -36,6 +36,7 @@ class MemoryRequest extends Bundle:
   val data = Aligned(UInt(32))
   val mask = Aligned(UInt(4))
   val size = Aligned(UInt(2))
+  val operation = Aligned(UInt(4))
 
 class MemoryResponse extends Bundle:
   val data = Aligned(UInt(32))
@@ -82,6 +83,7 @@ class Completion extends Bundle:
   val load = Aligned(Bool())
   val store = Aligned(Bool())
   val address = Aligned(UInt(32))
+  val atomicOperation = Aligned(UInt(4))
   val storeData = Aligned(UInt(32))
   val size = Aligned(UInt(2))
   val unsignedLoad = Aligned(Bool())
@@ -126,6 +128,8 @@ class CoreIO(p: Parameters) extends HWBundle(p):
   val reset = Flipped(Reset())
   val dmi = Option.when(p.enableDebug)(Flipped(new DmiPort))
   val systemReset = Option.when(p.enableDebug)(Aligned(Bool()))
+  val reservationClear = Option.when(p.enableA)(Aligned(Bool()))
+  val dataDebug = Option.when(p.enableA)(Aligned(Bool()))
   val interrupts = Flipped(new InterruptLevels)
   val timeValue = Flipped(UInt(64))
   val instruction = Aligned(new MemoryPort)

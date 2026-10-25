@@ -7,6 +7,17 @@ from pmp import ADDRESS_MASK, LIMIT, Reference, check, partial_match_mutant
 
 
 class PmpTests(unittest.TestCase):
+    def test_atomic_access_requires_read_and_write_permissions(self):
+        for permissions in (0, 1, 3, 4, 5, 7):
+            for locked in (0, 128):
+                model = Reference(allow_atomic=True)
+                model.write(0x3B0, 0x400)
+                model.write(0x3A0, 0x10 | locked | permissions)
+                self.assertEqual(model.allowed((0x1000, 2, 0, 3)), permissions & 3 == 3)
+                self.assertEqual(model.allowed((0x1000, 2, 1, 3)), not locked or permissions & 3 == 3)
+                self.assertFalse(model.allowed((0x1002, 2, 1, 3)))
+        self.assertFalse(Reference().allowed((0, 2, 1, 3)))
+
     def test_csr_decode_and_unknown_writes(self):
         model = Reference()
         addresses = set(range(0x3A0, 0x3A4)) | set(range(0x3B0, 0x3C0))

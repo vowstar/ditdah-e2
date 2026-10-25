@@ -36,7 +36,7 @@ def observer(rtl):
     declarations, assignments = [], []
     widths = {"request_valid": 1, "request_ready": 1, "request_bits_address": 32,
               "request_bits_write": 1, "request_bits_data": 32, "request_bits_mask": 4,
-              "request_bits_size": 2, "request_bits_machine": 1, "response_valid": 1, "response_ready": 1,
+              "request_bits_size": 2, "request_bits_machine": 1, "request_bits_operation": 4, "response_valid": 1, "response_ready": 1,
               "response_bits_data": 32, "response_bits_fault": 1}
     for group, instance, port in (("i", "core", "instruction"), ("d", "core", "data"),
                                   ("console", "console", "memory"), ("timer", "timer", "memory")):
@@ -167,7 +167,9 @@ def check(image, parameters, regions, trace, selected="timer"):
     groups, observed = cycles(trace)
     timer, device_results, timer_counts, console_counts = device_expectations(groups, b"E23\n" if selected == "timer" else b"U\n")
     model = Model(image.words(), image.entry, enable_m=parameters["enableM"], enable_c=parameters["enableC"],
-                  protected_mode=parameters.get("protectedMode", False))
+                  protected_mode=parameters.get("protectedMode", False), enable_a=parameters.get("enableA", False),
+                  enable_zba=parameters.get("enableZba", False), enable_zbb=parameters.get("enableZbb", False),
+                  enable_zbs=parameters.get("enableZbs", False))
     outstanding, issued, external_results, offered = {}, {}, {}, {}
     completed = deque()
     instructions = Counter()
@@ -384,7 +386,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     shutil.copytree(args.platform, args.output / "platform", dirs_exist_ok=True)
     copied_inputs = verify_platform_inputs(args.output / "platform", manifest)
-    source_names = ("test/verify_platform.py", "test/test_platform.py", "test/platform_sim.cpp", "test/inactive_debug.hpp", "test/model.py", "test/compressed_model.py",
+    source_names = ("test/verify_platform.py", "test/test_platform.py", "test/platform_sim.cpp", "test/inactive_debug.hpp", "test/model.py", "test/bit_model.py", "test/compressed_model.py",
                     "test/compressed_unit.py", "test/console.py", "test/timer.py", "test/pmp.py", "test/elf.py",
                     "scripts/build_software.py", "scripts/build_rtl.py", "software/start.S", "software/link.ld",
                     "software/timer.c", "software/protected.S")

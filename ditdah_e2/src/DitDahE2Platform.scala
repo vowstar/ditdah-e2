@@ -31,6 +31,7 @@ class PlatformIO(p: PlatformParameters) extends HWBundle(p):
 object DitDahE2Platform extends Generator[PlatformParameters, PlatformLayers, PlatformIO, PlatformProbe]:
   override def moduleName(p: PlatformParameters): String = "DitDahE2Platform"
   def architecture(p: PlatformParameters) =
+    require(!p.core.enableA, "Use the atomic platform for A instructions")
     val io = summon[Interface[PlatformIO]]
     val core = DitDahE2.instantiate(p.core)
     val router = MemoryRouter.instantiate(p)

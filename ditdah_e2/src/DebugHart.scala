@@ -143,6 +143,7 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
             memory.machine := io.protection.machine
             memory.write := request.write
             memory.size := request.size
+            memory.selectDynamic("operation") := 0.U(4)
             val shift = (request.address.asBits.bits(1, 0) ## 0.B(3)).asUInt
             memory.data := (request.data << shift).asBits.bits(31, 0).asUInt
             val mask = (request.size === 0.U(2)).?(1.U(4), (request.size === 1.U(2)).?(3.U(4), 15.U(4)))

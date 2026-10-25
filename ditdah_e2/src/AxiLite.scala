@@ -30,7 +30,9 @@ object AxiLite extends Generator[Parameters, UnitLayers, AxiLiteIO, UnitProbe]:
       (io.data.request.valid & io.data.request.ready)
     when(accepted) {
       active := true.B
-      done := false.B
+      val unsupported = selectData.?(io.data.request.bits.operation, io.instruction.request.bits.operation) =/= 0.U(4)
+      done := unsupported
+      when(unsupported) { result.data := 0.U(32); result.fault := true.B }
       dataOwner := selectData
       preferData := !selectData
       awSent := false.B

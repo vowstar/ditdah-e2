@@ -80,7 +80,8 @@ endmodule
 
 
 class Reference:
-    def __init__(self):
+    def __init__(self, allow_atomic=False):
+        self.allow_atomic = allow_atomic
         self.configs = [0] * 16
         self.addresses = [0] * 16
         self.counts = Counter()
@@ -138,7 +139,7 @@ class Reference:
         address, size, machine, kind = query
         assert 0 <= address < LIMIT and size in range(4) and machine in (0, 1) and kind in range(4)
         self.counts[f"kind{kind}"] += 1
-        if size == 3 or kind == 3:
+        if size == 3 or kind == 3 and not self.allow_atomic:
             self.counts["unsupportedQuery"] += 1
             return False
         if address + (1 << size) > LIMIT:
@@ -158,7 +159,7 @@ class Reference:
             if machine and not config & 128:
                 self.counts["machineBypass"] += 1
                 return True
-            permitted = bool(config & (1 << kind))
+            permitted = (config & 3 == 3) if kind == 3 else bool(config & (1 << kind))
             self.counts["permissionAllow" if permitted else "permissionDeny"] += 1
             return permitted
         self.counts["machineNoMatch" if machine else "userNoMatch"] += 1
@@ -177,7 +178,7 @@ class Reference:
         return result
 
 
-def vectors(seed=0x3A0):
+def vectors(seed=0x3A0, allow_atomic=False):
     rows, labels, packed = [], [], [0] * 4
 
     def add(label, address=0, value=0, commit=0, reset=0,
@@ -246,7 +247,7 @@ def vectors(seed=0x3A0):
             config(first, 0x10)
             config(second, 0x1F)
             for address in (0x1000, 0x1002, 0x1004, 0x1007, 0x1008, 0x101F, 0x1020):
-                for kind in range(3):
+                for kind in range(4 if allow_atomic else 3):
                     add("priority_overlap", instruction=(address, 2, 0, kind), data=(address, 2, 1, kind))
     for first, top in ((0, 0), (0, 4), (0x401, 0x400), (0x400, 0x400), (0x3FFFFFFE, 0x3FFFFFFF)):
         reset()
@@ -273,10 +274,10 @@ def vectors(seed=0x3A0):
     return rows, labels
 
 
-def check(rows, trace):
+def check(rows, trace, allow_atomic=False):
     lines = [line.split() for line in trace.splitlines()]
     assert len(lines) == len(rows), "PMP sample count differs"
-    model = Reference()
+    model = Reference(allow_atomic)
     for cycle, (row, fields) in enumerate(zip(rows, lines, strict=True)):
         assert len(fields) == 5, "Invalid PMP observation width"
         actual = tuple(int(value, 16 if index == 2 else 10) for index, value in enumerate(fields))
@@ -289,7 +290,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build(output):
+def build(output, allow_atomic=False):
     names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/Pmp.scala",
              "ditdah_e2/src/PmpInterfaces.scala", "test/pmp.py", "test/test_pmp.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(ROOT)) for path in sorted((ROOT / "nix").glob("*.nix"))]
@@ -302,7 +303,8 @@ def build(output):
     generated.mkdir()
     (generated / "Top.scala").write_text(WRAPPER)
     (generated / "pmp_tb.sv").write_text(HARNESS)
-    (generated / "parameters.json").write_text("{}\n")
+    parameters = {"enableA": allow_atomic}
+    (generated / "parameters.json").write_text(json.dumps(parameters) + "\n")
     tool_hashes = {name: digest(Path(shutil.which(name))) for name in
                    ("elaborate-ditdah-e2", "firld", "firtool", "iverilog", "vvp")}
     commands = []
@@ -331,7 +333,7 @@ def build(output):
             assert result.returncode == 0, f"PMP generation failed at command {stage}"
         shutil.copytree(work / "rtl", output / "rtl")
     assert all((ROOT / name).read_bytes() == value for name, value in contents.items()), "PMP source changed"
-    report = {"exitStatus": 0, "parameters": {}, "specification": SPECIFICATION, "commands": commands,
+    report = {"exitStatus": 0, "parameters": parameters, "specification": SPECIFICATION, "commands": commands,
               "inputHashes": {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()},
               "generatedHashes": {path.name: digest(path) for path in generated.iterdir()},
               "rtlHashes": {path.name: digest(path) for path in (output / "rtl").glob("*.sv")},
@@ -369,12 +371,13 @@ def partial_match_mutant(content):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("result/pmp"))
+    parser.add_argument("--atomic", action="store_true")
     args = parser.parse_args()
     assert not args.output.exists() or not any(args.output.iterdir()), "PMP output must be empty"
-    report = build(args.output)
-    rows, labels = vectors()
+    report = build(args.output, args.atomic)
+    rows, labels = vectors(allow_atomic=args.atomic)
     trace = simulate(args.output / "normal", rows, args.output / "rtl/DitDahE2Pmp.sv")
-    counts = check(rows, trace)
+    counts = check(rows, trace, args.atomic)
     required = ("lockedConfig", "lockedAddress", "torPredecessor", "warlConfig", "warlAddress", "overflow",
                 "unsupportedQuery", "partial", "machineBypass", "permissionAllow", "permissionDeny",
                 "machineNoMatch", "userNoMatch", *[f"entry{index}" for index in range(16)], "mode1", "mode2", "mode3")
@@ -382,7 +385,7 @@ def main():
     mutant = args.output / "partial-match-mutant.sv"
     mutant.write_text(partial_match_mutant((args.output / "rtl/DitDahE2Pmp.sv").read_text()))
     changed = simulate(args.output / "partial-match", rows, mutant)
-    reference = Reference()
+    reference = Reference(args.atomic)
     expected = [reference.step(row, cycle) for cycle, row in enumerate(rows)]
     observed = [tuple(int(value, 16 if index == 2 else 10) for index, value in enumerate(line.split()))
                 for line in changed.splitlines()]
@@ -390,7 +393,7 @@ def main():
                     if wanted[4] == 0 and actual[4] == 1 and rows[cycle][8:11] == (0x1002, 2, 1)), None)
     assert witness is not None, "PMP mutant did not allow a denied M operation"
     try:
-        check(rows, changed)
+        check(rows, changed, args.atomic)
     except AssertionError as error:
         reason = str(error)
         assert reason.startswith("PMP mismatch"), reason
@@ -399,7 +402,7 @@ def main():
     assert all(digest(ROOT / name) == value for name, value in report["inputHashes"].items()), "PMP source changed"
     (args.output / "labels.json").write_text(json.dumps(labels) + "\n")
     summary = {"scope": "standalone sixteen-entry RV32 PMP CSR bank and two permission queries", "exitStatus": 0,
-               "buildHash": digest(args.output / "build.json"), "cycles": len(rows), "queries": 2 * len(rows),
+               "parameters": report["parameters"], "buildHash": digest(args.output / "build.json"), "cycles": len(rows), "queries": 2 * len(rows),
                "coverage": counts, "traceHash": digest(args.output / "normal/pmp.trace"),
                "vectorsHash": digest(args.output / "normal/vectors.txt"), "labelsHash": digest(args.output / "labels.json"),
                "negativeControls": [{"name": "partial M access bypass", "cycle": witness, "reason": reason,

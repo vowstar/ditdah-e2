@@ -15,9 +15,9 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIELDS = ("owner", "write", "address", "data", "mask", "size", "machine", "awDelay", "wDelay", "arDelay",
+FIELDS = ("owner", "write", "address", "data", "mask", "size", "machine", "operation", "awDelay", "wDelay", "arDelay",
           "responseDelay", "nativeDelay", "response")
-CHANNELS = {"i": ("ia", "iw", "id", "im", "iz", "ip"), "d": ("da", "dw", "dd", "dm", "dz", "dp"),
+CHANNELS = {"i": ("ia", "iw", "id", "im", "iz", "ip", "ix"), "d": ("da", "dw", "dd", "dm", "dz", "dp", "dx"),
             "o": ("od", "of"), "p": ("pd", "pf"), "a": ("aa", "ap"),
             "w": ("wd", "wm"), "b": ("br",), "r": ("ra", "rp"), "q": ("qd", "qr")}
 READY = {"i": "ir", "d": "dr", "o": "or", "p": "pr", "a": "ay", "w": "wy", "b": "by",
@@ -52,6 +52,7 @@ def vectors(seed, count=1024):
             offset = index % 4
             rows.append(dict(zip(FIELDS, (owner, int(write), 0x20000000 + 4 * rng.randrange(256) + offset,
                                          rng.getrandbits(32), index % 16, index % 3, (index // 2) % 2,
+                                         1 + (index // 5) % 15 if index >= 32 and index % 5 == 0 else 0,
                                          (0, 7, 3)[index % 3] if index < 32 else rng.randrange(20),
                                          (7, 0, 3)[index % 3] if index < 32 else rng.randrange(20),
                                          rng.randrange(12), rng.randrange(12), rng.randrange(12),
@@ -109,18 +110,20 @@ def check(vectors, initial, samples, complete=True):
             assert positions[owner] < len(queues[owner]), "Extra native request"
             row = queues[owner][positions[owner]]
             prefix = "d" if owner else "i"
-            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p")) == tuple(
-                row[field] for field in ("address", "write", "data", "mask", "size", "machine")), "Changed native request"
+            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p", "x")) == tuple(
+                row[field] for field in ("address", "write", "data", "mask", "size", "machine", "operation")), "Changed native request"
             if sample["iv"] and sample["dv"]:
                 assert owner == prefer, "Arbitration did not alternate"
                 counts["contendedGrants"] += 1
             prefer = 1 - owner
             positions[owner] += 1
-            active = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None, "response": None}
+            active = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None, "response": (cycle, 0, 1) if row["operation"] else None}
             counts["requests"] += 1
             offsets.add(row["address"] % 4)
         if active:
             request = active["request"]
+            if request["operation"]:
+                assert not any(sample[key] for key in ("av", "wv", "rv", "by", "qy")), "Atomic request reached AXI"
             write = request["write"]
             address = request["address"] & ~3
             prot = (0 if request["owner"] else 4) | request["machine"]
@@ -174,7 +177,10 @@ def check(vectors, initial, samples, complete=True):
                 assert (sample[channel + "d"], sample[channel + "f"]) == (value, fault), "Wrong native response"
                 if sample[READY[channel]]:
                     counts["responses"] += 1
-                    counts[f"owner{owner}Code{request['response']}"] += 1
+                    if request["operation"]:
+                        counts[f"owner{owner}Rejected{request['operation']}"] += 1
+                    else:
+                        counts[f"owner{owner}Code{request['response']}"] += 1
                     active = None
                 else:
                     counts["nativeResponseStalls"] += 1
@@ -278,6 +284,7 @@ def main():
             assert counts["addressOffsets"] == list(range(4)), "Missing address offset"
             assert counts["contendedGrants"] == len(rows) - 1, "Missing sustained contention"
             assert all(counts[f"owner{owner}Code{code}"] > 0 for owner in (0, 1) for code in (0, 2, 3)), "Missing response class"
+            assert all(counts[f"owner{owner}Rejected{op}"] > 0 for owner in (0, 1) for op in range(1, 16)), "Missing rejected operation"
             outcomes.append({"seed": seed, **counts, "negativeControls": controls,
                              "vectorHash": sha(vector_text.encode()), "memoryHash": sha(memory_text.encode()), "traceHash": sha(trace.encode())})
         assert all((work / "inputs" / name).read_bytes() == value for name, value in contents.items()), "Frozen inputs changed"
@@ -291,7 +298,7 @@ def main():
                   "commands": commands, "command": "python3 test/axi.py", "exitStatus": 0, "outcomes": outcomes,
                   "environment": ["cold reset before offered requests", "one outstanding native request per port",
                                   "AXI4-Lite responses are OKAY, SLVERR or DECERR", "failed writes have no memory effect"],
-                  "excluded": ["CPU integration", "platform endpoints", "atomic accesses", "warm reset", "memory liveness"]}
+                  "excluded": ["CPU integration", "platform endpoints", "atomic memory execution", "warm reset", "memory liveness"]}
         (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"PASS: {sum(row['responses'] for row in outcomes)} AXI transactions and {3 * len(outcomes)} negative controls")
 

@@ -118,7 +118,8 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
       (io.userMode & !io.debugAccess & ((io.address.asBits.bits(9, 8) =/= 0.B(2)) | userCounterDenied))
     io.readData := 0.U(32)
     when(io.address === 0x300.U(12)) { io.readData := status }
-    val misa = 0x40000100L | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L) |
+    val misa = 0x40000100L | (if p.enableA then 1L else 0L) | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L) |
+      (if p.enableZba && p.enableZbb && p.enableZbs then 2L else 0L) |
       (if p.protectedMode then 0x100000L else 0L)
     when(io.address === 0x301.U(12)) { io.readData := misa.U(32) }
     when(io.address === 0x304.U(12)) { io.readData := interruptEnables }

@@ -37,7 +37,7 @@ object MemoryRouter extends Generator[PlatformParameters, PlatformLayers, Memory
 
     val fetchRegion = contains(fetch.address, p.romBase, p.romSize) |
       contains(fetch.address, p.ramBase, p.ramSize)
-    val fetchAllowed = fetchRegion & !fetch.write & (fetch.size === 2.U(2)) &
+    val fetchAllowed = fetchRegion & (fetch.operation === 0.U(4)) & !fetch.write & (fetch.size === 2.U(2)) &
       (fetch.mask === 0.U(4)) & (fetch.address.asBits.bits(1, 0) === 0.B(2))
     io.memoryInstruction.request.valid := !instructionActive & io.instruction.request.valid & fetchAllowed
     io.memoryInstruction.request.bits :<= fetch
@@ -62,9 +62,11 @@ object MemoryRouter extends Generator[PlatformParameters, PlatformLayers, Memory
     val shape = aligned & (request.mask === request.write.?(writeMask, 0.U(4)))
     val rom = contains(request.address, p.romBase, p.romSize) & !request.write
     val ram = contains(request.address, p.ramBase, p.ramSize)
-    val memory = shape & (rom | ram)
-    val console = shape & word & contains(request.address, p.consoleBase, p.consoleSize)
-    val timer = shape & word & contains(request.address, p.timerBase, p.timerSize)
+    val ordinary = request.operation === 0.U(4)
+    val atomicAllowed = if p.core.enableA then (request.operation <= 11.U(4)) & word else ordinary
+    val memory = shape & ((ordinary & rom) | (atomicAllowed & ram))
+    val console = ordinary & shape & word & contains(request.address, p.consoleBase, p.consoleSize)
+    val timer = ordinary & shape & word & contains(request.address, p.timerBase, p.timerSize)
     val selected = Wire(UInt(2))
     selected := memory.?(1.U(2), console.?(2.U(2), timer.?(3.U(2), 0.U(2))))
     io.memoryData.request.valid := !dataActive & io.data.request.valid & memory

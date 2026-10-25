@@ -50,7 +50,8 @@ def freeze(args):
             value = (root / name).read_bytes()
             assert hashlib.sha256(value).hexdigest() == expected, "Changed throughput input"
             contents[prefix + "/" + name] = value
-    for name in ("sim.cpp", "model.py", "programs.py", "compressed_model.py", "compressed_programs.py", "compressed_unit.py", "verify.py"):
+    for name in ("sim.cpp", "inactive_debug.hpp", "model.py", "bit_model.py", "bit_programs.py", "bit_pipeline.py",
+                 "bit_operations.py", "pmp.py", "programs.py", "compressed_model.py", "compressed_programs.py", "compressed_unit.py", "verify.py"):
         contents["test/" + name] = (args.source_root / "test" / name).read_bytes()
     for name in ("fetch_throughput.py", "test_fetch_throughput.py", "core_formal.py"):
         contents["test/" + name] = Path(__file__).with_name(name).read_bytes()
@@ -128,7 +129,12 @@ def main():
                     addresses = addresses[1:]
                 image = compressed._image(((0, sequence + [(programs.jump(0, 0x3000 - cursor), 4)]), (0x3000, [(0x6f, 4)])))
                 case = compressed.CompressedCase(name, image, 0, 0, 0x2000, 0x3000, enable_c=enabled,
-                                                enable_m=manifest["parameters"].get("enableM", False))
+                                                enable_m=manifest["parameters"].get("enableM", False),
+                                                enable_a=manifest["parameters"].get("enableA", False),
+                                                protected_mode=manifest["parameters"].get("protectedMode", False),
+                                                enable_zba=manifest["parameters"].get("enableZba", False),
+                                                enable_zbb=manifest["parameters"].get("enableZbb", False),
+                                                enable_zbs=manifest["parameters"].get("enableZbs", False))
                 image_path = case_output / (name + ".hex")
                 image_path.write_text("".join(f"{address:08x} {word:08x}\n" for address, word in sorted(image.items())))
                 image_hash = digest(image_path)

@@ -58,7 +58,7 @@ def trap_handler(handler_pc=HANDLER_PC, completion_pc=COMPLETION_PC, record=TRAP
     return code
 
 
-def csr_cases(enable_m=False, enable_c=False):
+def csr_cases(enable_m=False, enable_c=False, *, enable_a=False, enable_zba=False, enable_zbb=False, enable_zbs=False):
     def complete(name, code, signature=None):
         return Case(name, code + [jump(0, COMPLETION_PC - PROGRAM_PC - len(code) * 4)],
                     signature=signature or {}, expected_causes=())
@@ -75,7 +75,7 @@ def csr_cases(enable_m=False, enable_c=False):
         csr(7, 0x340)] + [store(i, 0, 256 + (i - 1) * 4) for i in range(1, 8)],
         dict(zip(range(256, 284, 4), (31, 31, 31, 31, 0, 7, 0)))))
     addresses = (0x300, 0x301, 0x304, 0x305, 0x310, 0x340, 0x341, 0x342, 0x343, 0x344)
-    misa = 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2)
+    misa = 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2) | int(enable_a) | (2 if enable_zba and enable_zbb and enable_zbs else 0)
     expected = ((0x1800, misa, 0, 0, 0, 0, 0, 0, 0, 0),
                 (0x1888, misa, 0x888, 0xFFFFFFFC, 0, 0xFFFFFFFF,
                  0xFFFFFFFE if enable_c else 0xFFFFFFFC, 0xFFFFFFFF, 0xFFFFFFFF, 0),
@@ -436,6 +436,10 @@ class Case:
     expected_interrupts: tuple[int, ...] = ()
     enable_m: bool = False
     enable_c: bool = False
+    enable_a: bool = False
+    enable_zba: bool = False
+    enable_zbb: bool = False
+    enable_zbs: bool = False
 
     def words(self):
         for entry in self.interrupt_schedule:
@@ -518,11 +522,14 @@ def reset_cases(reset):
     return result
 
 
-def cases(reset=0, enable_m=False, enable_c=False):
+def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba=False, enable_zbb=False, enable_zbs=False):
     compressed = []
     if enable_c:
         from compressed_programs import cases as compressed_cases
         compressed = compressed_cases(reset, enable_m)
+        for case in compressed:
+            case.enable_a = enable_a
+            case.enable_zba, case.enable_zbb, case.enable_zbs = enable_zba, enable_zbb, enable_zbs
         if reset % 4:
             return compressed
     if reset:
@@ -532,6 +539,8 @@ def cases(reset=0, enable_m=False, enable_c=False):
         for case in result:
             case.enable_m = enable_m
             case.enable_c = enable_c
+            case.enable_a = enable_a
+            case.enable_zba, case.enable_zbb, case.enable_zbs = enable_zba, enable_zbb, enable_zbs
         return result + compressed
     a = immediate
     load = lambda rd, base, offset=0: a(rd, base, offset, 0x03, 2)
@@ -636,7 +645,9 @@ def cases(reset=0, enable_m=False, enable_c=False):
                         store(rs2, 31, rng.randrange(16) * 4) if choice == 2 else
                         load(rd, 31, rng.randrange(16) * 4))
         result.append(Case(f"random_{seed}", code + [BREAK]))
-    result += csr_cases(enable_m, enable_c) + [nested_case()] + interrupt_cases() + counter_cases()
+    from bit_programs import cases as bit_cases
+    result += bit_cases(enable_zba, enable_zbb, enable_zbs)
+    result += csr_cases(enable_m, enable_c, enable_a=enable_a, enable_zba=enable_zba, enable_zbb=enable_zbb, enable_zbs=enable_zbs) + [nested_case()] + interrupt_cases() + counter_cases()
     if enable_m:
         result += multiply_cases()
     if enable_c:
@@ -646,4 +657,8 @@ def cases(reset=0, enable_m=False, enable_c=False):
         case.reset = reset
         case.enable_m = enable_m
         case.enable_c = enable_c
+        case.enable_a = enable_a
+        case.enable_zba = enable_zba
+        case.enable_zbb = enable_zbb
+        case.enable_zbs = enable_zbs
     return result + compressed

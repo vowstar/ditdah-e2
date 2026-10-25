@@ -26,8 +26,12 @@ class SoftwareCase:
     instruction_fault = data_fault = None
     expected_causes = expected_interrupts = interrupt_schedule = ()
 
-    def __init__(self, image, enable_m=False, enable_c=False):
+    def __init__(self, image, enable_m=False, enable_c=False, enable_a=False,
+                 enable_zba=False, enable_zbb=False, enable_zbs=False, protected_mode=False):
         self.image = image
+        self.enable_a = enable_a
+        self.protected_mode = protected_mode
+        self.enable_zba, self.enable_zbb, self.enable_zbs = enable_zba, enable_zbb, enable_zbs
         self.enable_m = enable_m
         self.enable_c = enable_c
         self.reset = image.entry
@@ -126,7 +130,11 @@ def main():
     software_hash = digest(software / "manifest.json")
     elf_hash = digest(software / "program.elf")
     case = SoftwareCase(load_elf(software / "program.elf", reset_vector=reset, enable_c=enable_c),
-                        enable_m=enable_m, enable_c=enable_c)
+                        enable_m=enable_m, enable_c=enable_c, enable_a=manifest["parameters"].get("enableA", False),
+                        protected_mode=manifest["parameters"].get("protectedMode", False),
+                        enable_zba=manifest["parameters"].get("enableZba", False),
+                        enable_zbb=manifest["parameters"].get("enableZbb", False),
+                        enable_zbs=manifest["parameters"].get("enableZbs", False))
     scratch = "/data/tmp" if os.access("/data/tmp", os.W_OK) else None
     results = []
     controls = 0

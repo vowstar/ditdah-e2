@@ -60,7 +60,9 @@ def main():
     for name, expected in manifest["rtlHashes"].items():
         assert digest(args.rtl / name) == expected, "RTL changed"
     hashes = inputs()
-    selected = [case for case in cases(parameters["resetVector"], parameters["enableM"], parameters["enableC"])
+    selected = [case for case in cases(parameters["resetVector"], parameters["enableM"], parameters["enableC"],
+                                      enable_a=parameters["enableA"], enable_zba=parameters["enableZba"],
+                                      enable_zbb=parameters["enableZbb"], enable_zbs=parameters["enableZbs"])
                 if not args.case or case.name in args.case]
     assert selected and set(args.case) <= {case.name for case in selected}, "Unknown case"
     args.output.mkdir(parents=True)
