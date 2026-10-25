@@ -6,6 +6,8 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
   (* anyseq *) reg redirect, pause, memory_request_ready, memory_response_valid, output_ready;
   (* anyseq *) reg [31:0] target, memory_response_bits_data;
   (* anyseq *) reg memory_response_bits_fault;
+  (* anyseq *) reg machine;
+  wire memory_request_bits_machine;
   wire idle, memory_request_valid, memory_request_bits_write, memory_response_ready, output_valid;
   wire [31:0] memory_request_bits_address, memory_request_bits_data, output_bits_pc, output_bits_word;
   wire [3:0] memory_request_bits_mask;
@@ -108,6 +110,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
       assert(memory_request_valid || !canceled_offer);
       if (memory_request_valid) begin
         assert(memory_request_bits_address[1:0] == 0);
+        if (!offered) assert(memory_request_bits_machine == machine);
         assert(!memory_request_bits_write && memory_request_bits_data == 0);
         assert(memory_request_bits_mask == 0 && memory_request_bits_size == 2);
         if (!canceled_offer && stream_valid) assert(memory_request_bits_address == expected_request);
@@ -127,7 +130,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
         if ($past(memory_request_valid && !memory_request_ready)) begin
           assert(memory_request_valid);
           assert($stable({memory_request_bits_address, memory_request_bits_write,
-                          memory_request_bits_data, memory_request_bits_mask, memory_request_bits_size}));
+                          memory_request_bits_data, memory_request_bits_mask, memory_request_bits_size, memory_request_bits_machine}));
         end
         if ($past(output_valid && !output_ready && !flush) && !flush) begin
           assert(output_valid);

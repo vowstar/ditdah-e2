@@ -49,7 +49,8 @@ def console_stores(trace):
             pending = tuple(map(int, fields[3:]))
         elif fields[0] == "S" and fields[2] == "D":
             assert pending is not None, "Data response without request"
-            address, write, data, mask, size = pending
+            assert len(pending) in (5, 6), "Invalid data request width"
+            address, write, data, mask, size = pending[:5]
             if CONSOLE <= address < CONSOLE + 0x1000:
                 assert (address, write, mask, size) == (CONSOLE, 1, 15, 2), "Invalid console store"
                 assert int(fields[4]) == 0, "Failed console store"

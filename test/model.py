@@ -46,6 +46,7 @@ class Event:
     instruction: str = "illegal"
     length: int = 4
     user_mode: bool = False
+    memory_machine: bool = True
 
 
 class Model:
@@ -245,11 +246,11 @@ class Model:
             result.instruction = {0: "lb", 1: "lh", 2: "lw", 4: "lbu", 5: "lhu"}[f3] if not write else ["sb", "sh", "sw"][f3]
             offset = signed(((insn >> 25) << 5) | rd, 12) if write else imm
             address = (a + offset) & MASK
+            result.memory_machine = not self.user_mode and (not self.protected_mode or
+                not self.csrs[0x300] & (1 << 17) or self.csrs[0x300] & 0x1800 == 0x1800)
             if address % count:
                 fault(6 if write else 4, address)
-            elif self.pmp is not None and not self.pmp.allowed((address, f3 & 3,
-                    int(not self.user_mode and (not self.csrs[0x300] & (1 << 17) or
-                                               self.csrs[0x300] & 0x1800 == 0x1800)), int(write))):
+            elif self.pmp is not None and not self.pmp.allowed((address, f3 & 3, int(result.memory_machine), int(write))):
                 fault(7 if write else 5, address)
             else:
                 lane = address % 4

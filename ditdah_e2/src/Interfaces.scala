@@ -18,6 +18,7 @@ class Channel[T <: Data](payload: T) extends Bundle:
 
 class MemoryRequest extends Bundle:
   val address = Aligned(UInt(32))
+  val machine = Aligned(Bool())
   val write = Aligned(Bool())
   val data = Aligned(UInt(32))
   val mask = Aligned(UInt(4))
@@ -59,6 +60,7 @@ class Instruction extends Bundle:
 
 class Completion extends Bundle:
   val instruction = Aligned(new Instruction)
+  val userMode = Aligned(Bool())
   val nextPc = Aligned(UInt(32))
   val rd = Aligned(UInt(5))
   val writes = Aligned(Bool())
@@ -83,6 +85,7 @@ class Completion extends Bundle:
 
 class Retirement extends Bundle:
   val valid = Aligned(Bool())
+  val userMode = Aligned(Bool())
   val pc = Aligned(UInt(32))
   val word = Aligned(UInt(32))
   val nextPc = Aligned(UInt(32))
@@ -96,6 +99,7 @@ class Retirement extends Bundle:
 class FetchIO(p: Parameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
+  val machine = Flipped(Bool())
   val redirect = Flipped(Bool())
   val target = Flipped(UInt(32))
   val pause = Flipped(Bool())

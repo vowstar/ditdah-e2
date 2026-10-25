@@ -32,6 +32,8 @@ def mutate(content, name):
                          "assign memory_request_bits_address = heldDiscarded ? {target[31:2], 2'b0} : memory_request_bits_address_0;"),
         "idle": ("assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;",
                  "assign idle = ~outstanding & ~firstValid & ~secondValid & ~buffered;"),
+        "held-privilege": ("assign memory_request_bits_machine = held ? heldMachine : machine;",
+                           "assign memory_request_bits_machine = machine;"),
         "capacity": ("& (~tailValid | release_0);", "& 1'b1;")}
     return replace_once(content, *changes[name])
 
@@ -61,7 +63,8 @@ def freeze(args):
     assert type(parameters.get("enableC", False)) is bool, "Invalid C configuration"
     assert type(parameters["resetVector"]) is int and 0 <= parameters["resetVector"] <= 0xFFFFFFFF, "Invalid reset address"
     assert parameters["resetVector"] % (2 if parameters.get("enableC", False) else 4) == 0, "Misaligned reset address"
-    assert set(parameters) <= {"resetVector", "enableM", "enableC"}, "Unknown fetch configuration"
+    assert set(parameters) <= {"resetVector", "enableM", "enableC", "protectedMode"}, "Unknown fetch configuration"
+    assert type(parameters.get("protectedMode", False)) is bool, "Invalid protection configuration"
     assert isinstance(parameters.get("enableM", False), bool), "Invalid M configuration"
     assert manifest["sourceHashes"] == source_hashes(args.source_root), "Stale RTL inputs"
     contents = {"manifest.json": raw_manifest, "rtl/manifest.json": raw_manifest,
@@ -131,7 +134,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compr
 
 def verification_cases(compressed, depth, selected):
     cases = [("prove", "prove", depth, False), ("cover", "cover", 32, False)]
-    mutations = ("release", "fault-address", "cross-word", "held-request", "idle", "capacity") if compressed else ("held-request", "idle", "capacity")
+    mutations = ("release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity") if compressed else ("held-request", "held-privilege", "idle", "capacity")
     cases += [(name, "bmc", 24, True) for name in mutations]
     assert not selected or set(selected) <= {item[0] for item in cases}, "Unsupported fetch case for this configuration"
     return [item for item in cases if not selected or item[0] in selected]
@@ -142,7 +145,7 @@ def main():
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("result/compressed-fetch-formal"))
-    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request", "idle", "capacity"))
+    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity"))
     parser.add_argument("--prove-depth", type=int, default=4)
     args = parser.parse_args()
     if args.prove_depth < 2:

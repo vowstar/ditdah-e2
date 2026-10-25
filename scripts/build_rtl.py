@@ -24,8 +24,8 @@ C_INSTRUCTIONS = ["c.addi4spn", "c.lw", "c.sw", "c.addi", "c.jal", "c.li", "c.lu
 
 
 def configuration(value):
-    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC"}:
-        raise ValueError("Only resetVector, enableM and enableC are supported")
+    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC", "protectedMode"}:
+        raise ValueError("Only resetVector, enableM, enableC and protectedMode are supported")
     enable_c = value.get("enableC", True)
     if type(enable_c) is not bool:
         raise ValueError("enableC must be a Boolean")
@@ -35,7 +35,10 @@ def configuration(value):
     enable_m = value.get("enableM", True)
     if type(enable_m) is not bool:
         raise ValueError("enableM must be a Boolean")
-    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c}
+    protected = value.get("protectedMode", False)
+    if type(protected) is not bool:
+        raise ValueError("protectedMode must be a Boolean")
+    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected}
 
 
 def digest(path):
@@ -80,6 +83,8 @@ def main():
             "instructions": INSTRUCTIONS + (M_INSTRUCTIONS if params["enableM"] else []) + (C_INSTRUCTIONS if params["enableC"] else []), "privilegedArchitecture": False,
             "machineTrapHandling": True, "extensions": ["I", "Zicsr", "Zicntr", "Zifencei"] + (["M"] if params["enableM"] else []) + (["C"] if params["enableC"] else []),
             "machineInterrupts": ["software", "timer", "external"],
+            "privilegeModes": ["M", "U"] if params["protectedMode"] else ["M"],
+            "pmpEntries": 16 if params["protectedMode"] else 0,
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},
             "firtool": subprocess.check_output(["firtool", "--version"], text=True).strip(),

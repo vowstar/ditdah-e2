@@ -19,7 +19,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 TOP = "DitDahE2MemoryRouter"
 PORTS = ("instruction", "data", "memoryInstruction", "memoryData", "console", "timer")
-REQUEST = ("address", "write", "data", "mask", "size")
+REQUEST = ("address", "write", "data", "mask", "size", "machine")
 RESPONSE = ("data", "fault")
 FIELDS = ("cycle", "reset") + tuple(
     f"{port}_{channel}_{field}"
@@ -28,7 +28,7 @@ FIELDS = ("cycle", "reset") + tuple(
 
 
 def route(regions, owner, request):
-    address, write, _, mask, size = (request[key] for key in REQUEST)
+    address, write, _, mask, size, _ = (request[key] for key in REQUEST)
     if size not in (0, 1, 2):
         return None
     width = 1 << size
@@ -55,11 +55,11 @@ def vectors(regions, seed, count=1024):
                     for write in range(2):
                         for mask in range(16):
                             rows.append(dict(owner=owner, address=region["base"] + lane,
-                                             write=write, data=rng.getrandbits(32), mask=mask, size=size))
+                                             write=write, data=rng.getrandbits(32), mask=mask, size=size, machine=lane % 2))
             for offset in (-4, 0, region["size"] - 4, region["size"]):
                 for write in range(2):
                     rows.append(dict(owner=owner, address=(region["base"] + offset) & 0xFFFFFFFF,
-                                     write=write, data=rng.getrandbits(32), mask=15 if write else 0, size=2))
+                                     write=write, data=rng.getrandbits(32), mask=15 if write else 0, size=2, machine=write))
         for index in range(count):
             region = rng.choice(tuple(regions.values()))
             address = ((region["base"] + rng.randrange(region["size"])) if index % 5 else rng.getrandbits(32))
@@ -69,7 +69,7 @@ def vectors(regions, seed, count=1024):
                 size = rng.randrange(3)
                 address &= ~((1 << size) - 1)
                 mask = ((1 << (1 << size)) - 1) << (address % 4) if write else 0
-            rows.append(dict(owner=owner, address=address, write=write, data=rng.getrandbits(32), mask=mask, size=size))
+            rows.append(dict(owner=owner, address=address, write=write, data=rng.getrandbits(32), mask=mask, size=size, machine=index % 2))
     return rows
 
 
@@ -79,7 +79,7 @@ def negative_vectors(regions):
         for name, write, mask in (("sram", 0, 0), ("sram", 0, 0), ("rom", 1, 0),
                                   ("console", 0, 0), ("timer", 0, 0), ("sram", 1, 15)):
             rows.append(dict(owner=owner, address=regions[name]["base"], write=write,
-                             data=0x12345678, mask=mask, size=2))
+                             data=0x12345678, mask=mask, size=2, machine=owner))
     return rows
 
 
@@ -227,7 +227,7 @@ def harness():
 #include <iostream>
 #include <string>
 #include <vector>
-struct Request { uint32_t address, write, data, mask, size; };
+struct Request { uint32_t address, write, data, mask, size, machine; };
 struct Response { uint32_t due, data, fault; };
 int main(int argc, char **argv) {
     if (argc != 4) return 2;
@@ -235,7 +235,7 @@ int main(int argc, char **argv) {
     unsigned seed = std::stoul(argv[2]), mode = std::stoul(argv[3]), owner;
     std::array<std::vector<Request>, 2> requests;
     Request item;
-    while (input >> owner >> item.address >> item.write >> item.data >> item.mask >> item.size)
+    while (input >> owner >> item.address >> item.write >> item.data >> item.mask >> item.size >> item.machine)
         requests.at(owner).push_back(item);
     VDitDahE2MemoryRouter dut;
     std::array<unsigned, 2> position{}, completed{};

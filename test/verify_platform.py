@@ -36,7 +36,7 @@ def observer(rtl):
     declarations, assignments = [], []
     widths = {"request_valid": 1, "request_ready": 1, "request_bits_address": 32,
               "request_bits_write": 1, "request_bits_data": 32, "request_bits_mask": 4,
-              "request_bits_size": 2, "response_valid": 1, "response_ready": 1,
+              "request_bits_size": 2, "request_bits_machine": 1, "response_valid": 1, "response_ready": 1,
               "response_bits_data": 32, "response_bits_fault": 1}
     for group, instance, port in (("i", "core", "instruction"), ("d", "core", "data"),
                                   ("console", "console", "memory"), ("timer", "timer", "memory")):
@@ -135,9 +135,9 @@ def device_expectations(groups):
                 assert fields[2] not in target, "Duplicate device event"
                 target[fields[2]] = tuple(map(int, fields[3:]))
         rows.append((0, tick, int("T" in requests), int("T" in responses),
-                     *requests.get("T", (0, 0, 0, 0, 2))))
+                     *requests.get("T", (0, 0, 0, 0, 2))[:5]))
         console_rows.append((0, int("C" in requests), int("C" in responses), tx_ready,
-                             *requests.get("C", (0, 0, 0, 0, 2))))
+                             *requests.get("C", (0, 0, 0, 0, 2))[:5]))
     timer, timer_counts = timer_expected(rows)
     console = ConsoleReference()
     expected_responses = {}
@@ -162,7 +162,8 @@ def device_expectations(groups):
 def check(image, parameters, regions, trace):
     groups, observed = cycles(trace)
     timer, device_results, timer_counts, console_counts = device_expectations(groups)
-    model = Model(image.words(), image.entry, enable_m=parameters["enableM"], enable_c=parameters["enableC"])
+    model = Model(image.words(), image.entry, enable_m=parameters["enableM"], enable_c=parameters["enableC"],
+                  protected_mode=parameters.get("protectedMode", False))
     outstanding, issued, external_results = {}, {}, {}
     completed = deque()
     instructions = Counter()
@@ -183,6 +184,7 @@ def check(image, parameters, regions, trace):
             kind = fields[0]
             if kind == "Q":
                 port, request = fields[2], tuple(map(int, fields[3:]))
+                assert len(request) == 6 and request[5] in (0, 1), "Invalid request privilege"
                 assert port in ("I", "D", "C", "T"), "Unknown native port"
                 assert port not in outstanding, "Native request overwrote its owner"
                 outstanding[port] = (cycle, request)
@@ -194,9 +196,9 @@ def check(image, parameters, regions, trace):
                         original[0] - regions[name]["base"], *original[1:]), "Device route differs"
                 elif port == "I":
                     assert region_at(request[0]) in ("rom", "sram")
-                    assert request[1:] == (0, 0, 0, 2) and request[0] % 4 == 0
+                    assert request[1:] == (0, 0, 0, 2, 1) and request[0] % 4 == 0
                 else:
-                    address, write, data, mask, size = request
+                    address, write, data, mask, size, machine = request
                     assert size <= 2 and not address % (1 << size)
                     assert mask == (((1 << (1 << size)) - 1) << (address % 4) if write else 0)
                     assert region_at(address) in ("sram", "console", "timer", "rom")
@@ -224,10 +226,11 @@ def check(image, parameters, regions, trace):
                 if channel == "AR":
                     address, protection = value
                     memory_addresses.add(address)
-                    assert protection in (1, 5)
-                    port = "I" if protection == 5 else "D"
+                    assert protection in (0, 1, 4, 5)
+                    port = "I" if protection & 4 else "D"
                     assert port in outstanding and port not in issued
                     request = outstanding[port][1]
+                    assert protection == ((4 if port == "I" else 0) | request[5]), "AXI privilege differs"
                     assert not request[1] and address == request[0] & ~3
                     assert region_at(address) in ("rom", "sram")
                     issued[port] = ("read", address)
@@ -235,7 +238,7 @@ def check(image, parameters, regions, trace):
                     assert channel not in writes and "D" in outstanding
                     request = outstanding["D"][1]
                     assert request[1] and region_at(request[0]) == "sram"
-                    assert value == ((request[0] & ~3, 1) if channel == "AW" else (request[2], request[3]))
+                    assert value == ((request[0] & ~3, request[5]) if channel == "AW" else (request[2], request[3]))
                     writes[channel] = value
                     if channel == "AW":
                         memory_addresses.add(value[0])
@@ -252,13 +255,14 @@ def check(image, parameters, regions, trace):
                 else:
                     raise AssertionError("Unknown AXI channel")
             elif kind == "R":
-                pc, word, next_pc, rd, writes_register, value, trap, cause, tval = map(int, fields[2:])
+                pc, word, next_pc, rd, writes_register, value, trap, cause, tval, user_mode = map(int, fields[2:])
                 if completed:
                     request, response = completed[0]
                     if not request[1] and region_at(request[0]) in ("console", "timer"):
                         for lane in range(4):
                             model.memory[(request[0] & ~3) + lane] = response[0] >> (8 * lane) & 255
                 expected = model.step()
+                assert user_mode == int(expected.user_mode), "Retirement privilege differs"
                 assert (pc, word, next_pc, bool(trap)) == (expected.pc, expected.word, expected.next_pc, expected.trap)
                 assert not trap, "Timer workload raised a synchronous exception"
                 assert (bool(writes_register), value) == (bool(expected.rd), expected.value)
@@ -266,7 +270,8 @@ def check(image, parameters, regions, trace):
                 instructions[expected.instruction] += 1
                 if expected.memory:
                     request, response = completed.popleft()
-                    assert (request[:2], request[3:]) == (expected.memory[:2], expected.memory[3:]) and not response[1], "Memory instruction differs"
+                    assert (request[:2], request[3:5]) == (expected.memory[:2], expected.memory[3:]) and not response[1], "Memory instruction differs"
+                    assert request[5] == int(expected.memory_machine), "Data privilege differs"
                     assert not request[1] or request[2] == expected.memory[2], "Store data differs"
                     if not request[1]:
                         assert response[0] == model.word(request[0] & ~3), "Load data differs"
@@ -334,7 +339,7 @@ def main():
     shutil.copytree(args.platform, args.output / "platform", dirs_exist_ok=True)
     copied_inputs = verify_platform_inputs(args.output / "platform", manifest)
     source_names = ("test/verify_platform.py", "test/test_platform.py", "test/platform_sim.cpp", "test/model.py", "test/compressed_model.py",
-                    "test/compressed_unit.py", "test/console.py", "test/timer.py", "test/elf.py",
+                    "test/compressed_unit.py", "test/console.py", "test/timer.py", "test/pmp.py", "test/elf.py",
                     "scripts/build_software.py", "scripts/build_rtl.py", "software/start.S", "software/link.ld", "software/timer.c")
     inputs = {name: (ROOT / name).read_bytes() for name in source_names}
     for name, value in inputs.items():

@@ -21,6 +21,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
     val address = Reg(UInt(32))
     val held = RegInit(false.B)
     val heldAddress = Reg(UInt(32))
+    val heldMachine = Reg(Bool())
     val heldDiscarded = RegInit(false.B)
     val firstValid = RegInit(false.B)
     val secondValid = RegInit(false.B)
@@ -86,6 +87,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
     val offer = !held & !flush & (!outstanding | response) & space
     io.memory.request.valid := held | offer
     io.memory.request.bits.address := held.?(heldAddress, nextWord)
+    io.memory.request.bits.machine := held.?(heldMachine, io.machine)
     io.memory.request.bits.write := false.B
     io.memory.request.bits.data := 0.U(32)
     io.memory.request.bits.mask := 0.U(4)
@@ -98,6 +100,7 @@ object Fetch extends Generator[Parameters, UnitLayers, FetchIO, UnitProbe]:
       when(!io.memory.request.ready) {
         held := true.B
         heldAddress := nextWord
+        heldMachine := io.machine
         heldDiscarded := false.B
       }
     }

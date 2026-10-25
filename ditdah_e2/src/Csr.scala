@@ -29,6 +29,12 @@ class CsrIO(p: Parameters) extends HWBundle(p):
   val returnPc = Aligned(UInt(32))
   val interruptPending = Aligned(UInt(12))
   val interruptsEnabled = Aligned(Bool())
+  val userMode = Aligned(Bool())
+  val dataMachine = Aligned(Bool())
+  val wfiIllegal = Aligned(Bool())
+  val protectionSelected = Aligned(Bool())
+  val instructionProtection = Aligned(new PmpAccess)
+  val dataProtection = Aligned(new PmpAccess)
 
 @generator
 object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
@@ -39,6 +45,33 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     given ResetScope = ResetScope.syncActiveHigh(io.reset)
     val mie = RegInit(false.B)
     val mpie = RegInit(false.B)
+    val userMode = RegInit(false.B)
+    val mppUser = RegInit(false.B)
+    val mprv = RegInit(false.B)
+    val tw = RegInit(false.B)
+    val counterEnable = RegInit(0.U(3))
+    io.userMode := (if p.protectedMode then userMode else false.B)
+    io.dataMachine := (if p.protectedMode then !mprv.?(mppUser, userMode) else true.B)
+    io.wfiIllegal := (if p.protectedMode then userMode & tw else false.B)
+    val protectionRead = Wire(UInt(32))
+    val protectionWrite = Wire(Bool())
+    val protectionWriteData = Wire(UInt(32))
+    protectionRead := 0.U(32)
+    io.protectionSelected := false.B
+    if p.protectedMode then
+      val pmp = Pmp.instantiate(p)
+      pmp.io.clock := io.clock
+      pmp.io.reset := io.reset
+      pmp.io.address := io.address
+      pmp.io.commitWrite := protectionWrite
+      pmp.io.writeData := protectionWriteData
+      io.instructionProtection :<>= pmp.io.instruction
+      io.dataProtection :<>= pmp.io.data
+      io.protectionSelected := pmp.io.implemented
+      protectionRead := pmp.io.readData
+    else
+      io.instructionProtection.allowed := true.B
+      io.dataProtection.allowed := true.B
     val interruptEnables = RegInit(0.U(12))
     val inhibit = RegInit(0.U(3))
     val counters = Counters.instantiate(p)
@@ -52,7 +85,10 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     val mepc = RegInit(0.U(32))
     val mcause = RegInit(0.U(32))
     val mtval = RegInit(0.U(32))
-    val status = (0.B(19) ## 3.B(2) ## 0.B(3) ## mpie.asBits ## 0.B(3) ## mie.asBits ## 0.B(3)).asUInt
+    val status = if p.protectedMode then
+      (0.B(10) ## tw.asBits ## 0.B(3) ## mprv.asBits ## 0.B(4) ##
+        mppUser.?(0.B(2), 3.B(2)) ## 0.B(3) ## mpie.asBits ## 0.B(3) ## mie.asBits ## 0.B(3)).asUInt
+    else (0.B(19) ## 3.B(2) ## 0.B(3) ## mpie.asBits ## 0.B(3) ## mie.asBits ## 0.B(3)).asUInt
     val named = Seq(0x300, 0x301, 0x304, 0x305, 0x310, 0x320, 0x340, 0x341,
       0x342, 0x343, 0x344, 0xb00, 0xb80, 0xb02, 0xb82,
       0xc00, 0xc80, 0xc01, 0xc81, 0xc02, 0xc82, 0xf11, 0xf12, 0xf13, 0xf14, 0xf15)
@@ -60,16 +96,26 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     val zeroCounter = ((io.address >= 0xb03.U(12)) & (io.address <= 0xb1f.U(12))) |
       ((io.address >= 0xb83.U(12)) & (io.address <= 0xb9f.U(12))) |
       ((io.address >= 0x323.U(12)) & (io.address <= 0x33f.U(12)))
-    val implemented = named | zeroCounter
+    val counterAccess = if p.protectedMode then io.address === 0x306.U(12) else false.B
+    val implemented = named | zeroCounter | io.protectionSelected | counterAccess
     val pending = (io.interrupts.external.asBits ## 0.B(3) ## io.interrupts.timer.asBits ##
       0.B(3) ## io.interrupts.software.asBits ## 0.B(3)).asUInt
     io.interruptPending := (pending.asBits & interruptEnables.asBits).asUInt
-    io.interruptsEnabled := mie
+    io.interruptsEnabled := mie | io.userMode
     val readOnly = io.address.asBits.bits(11, 10) === 3.B(2)
-    io.illegal := !implemented | (io.writeRequested & readOnly)
+    val userCounterDenied = Wire(Bool())
+    userCounterDenied := false.B
+    if p.protectedMode then
+      for index <- 0 until 3 do
+        when((io.address === (0xc00 + index).U(12)) | (io.address === (0xc80 + index).U(12))) {
+          userCounterDenied := !counterEnable.asBits.bit(index)
+        }
+    io.illegal := !implemented | (io.writeRequested & readOnly) |
+      (io.userMode & ((io.address.asBits.bits(9, 8) =/= 0.B(2)) | userCounterDenied))
     io.readData := 0.U(32)
     when(io.address === 0x300.U(12)) { io.readData := status }
-    val misa = 0x40000100L | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L)
+    val misa = 0x40000100L | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L) |
+      (if p.protectedMode then 0x100000L else 0L)
     when(io.address === 0x301.U(12)) { io.readData := misa.U(32) }
     when(io.address === 0x304.U(12)) { io.readData := interruptEnables }
     when(io.address === 0x305.U(12)) { io.readData := mtvec }
@@ -79,6 +125,8 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     when(io.address === 0x343.U(12)) { io.readData := mtval }
     when(io.address === 0x344.U(12)) { io.readData := pending }
     when(io.address === 0x320.U(12)) { io.readData := inhibit }
+    when(counterAccess) { io.readData := counterEnable }
+    when(io.protectionSelected) { io.readData := protectionRead }
     for address <- Seq(0xb00, 0xc00) do
       when(io.address === address.U(12)) { io.readData := counters.io.cycleCount.asBits.bits(31, 0).asUInt }
     for address <- Seq(0xb80, 0xc80) do
@@ -101,13 +149,20 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     when(io.operation === 3.U(2)) { writeData := (io.readData.asBits & ~io.operand.asBits).asUInt }
     counters.io.writeData := writeData
     val write = io.commit & io.writeRequested & !io.illegal & !io.trap & !io.mret
+    protectionWrite := write
+    protectionWriteData := writeData
     counters.io.writeCycle := write & ((io.address === 0xb00.U(12)) | (io.address === 0xb80.U(12)))
     counters.io.writeInstret := write & ((io.address === 0xb02.U(12)) | (io.address === 0xb82.U(12)))
     when(write) {
       when(io.address === 0x300.U(12)) {
         mie := writeData.asBits.bit(3)
         mpie := writeData.asBits.bit(7)
+        if p.protectedMode then
+          mppUser := writeData.asBits.bits(12, 11) === 0.B(2)
+          mprv := writeData.asBits.bit(17)
+          tw := writeData.asBits.bit(21)
       }
+      when(counterAccess) { counterEnable := writeData.asBits.bits(2, 0).asUInt }
       when(io.address === 0x304.U(12)) { interruptEnables := (writeData.asBits.bits(11, 0) & 0x888.B(12)).asUInt }
       when(io.address === 0x305.U(12)) {
         mtvec := (writeData.asBits.bits(31, 2) ## 0.B(1) ## (writeData.asBits.bits(1, 0) === 1.B(2)).asBits).asUInt
@@ -123,10 +178,17 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     when(io.mret & !io.trap) {
       mie := mpie
       mpie := true.B
+      if p.protectedMode then
+        userMode := mppUser
+        mppUser := true.B
+        when(mppUser) { mprv := false.B }
     }
     when(io.trap) {
       mie := false.B
       mpie := mie
+      if p.protectedMode then
+        mppUser := userMode
+        userMode := false.B
       mepc := (if p.enableC then io.trapPc.asBits.bits(31, 1) ## 0.B(1) else io.trapPc.asBits.bits(31, 2) ## 0.B(2)).asUInt
       mcause := io.cause
       mtval := io.tval

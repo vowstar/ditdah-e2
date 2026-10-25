@@ -41,7 +41,7 @@ object AxiLite extends Generator[Parameters, UnitLayers, AxiLiteIO, UnitProbe]:
     }
 
     val address = (request.address.asBits.bits(31, 2) ## 0.B(2)).asUInt
-    val protection = dataOwner.?(1.U(3), 5.U(3))
+    val protection = ((!dataOwner).asBits ## 0.B(1) ## request.machine.asBits).asUInt
     io.axi.aw.valid := active & request.write & !awSent & !done
     io.axi.aw.bits.address := address
     io.axi.aw.bits.protection := protection

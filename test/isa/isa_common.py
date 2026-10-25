@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 from riscof.pluginTemplate import pluginTemplate
-from isa_checks import LOCAL, RESET, architectural_configuration, digest, execution_case, load_program, normalize_elf, signature_words
+from isa_checks import LOCAL, RESET, architectural_configuration, digest, execution_case, load_program, normalize_elf, signature_words, validate_rtl_configuration
 
 
 def execute(command, *, cwd, timeout=180, output=None):
@@ -94,13 +94,7 @@ class RtlAdapter(Adapter):
         self.inputs = Path(self.config['inputs'])
         manifest = json.loads((rtl / 'manifest.json').read_text())
         parameters = manifest['parameters']
-        if any(type(parameters.get(name, False)) is not bool for name in ('enableM', 'enableC')):
-            raise ValueError("RTL ISA configuration must be Boolean")
-        if (self.enable_m, self.enable_c) != (parameters.get('enableM', False), parameters.get('enableC', False)):
-            raise ValueError("RTL ISA configuration mismatch")
-        if (parameters.get('resetVector') != RESET or parameters.keys() - {'resetVector', 'enableM', 'enableC'} or
-                type(self.enable_m) is not bool or type(self.enable_c) is not bool):
-            raise ValueError("RTL reset configuration mismatch")
+        validate_rtl_configuration(parameters, self.enable_m, self.enable_c)
         for name, expected in manifest['sourceHashes'].items():
             if digest(self.inputs / name) != expected:
                 raise ValueError("Frozen RTL source mismatch")

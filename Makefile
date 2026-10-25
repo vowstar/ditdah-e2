@@ -5,7 +5,7 @@ export PYTHONDONTWRITEBYTECODE = 1
 CONFIG ?=
 PLATFORM_OUTPUT ?= result/platform
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-compliance
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -54,6 +54,13 @@ verify-isa-c:
 	printf '%s\n' '{"resetVector":2147483648,"enableM":false,"enableC":true}' > result/isa-c-reset.json
 	python3 scripts/build_rtl.py --config result/isa-c-reset.json --output result/isa-c-rtl
 	bash test/isa/run.sh --rtl result/isa-c-rtl --source-root . --suite rv32c
+
+verify-protection:
+	python3 test/protection_port.py
+	python3 test/protection_formal.py --rtl result/protection-port --output result/protection-formal
+
+verify-pmp:
+	python3 test/pmp.py
 
 verify-signoff: rtl
 	python3 test/verify.py

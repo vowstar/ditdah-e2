@@ -18,6 +18,7 @@ Redirects discard younger instructions but retain offered and accepted requests 
 | write, data, mask | Write selection, lane-aligned data and four byte enables |
 | size | Zero for a byte, one for a halfword, two for a word |
 | response data, fault | Aligned read word and access-fault indication |
+| machine | Effective privilege, one for M and zero for U |
 
 Ordinary read requests use a zero mask. Data accesses require natural alignment.
 Alignment faults prevent external issue. Failed writes must have no external effect.
@@ -28,7 +29,14 @@ It clears integer registers and protocol state. Core reset does not initialize m
 
 FENCE.I drains fetch and restarts at its saved next PC.
 
+Permission faults prevent external issue.
+
 `platform.json` defines the memory map for `DitDahE2Platform`.
+
+`protectedMode` provides M and U with 16 PMP entries and four-byte granularity.
+PMP supports TOR, NA4 and NAPOT. The first matching entry must cover the whole access.
+Locked entries also constrain M mode. MPRV selects data privilege from MPP, without changing fetch privilege.
+PMP updates drain fetch. MRET to U clears MPRV.
 
 `misa` is fixed by configuration.
 HPM state and `mstatush` read zero and ignore writes. Identification registers are read-only zero.

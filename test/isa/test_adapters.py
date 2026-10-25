@@ -7,10 +7,22 @@ import struct
 import sys
 from pathlib import Path
 
-from isa_checks import architectural_configuration, compare_signatures, compressed_test_kind, execution_case, isa_specification, normalize_elf, signature_words
+from isa_checks import architectural_configuration, compare_signatures, compressed_test_kind, execution_case, isa_specification, normalize_elf, signature_words, validate_rtl_configuration
 
 
 class SignatureTests(unittest.TestCase):
+    def test_rtl_profile_and_extension_binding(self):
+        for enable_m in (False, True):
+            for enable_c in (False, True):
+                config = {"resetVector": 0x80000000, "enableM": enable_m,
+                          "enableC": enable_c, "protectedMode": False}
+                validate_rtl_configuration(config, enable_m, enable_c)
+                for change in ({"protectedMode": True}, {"protectedMode": 1},
+                               {"enableM": not enable_m}, {"enableC": not enable_c},
+                               {"resetVector": 0}, {"unknown": False}):
+                    with self.subTest(change=change), self.assertRaises(ValueError):
+                        validate_rtl_configuration(config | change, enable_m, enable_c)
+
     def test_m_isa_and_misa_agree(self):
         for enabled, isa, misa, mask in ((False, 'RV32IZicsr', '0x40000100', '[0x100]'),
                                          (True, 'RV32IMZicsr', '0x40001100', '[0x1100]')):

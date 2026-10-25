@@ -6,6 +6,7 @@ module axi_formal(input clock);
   (* anyseq *) reg instruction_request_valid, data_request_valid;
   (* anyseq *) reg [31:0] instruction_request_bits_address, instruction_request_bits_data;
   (* anyseq *) reg [31:0] data_request_bits_address, data_request_bits_data;
+  (* anyseq *) reg instruction_request_bits_machine, data_request_bits_machine;
   (* anyseq *) reg instruction_request_bits_write, data_request_bits_write;
   (* anyseq *) reg [3:0] instruction_request_bits_mask, data_request_bits_mask;
   (* anyseq *) reg [1:0] instruction_request_bits_size, data_request_bits_size;
@@ -26,7 +27,7 @@ module axi_formal(input clock);
   reg outstanding = 0, owner = 0, write = 0, prefer_data = 0;
   reg [31:0] address, data, result;
   reg [3:0] mask;
-  reg fault;
+  reg fault, machine;
   reg aw_seen = 0, w_seen = 0, ar_seen = 0, bus_done = 0;
   reg past_valid = 0;
   wire iq = instruction_request_valid && instruction_request_ready;
@@ -60,12 +61,12 @@ module axi_formal(input clock);
         if ($past(instruction_request_valid && !instruction_request_ready)) begin
           assume (instruction_request_valid);
           assume ($stable({instruction_request_bits_address, instruction_request_bits_write,
-                           instruction_request_bits_data, instruction_request_bits_mask, instruction_request_bits_size}));
+                           instruction_request_bits_data, instruction_request_bits_mask, instruction_request_bits_size, instruction_request_bits_machine}));
         end
         if ($past(data_request_valid && !data_request_ready)) begin
           assume (data_request_valid);
           assume ($stable({data_request_bits_address, data_request_bits_write,
-                           data_request_bits_data, data_request_bits_mask, data_request_bits_size}));
+                           data_request_bits_data, data_request_bits_mask, data_request_bits_size, data_request_bits_machine}));
         end
         if ($past(axi_b_valid && !axi_b_ready)) begin
           assume (axi_b_valid && $stable(axi_b_bits_response));
@@ -97,6 +98,7 @@ module axi_formal(input clock);
         if (instruction_request_valid && data_request_valid) assert (dq == prefer_data);
         outstanding <= 1;
         owner <= dq;
+        machine <= dq ? data_request_bits_machine : instruction_request_bits_machine;
         prefer_data <= !dq;
         write <= dq ? data_request_bits_write : instruction_request_bits_write;
         address <= dq ? data_request_bits_address : instruction_request_bits_address;
@@ -114,7 +116,7 @@ module axi_formal(input clock);
       if (axi_aw_valid) begin
         assert (outstanding && write && !aw_seen && !bus_done);
         assert (axi_aw_bits_address == {address[31:2], 2'b00});
-        assert (axi_aw_bits_protection == (owner ? 3'd1 : 3'd5));
+        assert (axi_aw_bits_protection == {!owner, 1'b0, machine});
       end
       if (axi_w_valid) begin
         assert (outstanding && write && !w_seen && !bus_done);
@@ -123,7 +125,7 @@ module axi_formal(input clock);
       if (axi_ar_valid) begin
         assert (outstanding && !write && !ar_seen && !bus_done);
         assert (axi_ar_bits_address == {address[31:2], 2'b00});
-        assert (axi_ar_bits_protection == (owner ? 3'd1 : 3'd5));
+        assert (axi_ar_bits_protection == {!owner, 1'b0, machine});
       end
       if (axi_b_ready) assert (outstanding && write && aw_seen && w_seen && !bus_done);
       if (axi_r_ready) assert (outstanding && !write && ar_seen && !bus_done);
@@ -155,6 +157,10 @@ module axi_formal(input clock);
         if (ir) saw_instruction <= 1;
         if (dr) saw_data <= 1;
       end
+      cover (ir && machine);
+      cover (ir && !machine);
+      cover (dr && machine);
+      cover (dr && !machine);
       cover (dr && aw_first);
       cover (dr && w_first);
       cover (dr && together);

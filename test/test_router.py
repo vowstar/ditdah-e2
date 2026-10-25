@@ -19,7 +19,7 @@ def sample(cycle, **fields):
 
 
 def request(address=256, write=0, mask=0, size=2, owner=1):
-    return dict(owner=owner, address=address, write=write, data=0x12345678, mask=mask, size=size)
+    return dict(owner=owner, address=address, write=write, data=0x12345678, mask=mask, size=size, machine=1)
 
 
 def transaction():

@@ -6,8 +6,8 @@ import unittest
 from protection_port import Reference, check, permission_mutant, response, vectors
 
 
-A = (0x1000, 0, 0, 0, 2)
-B = (0x100C, 1, 0x12345678, 15, 2)
+A = (0x1000, 0, 0, 0, 2, 1)
+B = (0x100C, 1, 0x12345678, 15, 2, 0)
 
 
 def row(allowed=0, valid=0, ready=0, downstream_ready=0, peer=None, request=A, reset=0):
@@ -26,17 +26,17 @@ class ProtectionPortTests(unittest.TestCase):
     def test_blocked_permission_is_retained(self):
         model = Reference()
         first = model.step(row(allowed=1, valid=1), 0)
-        self.assertEqual((first[1], first[5], first[6:11]), (0, 1, A))
+        self.assertEqual((first[1], first[5], first[6:12]), (0, 1, A))
         second = model.step(row(allowed=0, valid=1), 1)
         self.assertEqual(second[1:], first[1:])
         accepted = model.step(row(allowed=0, valid=1, downstream_ready=1), 2)
         self.assertEqual((accepted[1], accepted[5]), (1, 1))
         blocked = model.step(row(peer=A), 3)
         self.assertEqual(blocked[2:5], (1, 0x5A71DB03, 0))
-        self.assertEqual(blocked[11], 0)
+        self.assertEqual(blocked[12], 0)
         finished = model.step(row(peer=A, ready=1), 4)
         self.assertEqual(finished[2:5], blocked[2:5])
-        self.assertEqual(finished[11], 1)
+        self.assertEqual(finished[12], 1)
         model.finish()
 
     def test_denied_offer_while_busy_keeps_its_first_decision(self):
@@ -49,7 +49,7 @@ class ProtectionPortTests(unittest.TestCase):
         self.assertEqual((replacement[1], replacement[2], replacement[5]), (1, 1, 0))
         blocked = model.step(row(), 4)
         self.assertEqual(blocked[2:5], (1, 0, 1))
-        self.assertEqual(blocked[11], 0)
+        self.assertEqual(blocked[12], 0)
         model.step(row(ready=1), 5)
         model.finish()
         self.assertEqual(model.counts["externalRequests"], 1)
@@ -61,7 +61,7 @@ class ProtectionPortTests(unittest.TestCase):
         model.step(row(allowed=0, valid=1), 0)
         model.step(row(allowed=1, valid=1, request=B), 1)
         accepted = model.step(row(allowed=0, valid=1, ready=1, downstream_ready=1, request=B), 2)
-        self.assertEqual((accepted[1], accepted[2:5], accepted[5], accepted[6:11]), (1, (1, 0, 1), 1, B))
+        self.assertEqual((accepted[1], accepted[2:5], accepted[5], accepted[6:12]), (1, (1, 0, 1), 1, B))
         returned = model.step(row(peer=B, ready=1), 3)
         self.assertEqual(returned[2:5], (1, *response(B)))
         self.assertEqual(returned[4], 1)

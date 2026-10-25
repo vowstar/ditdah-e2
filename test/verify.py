@@ -60,8 +60,10 @@ class InputSchedule:
 
 def check(case, text):
     model = Model(case.words(), case.reset, case.instruction_fault, case.data_fault,
-                  enable_m=getattr(case, "enable_m", False), enable_c=getattr(case, "enable_c", False))
+                  enable_m=getattr(case, "enable_m", False), enable_c=getattr(case, "enable_c", False),
+                  protected_mode=getattr(case, "protected_mode", False))
     outstanding = {}
+    offered = {}
     completed = deque()
     observed_memory = {}
     metrics = None
@@ -109,12 +111,27 @@ def check(case, text):
             continue
         if kind not in ("C", "W"):
             assert int(fields[1]) == input_cycle, "Event lacks its input clock record"
-        if kind == "Q":
+        if kind == "P":
+            port, request = fields[2], tuple(map(int, fields[3:]))
+            assert port in ("I", "D") and port not in offered and len(request) == 6, "Invalid first request offer"
+            status = model.csrs[0x300]
+            effective_user = bool(status >> 11 & 3 == 0) if status & (1 << 17) else model.user_mode
+            machine = not (model.user_mode if port == "I" else effective_user)
+            assert request[5] == int(machine), "Offered request privilege differs"
+            if model.protected_mode:
+                assert model.pmp.allowed((request[0], request[4], int(machine), 2 if port == "I" else request[1])), "Denied request reached external memory"
+            offered[port] = request
+        elif kind == "Q":
             cycle, port = int(fields[1]), fields[2]
             assert port in ("I", "D"), "Unknown memory port"
             assert completion_cycle is None or cycle <= completion_cycle, "Request accepted after completion"
             assert port not in outstanding, "Outstanding request overwritten"
-            outstanding[port] = (cycle, tuple(map(int, fields[3:])))
+            request = tuple(map(int, fields[3:]))
+            if len(request) == 6:
+                assert offered.pop(port) == request, "Accepted request differs from its first offer"
+            else:
+                assert not model.protected_mode and len(request) == 5
+            outstanding[port] = (cycle, request)
             if port == "D":
                 schedule.event("D", int(fields[3]))
         elif kind == "S":
@@ -126,11 +143,13 @@ def check(case, text):
             if port == "D":
                 completed.append((request, tuple(map(int, fields[3:]))))
         elif kind == "R":
-            cycle, pc, word, next_pc, rd, writes, value, trap, cause, tval = map(int, fields[1:])
+            cycle, pc, word, next_pc, rd, writes, value, trap, cause, tval = map(int, fields[1:11])
             assert architectural_event != cycle, "Multiple architectural events in one cycle"
             assert interrupt_deadline != cycle, "Instruction crossed an interrupt boundary"
             architectural_event = cycle
             expected = model.step()
+            if getattr(case, "protected_mode", False):
+                assert len(fields) == 12 and int(fields[11]) == int(expected.user_mode), "Instruction privilege mismatch"
             coverage[expected.instruction] += 1
             if expected.instruction == "fence.i" and not expected.trap:
                 assert "I" not in outstanding, "FENCE.I retired before old fetch completion"
@@ -147,7 +166,9 @@ def check(case, text):
             if expected.memory:
                 assert completed, "Memory instruction retired before response"
                 request, response = completed.popleft()
-                address, write, data, mask, size = request
+                address, write, data, mask, size = request[:5]
+                if len(request) == 6:
+                    assert request[5] == int(expected.memory_machine), "Data request privilege differs"
                 exp_address, exp_write, exp_data, exp_mask, exp_size = expected.memory
                 assert (address, write, mask, size) == (exp_address, exp_write, exp_mask, exp_size), "Memory request mismatch"
                 assert not write or data == exp_data, "Store data mismatch"
@@ -265,9 +286,15 @@ def check(case, text):
     else:
         assert held is None, "Held offer differs from final observation"
     assert not outstanding and not completed, "Unfinished or unretired transaction"
+    assert set(offered) <= {"I"}, "Unaccepted data request at completion"
+    if offered:
+        assert held is not None and offered["I"][:5] == held[1][1:], "Final offer lost its request identity"
     assert arithmetic is None and not arithmetic_done and cancel_due is None, "Unfinished arithmetic operation"
-    if case.name.startswith("m_interrupt_restart_"):
+    if case.name.startswith("m_interrupt_restart_") or (case.name == "protected_user_compute" and case.enable_m):
         assert not restart_pcs and arithmetic_counts["mulDivRestarts"] == 1, "Interrupted arithmetic operation did not restart"
+    if case.name == "protected_user_compute" and case.enable_m:
+        assert arithmetic_counts["mulDivInterruptCancels"] == 1, "Missing protected arithmetic interrupt cancellation"
+        assert arithmetic_counts["mulDivFinishes"] == 8, "Protected arithmetic completed more than once"
     assert {address & ~3 for address in model.memory} <= observed_memory.keys(), "Missing final memory word"
     for address, value in observed_memory.items():
         assert value == model.word(address), "Final memory mismatch"
@@ -454,6 +481,11 @@ def main():
     manifest_data = (args.rtl / "manifest.json").read_bytes()
     manifest_hash = hashlib.sha256(manifest_data).hexdigest()
     manifest = json.loads(manifest_data)
+    if manifest["parameters"].get("protectedMode", False):
+        subprocess.run([sys.executable, str(Path(__file__).with_name("verify_protected.py")),
+                        "--rtl", str(args.rtl), "--output", str(args.output),
+                        *[value for name in args.case for value in ("--case", name)]], check=True)
+        return
     assert manifest["sourceHashes"] == sources(), "Stale RTL source inputs"
     for name, value in manifest["rtlHashes"].items():
         assert digest(args.rtl / name) == value, "Generated RTL changed"

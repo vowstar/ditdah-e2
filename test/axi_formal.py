@@ -54,12 +54,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ditdah-e2-axi-formal-", dir=scratch) as directory:
         work = Path(directory)
         for name, mode, engine in (("safety", "prove", "abc pdr"), ("reachability", "cover", "smtbmc z3"),
-                                   ("wrong-owner", "bmc", "smtbmc z3")):
+                                   ("wrong-owner", "bmc", "smtbmc z3"), ("wrong-privilege", "bmc", "smtbmc z3")):
             case = work / name
             case.mkdir()
             rtl = contents["rtl/DitDahE2AxiLite.sv"].decode()
             if name == "wrong-owner":
                 rtl = mutate_owner(rtl)
+            if name == "wrong-privilege":
+                rtl, count = re.subn(r"(assign\s+axi_ar_bits_protection\s*=\s*)([^;]+);", r"\g<1>3'd5;", rtl)
+                assert count == 1, "Privilege mutation no longer matches RTL"
             (case / "DitDahE2AxiLite.sv").write_text(rtl)
             (case / "axi_formal.sv").write_bytes(contents["test/axi_formal.sv"])
             replay = "aigsmt z3\n" if engine.startswith("abc ") else ""
@@ -84,12 +87,12 @@ def main():
                        "traceHashes": {path.name: sha(path.read_bytes()) for path in traces}}
             outcomes.append(outcome)
             (args.output / "outcomes.json").write_text(json.dumps(outcomes, indent=2) + "\n")
-            negative = name == "wrong-owner"
+            negative = name.startswith("wrong-")
             assert status == ("FAIL" if negative else "PASS") and result.returncode == (2 if negative else 0), f"{name}: {status}"
             if negative:
                 assert any(path.suffix == ".vcd" for path in traces), "Missing semantic counterexample"
             if mode == "cover":
-                assert result.stdout.count("Reached cover statement") == 8, "Missing cover witness"
+                assert result.stdout.count("Reached cover statement") == 12, "Missing cover witness"
         assert all(Path(shutil.which(name)).read_bytes() == value for name, value in tool_inputs.items()), "Tools changed"
     versions = {name: subprocess.check_output(command, text=True).strip() for name, command in (
         ("sby", ["sby", "--version"]), ("yosys", ["yosys", "-V"]),
@@ -104,11 +107,12 @@ def main():
                               "AXI response payload remains stable while blocked", "EXOKAY is excluded",
                               "no eventual acceptance or response assumption"],
               "covers": ["AW before W", "W before AW", "AW and W together", "instruction response backpressure",
-                         "data response backpressure", "instruction error", "data error", "contended alternating grants"],
-              "negativeControl": "deliver instruction responses to the data owner",
+                         "data response backpressure", "instruction error", "data error", "contended alternating grants",
+                         "machine instruction", "user instruction", "machine data", "user data"],
+              "negativeControls": ["deliver instruction responses to the data owner", "force privileged instruction attributes"],
               "excluded": ["CPU integration", "device effects", "liveness", "reset during a transaction"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("PASS: AXI unbounded safety, eight covers and an owner counterexample")
+    print("PASS: AXI unbounded safety, twelve covers and two counterexamples")
 
 
 if __name__ == "__main__":

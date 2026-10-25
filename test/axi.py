@@ -15,9 +15,9 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIELDS = ("owner", "write", "address", "data", "mask", "size", "awDelay", "wDelay", "arDelay",
+FIELDS = ("owner", "write", "address", "data", "mask", "size", "machine", "awDelay", "wDelay", "arDelay",
           "responseDelay", "nativeDelay", "response")
-CHANNELS = {"i": ("ia", "iw", "id", "im", "iz"), "d": ("da", "dw", "dd", "dm", "dz"),
+CHANNELS = {"i": ("ia", "iw", "id", "im", "iz", "ip"), "d": ("da", "dw", "dd", "dm", "dz", "dp"),
             "o": ("od", "of"), "p": ("pd", "pf"), "a": ("aa", "ap"),
             "w": ("wd", "wm"), "b": ("br",), "r": ("ra", "rp"), "q": ("qd", "qr")}
 READY = {"i": "ir", "d": "dr", "o": "or", "p": "pr", "a": "ay", "w": "wy", "b": "by",
@@ -51,7 +51,7 @@ def vectors(seed, count=1024):
             write = owner and (index < 32 or rng.randrange(2))
             offset = index % 4
             rows.append(dict(zip(FIELDS, (owner, int(write), 0x20000000 + 4 * rng.randrange(256) + offset,
-                                         rng.getrandbits(32), index % 16, index % 3,
+                                         rng.getrandbits(32), index % 16, index % 3, (index // 2) % 2,
                                          (0, 7, 3)[index % 3] if index < 32 else rng.randrange(20),
                                          (7, 0, 3)[index % 3] if index < 32 else rng.randrange(20),
                                          rng.randrange(12), rng.randrange(12), rng.randrange(12),
@@ -109,8 +109,8 @@ def check(vectors, initial, samples, complete=True):
             assert positions[owner] < len(queues[owner]), "Extra native request"
             row = queues[owner][positions[owner]]
             prefix = "d" if owner else "i"
-            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z")) == tuple(
-                row[field] for field in ("address", "write", "data", "mask", "size")), "Changed native request"
+            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p")) == tuple(
+                row[field] for field in ("address", "write", "data", "mask", "size", "machine")), "Changed native request"
             if sample["iv"] and sample["dv"]:
                 assert owner == prefer, "Arbitration did not alternate"
                 counts["contendedGrants"] += 1
@@ -123,7 +123,7 @@ def check(vectors, initial, samples, complete=True):
             request = active["request"]
             write = request["write"]
             address = request["address"] & ~3
-            prot = 1 if request["owner"] else 5
+            prot = (0 if request["owner"] else 4) | request["machine"]
             for channel, key in (("a", "aw"), ("w", "w"), ("r", "ar")):
                 if not sample[channel + "v"]:
                     continue

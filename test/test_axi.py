@@ -18,9 +18,9 @@ def sample(cycle, **values):
 
 
 def transaction():
-    request = dict(zip(FIELDS, (1, 1, 0x20000003, 0x11223344, 8, 0, 0, 0, 0, 0, 0, 2), strict=True))
+    request = dict(zip(FIELDS, (1, 1, 0x20000003, 0x11223344, 8, 0, 1, 0, 0, 0, 0, 0, 2), strict=True))
     samples = [sample(0, reset=1), sample(1, dv=1, dr=1, da=request["address"], dw=1,
-                                        dd=request["data"], dm=8),
+                                        dd=request["data"], dm=8, dp=1),
                sample(2, av=1, ay=1, aa=0x20000000, ap=1, wv=1, wy=1, wd=request["data"], wm=8),
                sample(3, bv=1, by=1, br=2), sample(4, pv=1, pr=1, pf=1), sample(5)]
     return [request], [0] * 256, samples

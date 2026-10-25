@@ -12,7 +12,7 @@
 
 struct Transfer {
     bool active = false, held = false;
-    std::array<uint32_t, 5> request{};
+    std::array<uint32_t, 6> request{};
 };
 
 int main(int argc, char **argv) {
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
                       << unsigned(dut.timerInterrupt) << ' ' << unsigned(dut.softwareInterrupt)
                       << ' ' << unsigned(dut.sleeping) << '\n';
             auto native = [&](unsigned index, char name, bool valid, bool ready,
-                              std::array<uint32_t, 5> request, bool rv, bool rr,
+                              std::array<uint32_t, 6> request, bool rv, bool rr,
                               uint32_t value, bool fault) {
                 auto &port = ports[index];
                 if (port.held && (!valid || request != port.request))
@@ -94,14 +94,14 @@ int main(int argc, char **argv) {
             };
 #define OBSERVE(index, tag, p) native(index, tag, dut.o_##p##_request_valid, dut.o_##p##_request_ready, \
     {dut.o_##p##_request_bits_address, dut.o_##p##_request_bits_write, dut.o_##p##_request_bits_data, \
-     dut.o_##p##_request_bits_mask, dut.o_##p##_request_bits_size}, dut.o_##p##_response_valid, \
+     dut.o_##p##_request_bits_mask, dut.o_##p##_request_bits_size, dut.o_##p##_request_bits_machine}, dut.o_##p##_response_valid, \
      dut.o_##p##_response_ready, dut.o_##p##_response_bits_data, dut.o_##p##_response_bits_fault)
             OBSERVE(0, 'I', i);
             OBSERVE(1, 'D', d);
             OBSERVE(2, 'C', console);
             OBSERVE(3, 'T', timer);
 #undef OBSERVE
-            auto stable = [&](unsigned index, bool valid, bool ready, std::array<uint32_t, 5> payload) {
+            auto stable = [&](unsigned index, bool valid, bool ready, std::array<uint32_t, 6> payload) {
                 auto &previous = axiHeld[index];
                 if (previous.held && (!valid || payload != previous.request))
                     throw std::runtime_error("AXI request changed under backpressure");
@@ -158,7 +158,7 @@ int main(int argc, char **argv) {
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '
                           << dut.retire_nextPc << ' ' << unsigned(dut.retire_rd) << ' '
                           << unsigned(dut.retire_writes) << ' ' << dut.retire_value << ' '
-                          << unsigned(dut.retire_trap) << ' ' << dut.retire_cause << ' ' << dut.retire_tval << '\n';
+                          << unsigned(dut.retire_trap) << ' ' << dut.retire_cause << ' ' << dut.retire_tval << ' ' << unsigned(dut.retire_userMode) << '\n';
                 if (dut.retire_pc == done && !completed) { completed = true; completionCycle = cycle; }
             }
             if (dut.interrupt_valid)

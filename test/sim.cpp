@@ -13,10 +13,10 @@
 
 struct Request {
     uint32_t address, data, mask, size;
-    bool write;
+    bool write, machine;
     bool operator==(const Request &other) const {
         return address == other.address && data == other.data &&
-               mask == other.mask && size == other.size && write == other.write;
+               mask == other.mask && size == other.size && write == other.write && machine == other.machine;
     }
 };
 
@@ -146,6 +146,10 @@ int main(int argc, char **argv) {
                                bool responseValid, bool responseReady, uint64_t faultAddress) {
                 if (port.held && (!valid || !(request == port.previous)))
                     throw std::runtime_error("Request changed under backpressure");
+                if (valid && !port.held)
+                    std::cout << "P " << cycle << ' ' << name << ' ' << request.address << ' '
+                              << request.write << ' ' << request.data << ' ' << request.mask << ' '
+                              << request.size << ' ' << request.machine << '\n';
                 port.held = valid && !ready;
                 port.previous = request;
                 if (responseValid && responseReady) {
@@ -170,17 +174,18 @@ int main(int argc, char **argv) {
                     port.fault = request.address == faultAddress;
                     port.due = cycle + 1 + (delay ? random() % (name == 'I' ? 3 : delay) : 0);
                     std::cout << "Q " << cycle << ' ' << name << ' ' << request.address << ' '
-                              << request.write << ' ' << request.data << ' ' << request.mask << ' ' << request.size << '\n';
+                              << request.write << ' ' << request.data << ' ' << request.mask << ' '
+                              << request.size << ' ' << request.machine << '\n';
                     if (name == 'D') apply('D', request.address);
                 }
             };
             observe(instruction, 'I', dut.instruction_request_valid, dut.instruction_request_ready,
                     {dut.instruction_request_bits_address, dut.instruction_request_bits_data,
-                     dut.instruction_request_bits_mask, dut.instruction_request_bits_size, bool(dut.instruction_request_bits_write)},
+                     dut.instruction_request_bits_mask, dut.instruction_request_bits_size, bool(dut.instruction_request_bits_write), bool(dut.instruction_request_bits_machine)},
                     dut.instruction_response_valid, dut.instruction_response_ready, instructionFault);
             observe(data, 'D', dut.data_request_valid, dut.data_request_ready,
                     {dut.data_request_bits_address, dut.data_request_bits_data,
-                     dut.data_request_bits_mask, dut.data_request_bits_size, bool(dut.data_request_bits_write)},
+                     dut.data_request_bits_mask, dut.data_request_bits_size, bool(dut.data_request_bits_write), bool(dut.data_request_bits_machine)},
                     dut.data_response_valid, dut.data_response_ready, dataFault);
             if (dut.retire_valid) {
                 if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
@@ -189,7 +194,7 @@ int main(int argc, char **argv) {
                           << dut.retire_nextPc << ' ' << unsigned(dut.retire_rd) << ' '
                           << unsigned(dut.retire_writes) << ' ' << dut.retire_value << ' '
                           << unsigned(dut.retire_trap) << ' ' << unsigned(dut.retire_cause) << ' '
-                          << dut.retire_tval << '\n';
+                          << dut.retire_tval << ' ' << unsigned(dut.retire_userMode) << '\n';
                 apply('R', dut.retire_pc);
                 if (!dut.retire_trap && dut.retire_pc == completionPc) {
                     if (dut.retire_word != 0x0000006f || dut.retire_nextPc != completionPc)

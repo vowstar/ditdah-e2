@@ -8,6 +8,8 @@ module fetch_latency #(parameter COMPRESSED = 1)(input clock);
   (* anyseq *) reg [31:0] target;
   wire [31:0] memory_response_bits_data = 32'h00130013;
   wire memory_response_bits_fault = 0;
+  (* anyseq *) reg machine;
+  wire memory_request_bits_machine;
   wire idle, memory_request_valid, memory_request_bits_write, memory_response_ready, output_valid;
   wire [31:0] memory_request_bits_address, memory_request_bits_data, output_bits_pc, output_bits_word;
   wire [3:0] memory_request_bits_mask;

@@ -39,6 +39,7 @@ HARNESS = """// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 module ConsoleBench;
   reg clock = 0, reset = 1;
   reg memory_request_valid = 0, memory_response_ready = 0, transmit_ready = 0;
+  wire memory_request_bits_machine = 1;
   reg memory_request_bits_write = 0;
   reg [31:0] memory_request_bits_address = 0, memory_request_bits_data = 0;
   reg [3:0] memory_request_bits_mask = 0;
