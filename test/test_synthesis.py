@@ -105,6 +105,28 @@ class SynthesisInputs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Completed mapping"):
             freeze_equivalence(source, self.root / "proof", 4, 60)
 
+    def test_equivalence_preserves_guidance_order(self):
+        source = self.mapping_fixture()
+        (source / "outputs/physical.svf").write_text("synthetic physical guidance\n")
+        config = json.loads((source / "configuration.json").read_text())
+        config["guidance_outputs"] = ["mapping.svf", "physical.svf"]
+        (source / "configuration.json").write_text(json.dumps(config))
+        inputs = json.loads((source / "inputs.json").read_text())
+        inputs["configuration.json"] = digest(source / "configuration.json")
+        (source / "inputs.json").write_text(json.dumps(inputs))
+        outputs = json.loads((source / "output-manifest.json").read_text())
+        outputs["outputs/physical.svf"] = digest(source / "outputs/physical.svf")
+        (source / "output-manifest.json").write_text(json.dumps(outputs))
+        model = self.root / "model.db"
+        model.write_text("synthetic model\n")
+        destination = self.root / "proof"
+        destination.mkdir()
+        with patch.dict(os.environ, {"E2_TIMING_DBS": str(model)}):
+            freeze_equivalence(source, destination, 4, 60)
+        frozen = json.loads((destination / "configuration.json").read_text())
+        self.assertEqual(frozen["guidance_files"], ["implementation/mapping.svf", "implementation/physical.svf"])
+        validate_bundle(destination)
+
     def test_reject_changed_accepted_source(self):
         self.source.write_text("changed\n")
         with self.assertRaisesRegex(ValueError, "source snapshot differs"):
@@ -252,11 +274,23 @@ class SynthesisEvidence(unittest.TestCase):
         self.assertEqual(result, {"toolResult": 0, "passing": 217, "failing": 20,
                                   "aborted": 0, "unverified": 1720, "blackBoxes": 0})
 
+    def test_zero_proof_counts_need_their_own_reports(self):
+        reports = {name: "There are no " + name + " compare points."
+                   for name in ("failing", "aborted", "unverified")}
+        result = read_proof("1957 Passing compare points", "No black boxes", 1,
+                            point_reports=reports)
+        self.assertEqual(result, {"toolResult": 1, "passing": 1957, "failing": 0,
+                                  "aborted": 0, "unverified": 0, "blackBoxes": 0})
+
     def test_unused_power_models_require_no_netlist_reference(self):
         report = "m unused_cell#PWR_FM_BBOX\n"
         self.assertEqual(read_proof("", report, 1, "module Core(); endmodule")["blackBoxes"], 0)
         self.assertEqual(read_proof("", report, 1, "unused_cell instance();")["blackBoxes"], 1)
         self.assertIsNone(read_proof("", "m unknown_model\n", 1, "")["blackBoxes"])
+        self.assertIsNone(read_proof("", report + "s hidden_core\n", 1, "module Core(); endmodule")["blackBoxes"])
+        self.assertIsNone(read_proof("", report, 1, "")["blackBoxes"])
+        self.assertEqual(read_proof("", "e empty_cell\n", 1, "empty_cell instance();")["blackBoxes"], 1)
+        self.assertEqual(read_proof("", report + "e empty_cell\n", 1, "module Core(); endmodule")["unusedLibraryModels"], 2)
 
     def test_tool_exit_does_not_hide_script_errors(self):
         record = log_result("banner\nE2_SCRIPT_BEGIN\nError: failed (CMD-001)\n", 0, True)

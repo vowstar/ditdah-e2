@@ -157,7 +157,7 @@ def freeze(rtl, acceptance_path, output, budgets):
                          (acceptance_path, "acceptance.json"),
                          (report_path, "verification.json")):
         shutil.copyfile(source, output / "evidence" / name)
-    for name in ("synthesis.tcl", "synthesis_constraints.tcl"):
+    for name in ("synthesis.tcl", "synthesis_constraints.tcl", "report_metrics.tcl"):
         shutil.copyfile(ROOT / "flow" / name, output / "flow" / name)
     shutil.copyfile(Path(__file__), output / "runner.py")
     configuration = dict(budgets, top=top, rtl_files=files, exploratory=True)
@@ -318,10 +318,15 @@ def freeze_equivalence(source, run, threads, timeout):
         if digest(source / relative_name(name)) != expected:
             raise ValueError("Synthesis input changed")
     config = json.loads((source / "configuration.json").read_text())
+    guidance = config.get("guidance_outputs", ["mapping.svf"])
+    if (not isinstance(guidance, list) or not guidance
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*\.svf", name) for name in guidance)
+            or len(guidance) != len(set(guidance))):
+        raise ValueError("Invalid guidance input list")
     for directory in ("rtl", "evidence"):
         shutil.copytree(source / directory, run / directory)
     (run / "implementation").mkdir()
-    for name in ("mapped.v", "mapped.sdc", "mapping.svf"):
+    for name in ["mapped.v", "mapped.sdc"] + guidance:
         path = "outputs/" + name
         if digest(source / path) != outputs[path]:
             raise ValueError("Mapping output changed")
@@ -345,7 +350,8 @@ def freeze_equivalence(source, run, threads, timeout):
     if not libraries:
         raise ValueError("Logic library models are required")
     write_json(run / "library-inputs.json", libraries)
-    config.update(threads=threads, timeout_seconds=timeout, library_files=library_files)
+    config.update(threads=threads, timeout_seconds=timeout, library_files=library_files,
+                  guidance_files=["implementation/" + name for name in guidance])
     write_json(run / "configuration.json", config)
     write_json(run / "inputs.json", {str(path.relative_to(run)): digest(path)
                for path in sorted(run.rglob("*")) if path.is_file()})
@@ -367,12 +373,12 @@ def checked_status(result):
               "scriptCompleted", "scriptErrors", "flowSucceeded", "messageCodes", "startupExpiration",
               "toolVersion", "exploratory", "cleanAcceptance", "mappedEquivalence", "frozenInputsStable",
               "libraryInputsStable", "mappedNetlistHash", "constraintsHash", "guidanceHash",
-              "inputManifestHash", "libraryModelHashes", "metrics", "proof"}
+              "inputManifestHash", "libraryModelHashes", "guidanceHashes", "metrics", "proof"}
     if set(result) - fields:
         raise ValueError("Unexpected status field")
     if "metrics" in result and set(result["metrics"]) - METRICS:
         raise ValueError("Unexpected metric field")
-    if "proof" in result and set(result["proof"]) - {"toolResult", "passing", "failing", "aborted", "unverified", "blackBoxes"}:
+    if "proof" in result and set(result["proof"]) - {"toolResult", "passing", "failing", "aborted", "unverified", "blackBoxes", "unusedLibraryModels"}:
         raise ValueError("Unexpected proof field")
     enums = {"state": {"pending", "running", "finished", "failed"},
              "reason": {"Worker setup or execution failed"},
@@ -390,7 +396,7 @@ def checked_status(result):
         if key in {"mappedNetlistHash", "constraintsHash", "guidanceHash", "inputManifestHash"}:
             if value is not None and (not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value)):
                 raise ValueError("Invalid result digest")
-        if key == "libraryModelHashes":
+        if key in {"libraryModelHashes", "guidanceHashes"}:
             if not isinstance(value, list) or any(not isinstance(item, str) or not re.fullmatch("[a-f0-9]{64}", item) for item in value):
                 raise ValueError("Invalid library digest")
         if key == "toolVersion" and value is not None:
@@ -439,7 +445,31 @@ def read_metrics(path, timing_check=None):
     return values
 
 
-def execute_worker():
+def library_snapshot():
+    libraries = []
+    for entry in os.environ["E2_NDM_LIBS"].splitlines() + [os.environ["E2_RC_FILE"]]:
+        path = Path(entry)
+        files = sorted(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else [path]
+        libraries.extend({"path": str(item), "sha256": digest(item)} for item in files)
+    return libraries
+
+
+def write_settings(path, config, threads):
+    scalar_names = {"period_ns", "input_delay_ns", "output_delay_ns", "uncertainty_ns",
+                    "input_transition_ns", "output_load_ff", "timeout_seconds"}
+    lines = ["set " + key + " " + str(config[key]) for key in sorted(scalar_names)]
+    for key in ("top", "power_net", "ground_net"):
+        if key in config:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config[key]):
+                raise ValueError("Invalid flow identifier")
+            lines.append("set " + key + " " + config[key])
+    lines += ["set threads " + str(threads), "set rtl_files {" + " ".join(config["rtl_files"]) + "}"]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def execute_worker(tool_script="flow/synthesis.tcl"):
+    if tool_script not in {"flow/synthesis.tcl", "flow/physical.tcl"}:
+        raise ValueError("Unsupported tool script")
     run = Path.cwd()
     inputs = validate_bundle(run, allowed_extra=("supervisor.log",))
     config = json.loads((run / "configuration.json").read_text())
@@ -456,24 +486,17 @@ def execute_worker():
                  "availableMemoryBytes": available, "diskFreeBytes": shutil.disk_usage(str(run)).free,
                  "threads": threads, "accountId": os.getuid()}
     write_json(run / "resources.json", resources)
-    libraries = []
-    for entry in os.environ["E2_NDM_LIBS"].splitlines() + [os.environ["E2_RC_FILE"]]:
-        path = Path(entry)
-        files = sorted(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else [path]
-        libraries.extend({"path": str(item), "sha256": digest(item)} for item in files)
+    libraries = library_snapshot()
     write_json(run / "library-inputs.json", libraries)
-    lines = ["set " + key + " " + str(value) for key, value in config.items()
-             if key not in ("rtl_files", "exploratory", "threads")]
-    lines += ["set threads " + str(threads), "set rtl_files {" + " ".join(config["rtl_files"]) + "}"]
-    (run / "settings.tcl").write_text("\n".join(lines) + "\n")
+    write_settings(run / "settings.tcl", config, threads)
     environment = dict(os.environ, E2_SYNTH_RUN=str(run))
     started = time.time()
     write_json(run / "summary.json", {"state": "running", "started": started, "threads": threads})
     with (run / "tool.log").open("w") as log:
-        process = subprocess.Popen(["fc_shell", "-f", "flow/synthesis.tcl"], env=environment,
+        process = subprocess.Popen(["fc_shell", "-f", tool_script], env=environment,
                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         write_json(run / "process.json", {"pid": process.pid, "start": started,
-                   "command": ["fc_shell", "-f", "flow/synthesis.tcl"]})
+                   "command": ["fc_shell", "-f", tool_script]})
         try:
             code = process.wait(timeout=config["timeout_seconds"])
         except subprocess.TimeoutExpired:
@@ -514,7 +537,7 @@ def worker(operation=execute_worker):
         raise
 
 
-def read_proof(status_text, black_box_text, tool_result, mapped_netlist=""):
+def read_proof(status_text, black_box_text, tool_result, mapped_netlist="", point_reports=None):
     result = {"toolResult": tool_result}
     for key, label in (("passing", "Passing"), ("failing", "Failing"),
                        ("aborted", "Aborted"), ("unverified", "Unverified")):
@@ -522,11 +545,19 @@ def read_proof(status_text, black_box_text, tool_result, mapped_netlist=""):
         if not matches:
             matches = re.findall(label + r" Points:\s*(\d+)", status_text, re.I)
         result[key] = int(matches[-1]) if matches else None
+        if result[key] is None and point_reports and key in point_reports:
+            empty = r"\bno\s+(?:\w+\s+){0,2}" + key + r"(?:\s+compare)?\s+points\b"
+            if re.search(empty, point_reports[key], re.I):
+                result[key] = 0
     result["blackBoxes"] = 0 if re.search(r"No black.boxes", black_box_text, re.I) else None
-    models = re.findall(r"^\s*m\s+(\S+)\s*$", black_box_text, re.M)
-    if models and all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*#PWR_FM_BBOX", name) for name in models):
-        names = {name.split("#", 1)[0] for name in models}
+    models = re.findall(r"^[ \t]*([A-Za-z]{1,8})[ \t]+(\S+)[ \t]*$", black_box_text, re.M)
+    power_model = lambda flags, name: flags == "m" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*#PWR_FM_BBOX", name)
+    empty_model = lambda flags, name: flags == "e" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+    if (models and mapped_netlist and all(power_model(flags, name) or empty_model(flags, name)
+                                         for flags, name in models)):
+        names = {name.split("#", 1)[0] for flags, name in models}
         result["blackBoxes"] = sum(bool(re.search(r"\b" + re.escape(name) + r"\b", mapped_netlist)) for name in names)
+        result["unusedLibraryModels"] = len(names) - result["blackBoxes"]
     return result
 
 
@@ -547,7 +578,8 @@ def equivalence_worker():
                "diskFreeBytes": shutil.disk_usage(str(run)).free})
     lines = ["set top " + config["top"], "set threads " + str(threads),
              "set rtl_files {" + " ".join(config["rtl_files"]) + "}",
-             "set library_files {" + " ".join(config["library_files"]) + "}"]
+             "set library_files {" + " ".join(config["library_files"]) + "}",
+             "set guidance_files {" + " ".join(config["guidance_files"]) + "}"]
     (run / "settings.tcl").write_text("\n".join(lines) + "\n")
     started = time.time()
     write_json(run / "summary.json", {"state": "running", "started": started, "threads": threads})
@@ -572,14 +604,19 @@ def equivalence_worker():
     result["frozenInputsStable"] = all(digest(run / name) == value for name, value in inputs.items())
     result["mappedNetlistHash"] = digest(run / "implementation/mapped.v")
     result["constraintsHash"] = digest(run / "implementation/mapped.sdc")
-    result["guidanceHash"] = digest(run / "implementation/mapping.svf")
+    result["guidanceHash"] = digest(run / config["guidance_files"][0])
+    result["guidanceHashes"] = [digest(run / name) for name in config["guidance_files"]]
     result["inputManifestHash"] = digest(run / "inputs.json")
     result["libraryModelHashes"] = [digest(run / name) for name in config["library_files"]]
     read_report = lambda name: (run / name).read_text() if (run / name).exists() else ""
     raw = read_report("outputs/result.txt").strip()
+    design_text = (run / "implementation/mapped.v").read_text()
+    design_text += "\n".join((run / "rtl" / name).read_text() for name in config["rtl_files"])
     result["proof"] = read_proof(read_report("reports/status.txt"),
                                   read_report("reports/black-boxes.txt"), int(raw) if raw in {"0", "1"} else None,
-                                  (run / "implementation/mapped.v").read_text())
+                                  design_text,
+                                  {name: read_report("reports/" + name + ".txt")
+                                   for name in ("failing", "aborted", "unverified")})
     proof = result["proof"]
     accepted = (result["flowSucceeded"] and result["frozenInputsStable"] and proof["toolResult"] == 1
                 and proof["passing"] is not None and proof["passing"] > 0

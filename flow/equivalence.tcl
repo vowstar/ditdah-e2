@@ -16,7 +16,7 @@ proc run_equivalence {} {
     set ::verification_set_undriven_signals BINARY:X
     set ::verification_clock_gate_edge_analysis true
     set ::hdlin_unresolved_modules error
-    require_success {set_svf implementation/mapping.svf}
+    require_success {set_svf -ordered $guidance_files}
     foreach path $library_files {
         require_success {read_db -technology_library $path}
     }
