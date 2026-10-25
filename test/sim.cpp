@@ -129,6 +129,11 @@ int main(int argc, char **argv) {
             dut.data_response_bits_data = data.data;
             dut.data_response_bits_fault = data.fault;
             dut.eval();
+            if (!delay && !completing && instruction.active &&
+                dut.instruction_response_valid && dut.instruction_response_ready) {
+                dut.instruction_request_ready = 1;
+                dut.eval();
+            }
             std::cout << "T " << cycle << ' ' << pending << ' ' << dut.timeValue << '\n';
             if (completing && dut.data_request_valid)
                 throw std::runtime_error("Data request after program completion");

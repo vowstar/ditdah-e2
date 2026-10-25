@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
-module compressed_fetch_formal(input clock);
+module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESET_PC = 0)(input clock);
   reg reset = 1;
   always @(posedge clock) reset <= 0;
   (* anyseq *) reg redirect, pause, memory_request_ready, memory_response_valid, output_ready;
@@ -13,15 +13,15 @@ module compressed_fetch_formal(input clock);
   wire output_bits_fault;
   wire [2:0] output_bits_length;
   wire [31:0] output_bits_faultAddress;
-  wire formal_active, formal_sent, formal_discarded, formal_first_valid, formal_second_valid;
+  wire formal_outstanding, formal_held, formal_held_discarded, formal_discarded, formal_first_valid, formal_second_valid;
   wire formal_first_fault, formal_second_fault;
   wire [31:0] formal_assembly_pc, formal_next_word, formal_first_word, formal_second_word;
-  wire [31:0] formal_first_address, formal_second_address;
+  wire [31:0] formal_first_address, formal_second_address, formal_address, formal_held_address;
   DitDahE2Fetch dut (.*);
 
-  reg outstanding = 0, poisoned = 0, canceled_offer = 0;
-  reg stream_valid = 1, skip_lower = 0, past_valid = 0;
-  reg [31:0] accepted_address, expected_request = 0, expected_pc = 0;
+  reg outstanding = 0, poisoned = 0, canceled_offer = 0, offered = 0;
+  reg stream_valid = 1, skip_lower = COMPRESSED && RESET_PC[1], past_valid = 0;
+  reg [31:0] accepted_address, expected_request = {RESET_PC[31:2], 2'b0}, expected_pc = RESET_PC;
   reg [3:0] count = 0;
   reg [15:0] parcel [0:5], next_parcel [0:5];
   reg [31:0] parcel_address [0:5], next_address [0:5];
@@ -31,10 +31,10 @@ module compressed_fetch_formal(input clock);
   wire response = memory_response_valid && memory_response_ready;
   wire transfer = output_valid && output_ready;
   wire append = response && !poisoned && !flush;
-  wire [3:0] instruction_parcels = parcel_fault[0] || parcel[0][1:0] != 3 ? 1 : 2;
+  wire [3:0] instruction_parcels = COMPRESSED && (parcel_fault[0] || parcel[0][1:0] != 3) ? 1 : 2;
   wire available = count >= instruction_parcels && count != 0;
   wire expected_fault = parcel_fault[0] || (instruction_parcels == 2 && parcel_fault[1]);
-  wire [31:0] expected_word = expected_fault ? 0 : instruction_parcels == 1 ?
+  wire [31:0] expected_word = COMPRESSED && expected_fault ? 0 : instruction_parcels == 1 ?
                               {16'b0, parcel[0]} : {parcel[1], parcel[0]};
   wire [31:0] expected_fault_address = parcel_fault[0] ? parcel_address[0] :
                                      expected_fault ? parcel_address[1] : expected_pc;
@@ -70,7 +70,7 @@ module compressed_fetch_formal(input clock);
   reg [31:0] prior_pc;
   always @(posedge clock) begin
     past_valid <= 1;
-    assume(target[0] == 0);
+    assume(COMPRESSED ? target[0] == 0 : target[1:0] == 0);
     assume(!memory_response_valid || outstanding);
     if (past_valid && !$past(reset)) begin
       if ($past(pause) && !pause) assume(redirect || $past(redirect));
@@ -83,10 +83,11 @@ module compressed_fetch_formal(input clock);
       outstanding <= 0;
       poisoned <= 0;
       canceled_offer <= 0;
+      offered <= 0;
       stream_valid <= 1;
-      skip_lower <= 0;
-      expected_request <= 0;
-      expected_pc <= 0;
+      skip_lower <= COMPRESSED && RESET_PC[1];
+      expected_request <= {RESET_PC[31:2], 2'b0};
+      expected_pc <= RESET_PC;
       count <= 0;
       saw_short_lower <= 0;
       saw_fault_lower <= 0;
@@ -100,9 +101,10 @@ module compressed_fetch_formal(input clock);
     end else begin
       assert(count <= 6);
       assert(!output_valid || (!flush && stream_valid && available));
-      assert(!memory_request_valid || !outstanding);
+      assert(!memory_request_valid || !outstanding || response);
       assert(memory_response_ready == outstanding);
-      assert(idle == (!memory_request_valid && !outstanding && count == 0));
+      assert(idle == (!offered && !outstanding && count == 0));
+      if (idle && pause) assert(!memory_request_valid && !outstanding && !output_valid);
       assert(memory_request_valid || !canceled_offer);
       if (memory_request_valid) begin
         assert(memory_request_bits_address[1:0] == 0);
@@ -110,7 +112,6 @@ module compressed_fetch_formal(input clock);
         assert(memory_request_bits_mask == 0 && memory_request_bits_size == 2);
         if (!canceled_offer && stream_valid) assert(memory_request_bits_address == expected_request);
       end
-      if (outstanding) assert(memory_request_bits_address == accepted_address);
       if (output_valid) begin
         assert(output_bits_pc == expected_pc);
         assert(output_bits_word == expected_word);
@@ -137,18 +138,21 @@ module compressed_fetch_formal(input clock);
           assert(output_valid);
       end
       if (memory_request_valid && flush) canceled_offer <= 1;
-      if (request) begin
-        outstanding <= 1;
-        accepted_address <= memory_request_bits_address;
-        poisoned <= canceled_offer || flush;
-        canceled_offer <= 0;
-        if (!canceled_offer && !flush && stream_valid) expected_request <= expected_request + 4;
-      end
-      if (flush && outstanding) poisoned <= 1;
+      if (memory_request_valid && !memory_request_ready) offered <= 1;
       if (response) begin
         assert(outstanding);
         outstanding <= 0;
         if (poisoned) saw_discard <= 1;
+      end
+      if (flush && outstanding) poisoned <= 1;
+      if (request) begin
+        assert(!outstanding || response);
+        outstanding <= 1;
+        accepted_address <= memory_request_bits_address;
+        poisoned <= canceled_offer || flush;
+        canceled_offer <= 0;
+        offered <= 0;
+        if (!canceled_offer && !flush && stream_valid) expected_request <= expected_request + 4;
       end
       assert(!append || remaining + appended <= 6);
       count <= remaining + appended;
@@ -174,19 +178,27 @@ module compressed_fetch_formal(input clock);
       if (redirect) begin
         expected_request <= {target[31:2], 2'b0};
         expected_pc <= target;
-        skip_lower <= target[1];
+        skip_lower <= COMPRESSED && target[1];
         stream_valid <= 1;
       end
 
 `ifdef REFINEMENT
       // These state relations are proved with the interface properties.
       assert(stream_valid || pause || redirect);
-      assert(outstanding == (formal_active && formal_sent));
-      assert(formal_active == (memory_request_valid || outstanding));
+      if (!COMPRESSED) begin
+        assert(expected_pc[1:0] == 0);
+        assert(!count[0] && !skip_lower);
+      end
+      assert(outstanding == formal_outstanding);
+      assert(offered == formal_held);
+      assert(!formal_held || (!outstanding && memory_request_valid));
       assert(!formal_second_valid || formal_first_valid);
-      assert(!formal_active || !formal_second_valid);
-      if (memory_request_valid) assert(canceled_offer == formal_discarded);
-      if (outstanding) assert(poisoned == formal_discarded);
+      assert(!(formal_held || outstanding) || !formal_second_valid);
+      assert(canceled_offer == (formal_held && formal_held_discarded));
+      if (outstanding) begin
+        assert(poisoned == formal_discarded);
+        assert(formal_address == accepted_address);
+      end
       if (canceled_offer || (outstanding && poisoned)) assert(count == 0);
       if (stream_valid && !flush) begin
         assert(expected_pc[0] == 0 && expected_request[1:0] == 0);
@@ -195,7 +207,8 @@ module compressed_fetch_formal(input clock);
         if (skip_lower) assert(count == 0 && expected_pc[1]);
         if (outstanding && !poisoned) assert(accepted_address == expected_request - 4);
         assert(formal_assembly_pc == assembly_pc);
-        assert(formal_next_word == expected_request + (memory_request_valid && !canceled_offer ? 4 : 0));
+        assert(formal_next_word == expected_request + (formal_held && !canceled_offer ? 4 : 0));
+        if (formal_held && !canceled_offer) assert(formal_held_address == expected_request);
         assert(count == pending + first_parcels + (formal_second_valid ? 2 : 0));
         if (formal_first_valid) begin
           assert(formal_first_address == {assembly_pc[31:2], 2'b0});
@@ -216,15 +229,25 @@ module compressed_fetch_formal(input clock);
       end
 `endif
 
-      cover(transfer && saw_short_lower && output_bits_pc == prior_pc + 2 && output_bits_length == 2 && !output_bits_fault);
+      if (COMPRESSED) begin
+        cover(transfer && saw_short_lower && output_bits_pc == prior_pc + 2 && output_bits_length == 2 && !output_bits_fault);
+        cover(transfer && output_bits_pc[1] && output_bits_length == 4 && !output_bits_fault);
+        cover(transfer && saw_fault_lower && output_bits_pc == prior_pc + 2 && output_bits_fault && output_bits_length == 2);
+        cover(transfer && output_bits_pc[1] && output_bits_length == 2 && output_bits_fault);
+        cover(transfer && output_bits_length == 4 && output_bits_fault && output_bits_faultAddress == output_bits_pc + 2);
+      end else begin
+        cover(transfer && output_bits_fault);
+      end
       cover(transfer && !output_bits_pc[1] && output_bits_length == 4 && !output_bits_fault);
-      cover(transfer && output_bits_pc[1] && output_bits_length == 4 && !output_bits_fault);
-      cover(transfer && saw_fault_lower && output_bits_pc == prior_pc + 2 && output_bits_fault && output_bits_length == 2);
-      cover(transfer && output_bits_pc[1] && output_bits_length == 2 && output_bits_fault);
-      cover(transfer && output_bits_length == 4 && output_bits_fault && output_bits_faultAddress == output_bits_pc + 2);
-      cover(transfer && saw_blocked_redirect && saw_discard && output_bits_pc[1] && !output_bits_fault);
+      cover(transfer && saw_blocked_redirect && saw_discard && !output_bits_fault);
       cover(count == 6 && output_valid && !output_ready);
-      cover(transfer && output_bits_pc == 32'hfffffffe && output_bits_length == 4 && !output_bits_fault);
+      cover(transfer && output_bits_pc == (COMPRESSED ? 32'hfffffffe : 32'hfffffffc) && output_bits_length == 4 && !output_bits_fault);
+      cover(request && response);
+      cover(memory_request_valid && !memory_request_ready && response);
+      cover(request && response && poisoned);
+      cover(idle && !flush && memory_request_valid);
+      cover(idle && pause && !memory_request_valid);
+      cover(idle && redirect && !memory_request_valid);
     end
   end
 endmodule

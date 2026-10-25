@@ -45,10 +45,12 @@ class Event:
     memory: tuple | None = None
     instruction: str = "illegal"
     length: int = 4
+    user_mode: bool = False
 
 
 class Model:
-    def __init__(self, words, reset=0, instruction_fault=None, data_fault=None, *, enable_m=False, enable_c=False):
+    def __init__(self, words, reset=0, instruction_fault=None, data_fault=None, *, enable_m=False, enable_c=False,
+                 protected_mode=False):
         self.memory = {address + lane: (word >> (8 * lane)) & 255
                        for address, word in words.items() for lane in range(4)}
         self.pc = reset
@@ -57,13 +59,22 @@ class Model:
         self.data_fault = data_fault
         self.enable_m = enable_m
         self.enable_c = enable_c
-        self.csrs = {0x300: 0x1800, 0x301: 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2), 0x304: 0,
+        self.protected_mode = protected_mode
+        self.user_mode = False
+        self.pmp = None
+        if protected_mode:
+            from pmp import Reference
+            self.pmp = Reference()
+        self.csrs = {0x300: 0x1800, 0x301: 0x40000100 | (int(enable_m) << 12) | (int(enable_c) << 2) |
+                     (int(protected_mode) << 20), 0x304: 0,
                      0x305: reset & ~3, 0x310: 0, 0x320: 0, 0x340: 0, 0x341: 0,
                      0x342: 0, 0x343: 0, 0x344: 0,
                      **dict.fromkeys(range(0xF11, 0xF16), 0)}
         self.csrs.update(dict.fromkeys((*range(0xB03, 0xB20), *range(0xB83, 0xBA0),
                                        *range(0x323, 0x340), 0xB00, 0xB80, 0xB02, 0xB82,
                                        0xC00, 0xC80, 0xC01, 0xC81, 0xC02, 0xC82), 0))
+        if protected_mode:
+            self.csrs[0x306] = 0
         self.counters = {0xB00: 0, 0xB02: 0}
         self.cycle = -1
         self.time = TIME_BASE
@@ -99,6 +110,10 @@ class Model:
         self._begin_cycle(cycle, mask)
 
     def read_csr(self, address):
+        if self.pmp is not None:
+            implemented, value = self.pmp.read(address)
+            if implemented:
+                return value
         if address in (0xB00, 0xB80, 0xC00, 0xC80):
             value = self.counters[0xB00]
         elif address in (0xB02, 0xB82, 0xC02, 0xC82):
@@ -110,7 +125,7 @@ class Model:
         return (value >> (32 if address & 0x80 else 0)) & MASK
 
     def interrupt_cause(self):
-        if self.csrs[0x300] & 8:
+        if self.user_mode or self.csrs[0x300] & 8:
             pending = self.csrs[0x344] & self.csrs[0x304]
             for bit in (11, 3, 7):
                 if pending & (1 << bit):
@@ -123,7 +138,12 @@ class Model:
         if cause & (1 << 31) and vector & 3 == 1:
             target = (target + 4 * (cause & 0x7FFFFFFF)) & MASK
         self.csrs[0x341], self.csrs[0x342], self.csrs[0x343] = pc, cause, value & MASK
-        self.csrs[0x300] = 0x1800 | ((self.csrs[0x300] & 8) << 4)
+        status = self.csrs[0x300]
+        if self.protected_mode:
+            self.csrs[0x300] = (status & ~0x1888) | (0 if self.user_mode else 0x1800) | ((status & 8) << 4)
+            self.user_mode = False
+        else:
+            self.csrs[0x300] = 0x1800 | ((status & 8) << 4)
         self.sleeping = False
         return target
 
@@ -136,6 +156,15 @@ class Model:
         return pc, self.pc, cause
 
     def write_csr(self, address, value):
+        if self.pmp is not None and self.pmp.read(address)[0]:
+            self.pmp.write(address, value & MASK)
+            return
+        if self.protected_mode and address == 0x300:
+            self.csrs[address] = (value & 0x220088) | (0 if value & 0x1800 == 0 else 0x1800)
+            return
+        if self.protected_mode and address == 0x306:
+            self.csrs[address] = value & 7
+            return
         if address in (0xB00, 0xB80, 0xB02, 0xB82):
             self.counter_writes[address & ~0x80] = (bool(address & 0x80), value & MASK)
             return
@@ -159,19 +188,24 @@ class Model:
             raise AssertionError("Retirement while WFI waits")
         pc = self.pc
         raw, length, decoded, fetch_fault = self.word(pc), 4, None, None
-        if self.enable_c:
+        fetch_denied = self.pmp is not None and not self.pmp.allowed((pc & ~3, 2, int(not self.user_mode), 2))
+        if fetch_denied:
+            raw, length, fetch_fault = 0, 2 if self.enable_c else 4, pc
+        elif self.enable_c:
             if pc & ~3 == self.instruction_fault:
                 raw, length, fetch_fault = 0, 2, pc
             else:
                 decoded = decode_instruction(raw)
                 raw, length = decoded.raw, decoded.length
                 second = (pc + 2) & MASK
-                if length == 4 and pc & 2 and second & ~3 == self.instruction_fault:
-                    raw, fetch_fault = 0, second
+                if length == 4 and pc & 2:
+                    denied = self.pmp is not None and not self.pmp.allowed((second & ~3, 2, int(not self.user_mode), 2))
+                    if denied or second & ~3 == self.instruction_fault:
+                        raw, fetch_fault = 0, second
         elif pc == self.instruction_fault:
             fetch_fault = pc
         insn = decoded.expanded if decoded is not None else raw
-        result = Event(pc, raw, (pc + length) & MASK, length=length)
+        result = Event(pc, raw, (pc + length) & MASK, length=length, user_mode=self.user_mode)
 
         def fault(cause, value):
             result.trap, result.cause, result.tval = True, cause, value & MASK
@@ -213,6 +247,10 @@ class Model:
             address = (a + offset) & MASK
             if address % count:
                 fault(6 if write else 4, address)
+            elif self.pmp is not None and not self.pmp.allowed((address, f3 & 3,
+                    int(not self.user_mode and (not self.csrs[0x300] & (1 << 17) or
+                                               self.csrs[0x300] & 0x1800 == 0x1800)), int(write))):
+                fault(7 if write else 5, address)
             else:
                 lane = address % 4
                 result.memory = (address, int(write), (b << (8 * lane)) & MASK if write else 0,
@@ -251,7 +289,11 @@ class Model:
             result.instruction = {1: "csrrw", 2: "csrrs", 3: "csrrc",
                                   5: "csrrwi", 6: "csrrsi", 7: "csrrci"}[f3]
             write = f3 in (1, 5) or source != 0
-            if address not in self.csrs or (write and address >> 10 == 3):
+            implemented = address in self.csrs or self.pmp is not None and self.pmp.read(address)[0]
+            user_denied = self.user_mode and (address >> 8 & 3) != 0
+            if self.user_mode and address in (0xC00, 0xC80, 0xC01, 0xC81, 0xC02, 0xC82):
+                user_denied = not bool(self.csrs[0x306] & (1 << (address & 3)))
+            if not implemented or user_denied or (write and address >> 10 == 3):
                 fault(2, insn)
             else:
                 old = self.read_csr(address)
@@ -262,17 +304,30 @@ class Model:
                 result.rd, result.value = rd, old
         elif insn == 0x30200073:
             result.instruction = "mret"
-            result.next_pc = self.csrs[0x341]
-            self.csrs[0x300] = 0x1880 | ((self.csrs[0x300] >> 4) & 8)
+            if self.user_mode:
+                fault(2, insn)
+            else:
+                result.next_pc = self.csrs[0x341]
+                status = self.csrs[0x300]
+                if self.protected_mode:
+                    self.user_mode = status & 0x1800 == 0
+                    self.csrs[0x300] = (status & ~0x1888) | 0x80 | ((status >> 4) & 8)
+                    if self.user_mode:
+                        self.csrs[0x300] &= ~(1 << 17)
+                else:
+                    self.csrs[0x300] = 0x1880 | ((status >> 4) & 8)
         elif insn == 0x10500073:
             result.instruction = "wfi"
-            self.sleeping = not bool(self.csrs[0x344] & self.csrs[0x304])
+            if self.user_mode and self.csrs[0x300] & (1 << 21):
+                fault(2, insn)
+            else:
+                self.sleeping = not bool(self.csrs[0x344] & self.csrs[0x304])
         elif insn == 0x00100073:
             result.instruction = "ebreak"
             fault(3, pc)
         elif insn == 0x00000073:
             result.instruction = "ecall"
-            fault(11, 0)
+            fault(8 if self.user_mode else 11, 0)
         elif op == 0x0F and f3 in (0, 1):
             result.instruction = "fence.i" if f3 else "fence"
         else:

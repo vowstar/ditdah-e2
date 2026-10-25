@@ -26,13 +26,13 @@ C_INSTRUCTIONS = ["c.addi4spn", "c.lw", "c.sw", "c.addi", "c.jal", "c.li", "c.lu
 def configuration(value):
     if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC"}:
         raise ValueError("Only resetVector, enableM and enableC are supported")
-    enable_c = value.get("enableC", False)
+    enable_c = value.get("enableC", True)
     if type(enable_c) is not bool:
         raise ValueError("enableC must be a Boolean")
     reset = value.get("resetVector", 0)
     if type(reset) is not int or not 0 <= reset <= 0xFFFFFFFF or reset % (2 if enable_c else 4):
         raise ValueError("resetVector must be unsigned RV32 and satisfy instruction alignment")
-    enable_m = value.get("enableM", False)
+    enable_m = value.get("enableM", True)
     if type(enable_m) is not bool:
         raise ValueError("enableM must be a Boolean")
     return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c}

@@ -28,6 +28,8 @@ It clears integer registers and protocol state. Core reset does not initialize m
 
 FENCE.I drains fetch and restarts at its saved next PC.
 
+`platform.json` defines the memory map for `DitDahE2Platform`.
+
 `misa` is fixed by configuration.
 HPM state and `mstatush` read zero and ignore writes. Identification registers are read-only zero.
 

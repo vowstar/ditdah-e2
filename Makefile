@@ -3,16 +3,26 @@
 
 export PYTHONDONTWRITEBYTECODE = 1
 CONFIG ?=
+PLATFORM_OUTPUT ?= result/platform
 
-.PHONY: rtl software verify-signoff verify-formal verify-software verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-compliance
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
+
+platform:
+	python3 scripts/build_platform.py $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
 
 software:
 	python3 scripts/build_software.py
 
 verify-software: rtl
 	python3 test/verify_software.py
+
+verify-platform: platform
+	python3 test/verify_platform.py --platform "$(PLATFORM_OUTPUT)/design" --output "$(PLATFORM_OUTPUT)/verification"
+
+verify-router: platform
+	python3 test/router.py --platform-build "$(PLATFORM_OUTPUT)/design" --output "$(PLATFORM_OUTPUT)/router"
 
 verify-axi:
 	python3 test/axi.py
@@ -23,6 +33,9 @@ verify-multiply:
 
 verify-timer:
 	python3 test/timer.py
+
+verify-console:
+	python3 test/console.py
 
 verify-isa:
 	mkdir -p result
@@ -50,6 +63,9 @@ verify-signoff: rtl
 verify-formal: rtl
 	python3 test/formal.py
 	python3 test/core_formal.py
+
+verify-throughput: rtl
+	python3 test/fetch_throughput.py
 
 verify-compliance:
 	python3 -m unittest discover -s test -p 'test_*.py'

@@ -5,6 +5,8 @@ The core executes RV32I, Zicsr, Zicntr and Zifencei with machine traps, interrup
 The optional M and C extensions add integer multiplication, division and compressed instructions.
 It uses separate instruction and data ports with ordered memory completion.
 
+The default configuration is RV32IMC with Zicsr, Zicntr, Zifencei and machine interrupts.
+
 ## Build and verify
 
 ```sh
@@ -18,13 +20,14 @@ nix build .#default --no-link
 The Nix lock pins the Zaozi and CIRCT toolchain. Nix reads Git-tracked files.
 
 `python3 scripts/build_rtl.py --config input.json --output result/rtl` generates SystemVerilog.
-`resetVector` defaults to zero. The Boolean fields `enableM` and `enableC` default to false.
+`resetVector` defaults to zero. The Boolean fields `enableM` and `enableC` default to true.
 The reset address must be word aligned, or halfword aligned when C is enabled.
 
 `make verify-software` builds a freestanding C program and checks its RTL execution, signature and completed console stores.
+`make verify-platform` runs a timer interrupt program on the core, memory router, AXI adapter and console hardware.
 
-Use a zero `resetVector` for `verify-signoff`, `verify-formal`.
-Disable C for the signoff and formal commands.
+Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
+Use new directories for `PLATFORM_OUTPUT`.
 Selected checks do not establish complete ISA conformance or physical signoff.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.

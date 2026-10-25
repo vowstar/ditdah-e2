@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 # SPDX-License-Identifier: MIT
-"""Prove compressed fetch ownership and parcel assembly from an independent queue."""
+"""Prove fetch ownership and parcel assembly from an independent queue."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,27 +17,32 @@ from core_formal import check_inputs, digest, freeze_tools, source_hashes, tool_
 
 
 def replace_once(content, old, new):
-    assert content.count(old) == 1, "Compressed fetch mutation no longer matches RTL"
+    assert content.count(old) == 1, "Fetch mutation no longer matches RTL"
     return content.replace(old, new)
 
 
 def mutate(content, name):
     changes = {
-        "release": ("wire        releaseFirst = assemblyPc[1] | crossing & ~firstFault;",
-                    "wire        releaseFirst = firstFault | assemblyPc[1] | crossing;"),
-        "fault-address": (": failed ? secondAddress : assemblyPc;", ": failed ? assemblyPc : assemblyPc;"),
-        "cross-word": ("crossing_0 ? {secondWord[15:0], half} : firstWord",
-                       "crossing_0 ? {half, secondWord[15:0]} : firstWord"),
-        "held-request": ("assign memory_request_bits_address = address;",
-                         "assign memory_request_bits_address = discarded && !sent ? {target[31:2], 2'b0} : address;")}
+        "release": ("assemble & (assemblyPc[1] | crossing & ~headFault)",
+                    "assemble & (headFault | assemblyPc[1] | crossing)"),
+        "fault-address": (": failed ? tailAddress : assemblyPc;", ": failed ? assemblyPc : assemblyPc;"),
+        "cross-word": ("crossing_0 ? {raw[15:0], half_0} : half",
+                       "crossing_0 ? {half_0, raw[15:0]} : half"),
+        "held-request": ("assign memory_request_bits_address = memory_request_bits_address_0;",
+                         "assign memory_request_bits_address = heldDiscarded ? {target[31:2], 2'b0} : memory_request_bits_address_0;"),
+        "idle": ("assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;",
+                 "assign idle = ~outstanding & ~firstValid & ~secondValid & ~buffered;"),
+        "capacity": ("& (~tailValid | release_0);", "& 1'b1;")}
     return replace_once(content, *changes[name])
 
 
 def observe(content):
-    scalars = {"active": "active", "sent": "sent", "discarded": "discarded", "first_valid": "firstValid",
+    scalars = {"outstanding": "outstanding", "held": "held", "held_discarded": "heldDiscarded",
+               "discarded": "discarded", "first_valid": "firstValid",
                "second_valid": "secondValid", "first_fault": "firstFault", "second_fault": "secondFault"}
     words = {"assembly_pc": "assemblyPc", "next_word": "nextWord", "first_word": "firstWord",
-             "second_word": "secondWord", "first_address": "firstAddress", "second_address": "secondAddress"}
+             "second_word": "secondWord", "first_address": "firstAddress", "second_address": "secondAddress",
+             "address": "address", "held_address": "heldAddress"}
     for signal in [*scalars.values(), *words.values()]:
         assert re.search(r"reg\s+(?:\[31:0\]\s+)?" + signal + r"\s*;", content), "Missing observation signal"
     ports = "  output " + ", ".join("formal_" + name for name in scalars) + ",\n"
@@ -53,13 +58,15 @@ def freeze(args):
     raw_manifest = (args.rtl / "manifest.json").read_bytes()
     manifest = json.loads(raw_manifest)
     parameters = manifest["parameters"]
-    assert parameters["resetVector"] == 0 and parameters.get("enableC") is True, "Compressed fetch requires resetVector=0 and enableC=true"
+    assert type(parameters.get("enableC", False)) is bool, "Invalid C configuration"
+    assert type(parameters["resetVector"]) is int and 0 <= parameters["resetVector"] <= 0xFFFFFFFF, "Invalid reset address"
+    assert parameters["resetVector"] % (2 if parameters.get("enableC", False) else 4) == 0, "Misaligned reset address"
     assert set(parameters) <= {"resetVector", "enableM", "enableC"}, "Unknown fetch configuration"
     assert isinstance(parameters.get("enableM", False), bool), "Invalid M configuration"
     assert manifest["sourceHashes"] == source_hashes(args.source_root), "Stale RTL inputs"
     contents = {"manifest.json": raw_manifest, "rtl/manifest.json": raw_manifest,
                 "test/" + wrapper.name: wrapper.read_bytes(), "test/" + Path(__file__).name: Path(__file__).read_bytes(),
-                "test/core_formal.py": helper.read_bytes()}
+                "test/core_formal.py": helper.read_bytes(), "test/formal.py": Path(__file__).with_name("formal.py").read_bytes()}
     for group, prefix, root in (("sourceHashes", "source", args.source_root), ("rtlHashes", "rtl", args.rtl)):
         for name, expected in manifest[group].items():
             value = (root / name).read_bytes()
@@ -72,7 +79,7 @@ def freeze(args):
     return contents, bindings
 
 
-def execute(work, output, rtl, wrapper, name, mode, depth, negative=False):
+def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compressed=True, reset_pc=0):
     case = work / name
     case.mkdir()
     source = mutate(rtl, name) if negative else rtl
@@ -82,6 +89,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False):
     config = (f"[options]\nmode {mode}\ndepth {depth}\n"
               "[engines]\nsmtbmc z3\n[script]\n"
               f"read -formal -sv {flags}DitDahE2Fetch.sv compressed_fetch_formal.sv\n"
+              f"chparam -set COMPRESSED {int(compressed)} -set RESET_PC {reset_pc} compressed_fetch_formal\n"
               "prep -top compressed_fetch_formal\n"
               "[files]\nDitDahE2Fetch.sv\ncompressed_fetch_formal.sv\n")
     (case / "run.sby").write_text(config)
@@ -95,7 +103,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False):
         archived[saved] = value
     check_inputs(frozen)
     check_inputs(archived)
-    print(f"Running compressed fetch {name}", flush=True)
+    print(f"Running fetch {name}", flush=True)
     run = subprocess.run(["sby", "-f", "run.sby"], cwd=case, capture_output=True, text=True)
     log = (run.stdout + run.stderr).replace(str(work), "<workspace>")
     (output / (name + ".txt")).write_text(log)
@@ -117,8 +125,16 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False):
     if negative:
         assert any(path.suffix == ".vcd" for path in traces), "Missing semantic counterexample"
     if mode == "cover":
-        assert len(reached) == 9, "Missing compressed fetch cover"
+        assert len(reached) == (15 if compressed else 11), "Missing fetch cover"
     return result
+
+
+def verification_cases(compressed, depth, selected):
+    cases = [("prove", "prove", depth, False), ("cover", "cover", 32, False)]
+    mutations = ("release", "fault-address", "cross-word", "held-request", "idle", "capacity") if compressed else ("held-request", "idle", "capacity")
+    cases += [(name, "bmc", 24, True) for name in mutations]
+    assert not selected or set(selected) <= {item[0] for item in cases}, "Unsupported fetch case for this configuration"
+    return [item for item in cases if not selected or item[0] in selected]
 
 
 def main():
@@ -126,7 +142,7 @@ def main():
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("result/compressed-fetch-formal"))
-    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request"))
+    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request", "idle", "capacity"))
     parser.add_argument("--prove-depth", type=int, default=4)
     args = parser.parse_args()
     if args.prove_depth < 2:
@@ -137,9 +153,8 @@ def main():
     archived = write_snapshot(args.output, contents)
     bindings["inputDirectory"] = "inputs"
     (args.output / "inputs.json").write_text(json.dumps(bindings, indent=2) + "\n")
-    cases = [("prove", "prove", args.prove_depth, False), ("cover", "cover", 32, False)]
-    cases += [(name, "bmc", 24, True) for name in ("release", "fault-address", "cross-word", "held-request")]
-    cases = [item for item in cases if not args.case or item[0] in args.case]
+    compressed = bindings["parameters"].get("enableC", False)
+    cases = verification_cases(compressed, args.prove_depth, args.case)
     outcomes = []
     scratch = "/data/tmp" if os.access("/data/tmp", os.W_OK) else None
     with tempfile.TemporaryDirectory(prefix="ditdah-e2-compressed-fetch-formal-", dir=scratch) as directory:
@@ -148,7 +163,8 @@ def main():
         check_inputs(tool_inputs)
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(execute, work, args.output, contents["rtl/DitDahE2Fetch.sv"].decode(),
-                                       contents["test/compressed_fetch_formal.sv"], *case) for case in cases]
+                                       contents["test/compressed_fetch_formal.sv"], *case,
+                                       compressed=compressed, reset_pc=bindings["parameters"]["resetVector"]) for case in cases]
             for future in as_completed(futures):
                 outcomes.append(future.result())
                 outcomes.sort(key=lambda value: next(index for index, case in enumerate(cases) if case[0] == value["name"]))
@@ -156,20 +172,19 @@ def main():
         check_inputs(frozen)
         check_inputs(archived)
         check_inputs(tool_inputs)
-    report = {"scope": "compressed fetch request ownership and independent parcel ordering", **bindings,
+    report = {"scope": "fetch request ownership and independent parcel ordering", **bindings,
               "command": "python3 test/compressed_fetch_formal.py", "selectedCases": args.case, "exitStatus": 0,
               "outcomes": outcomes, **tool_versions(),
               "oracle": "six halfwords with addresses and faults, consumed only by output handshakes",
-              "assumptions": ["initial synchronous reset", "halfword aligned redirect targets",
+              "assumptions": ["initial synchronous reset", "redirect targets aligned to the configured instruction boundary",
                               "one ordered response per accepted request, at least one cycle later",
                               "stable response while backpressured", "arbitrary request, response and output delays",
                               "when pause falls, redirect is asserted in the same or previous cycle"],
               "strengthening": "DUT state relations are asserted only in the unbounded proof and never assumed",
-              "negativeControls": ["release a faulty low halfword with its whole word", "report the instruction PC for a second-part fault",
-                                   "swap the halves of a crossing instruction", "change an offered request address on redirect"],
-              "excluded": ["execution and retirement proof", "instruction decode", "eventual memory response", "other reset vectors"]}
+              "negativeControls": [item[0] for item in cases if item[3]],
+              "excluded": ["execution and retirement proof", "instruction decode", "eventual memory response"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(f"PASS: {len(outcomes)} compressed fetch formal checks")
+    print(f"PASS: {len(outcomes)} fetch formal checks")
 
 
 if __name__ == "__main__":

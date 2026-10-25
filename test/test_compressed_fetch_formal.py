@@ -11,18 +11,20 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from compressed_fetch_formal import execute, freeze, mutate, observe, source_hashes
+from compressed_fetch_formal import execute, freeze, mutate, observe, source_hashes, verification_cases
 
 
 def example_rtl():
-    flags = ("active", "sent", "discarded", "firstValid", "secondValid", "firstFault", "secondFault")
-    words = ("assemblyPc", "nextWord", "firstWord", "secondWord", "firstAddress", "secondAddress")
+    flags = ("outstanding", "held", "heldDiscarded", "discarded", "firstValid", "secondValid", "firstFault", "secondFault")
+    words = ("assemblyPc", "nextWord", "firstWord", "secondWord", "firstAddress", "secondAddress", "address", "heldAddress")
     declarations = "".join(f"  reg {name};\n" for name in flags)
     declarations += "".join(f"  reg [31:0] {name};\n" for name in words)
-    return "module DitDahE2Fetch(\n  input clock\n);\n" + declarations + """  wire        releaseFirst = assemblyPc[1] | crossing & ~firstFault;
-  assign fault_address = firstFault ? firstAddress : failed ? secondAddress : assemblyPc;
-  assign word = crossing_0 ? {secondWord[15:0], half} : firstWord;
-  assign memory_request_bits_address = address;
+    return "module DitDahE2Fetch(\n  input clock\n);\n" + declarations + """  wire release_0 = assemble & (assemblyPc[1] | crossing & ~headFault);
+  assign fault_address = headFault ? firstAddress : failed ? tailAddress : assemblyPc;
+  assign word = crossing_0 ? {raw[15:0], half_0} : half;
+  assign memory_request_bits_address = memory_request_bits_address_0;
+  assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;
+  wire offer = ~held & ~flush & (~outstanding | response) & (~tailValid | release_0);
 endmodule
 """
 
@@ -50,15 +52,20 @@ class CompressedFetchInputTests(unittest.TestCase):
     def save_manifest(self):
         (self.rtl / "manifest.json").write_text(json.dumps(self.manifest))
 
-    def test_disabled_compression_and_stale_rtl_are_rejected(self):
+    def test_configurations_and_stale_rtl(self):
         contents, bindings = freeze(self.args)
         self.assertEqual(contents["rtl/DitDahE2Fetch.sv"], example_rtl().encode())
         self.assertTrue(bindings["parameters"]["enableC"])
         self.manifest["parameters"]["enableC"] = False
         self.save_manifest()
-        with self.assertRaisesRegex(AssertionError, "enableC=true"):
+        self.assertFalse(freeze(self.args)[1]["parameters"]["enableC"])
+        self.manifest["parameters"]["resetVector"] = 2
+        self.save_manifest()
+        with self.assertRaisesRegex(AssertionError, "Misaligned reset"):
             freeze(self.args)
         self.manifest["parameters"]["enableC"] = True
+        self.save_manifest()
+        self.assertEqual(freeze(self.args)[1]["parameters"]["resetVector"], 2)
         self.save_manifest()
         (self.rtl / "DitDahE2Fetch.sv").write_text("module Changed; endmodule\n")
         with self.assertRaisesRegex(AssertionError, "Changed formal input"):
@@ -73,13 +80,22 @@ class CompressedFetchInputTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Missing observation signal"):
             observe(original.replace("reg firstValid;", "reg unrelated;"))
 
+    def test_case_selection_matches_the_configuration(self):
+        self.assertEqual(len(verification_cases(False, 4, None)), 5)
+        self.assertEqual(len(verification_cases(True, 4, None)), 8)
+        self.assertEqual(verification_cases(False, 4, ["idle"]), [("idle", "bmc", 24, True)])
+        with self.assertRaisesRegex(AssertionError, "Unsupported fetch case"):
+            verification_cases(False, 4, ["release"])
+
     def test_mutations_are_unique_and_change_the_selected_contract(self):
         original = example_rtl()
-        self.assertIn("firstFault | assemblyPc[1] | crossing", mutate(original, "release"))
+        self.assertIn("headFault | assemblyPc[1] | crossing", mutate(original, "release"))
         self.assertIn(": failed ? assemblyPc : assemblyPc", mutate(original, "fault-address"))
-        self.assertIn("{half, secondWord[15:0]}", mutate(original, "cross-word"))
-        self.assertIn("discarded && !sent ?", mutate(original, "held-request"))
-        for name in ("release", "fault-address", "cross-word", "held-request"):
+        self.assertIn("{half_0, raw[15:0]}", mutate(original, "cross-word"))
+        self.assertIn("heldDiscarded ?", mutate(original, "held-request"))
+        self.assertIn("assign idle = ~outstanding", mutate(original, "idle"))
+        self.assertIn("& 1'b1;", mutate(original, "capacity"))
+        for name in ("release", "fault-address", "cross-word", "held-request", "idle", "capacity"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(AssertionError, "no longer matches"):
                     mutate(original + original, name)

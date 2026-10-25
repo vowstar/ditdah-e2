@@ -24,6 +24,8 @@ module interrupt_formal #(parameter integer SCENARIO = -1)(input clock);
   wire [4:0] retire_rd;
   wire loadUse, forward, redirect, memoryWait, sleeping, interrupt_valid;
   wire [31:0] interrupt_pc, interrupt_target, interrupt_cause;
+  wire mulDiv_start, mulDiv_resultValid, mulDiv_finish, mulDiv_cancel;
+  wire [31:0] mulDiv_pc, mulDiv_value;
   reg irq_active = 0;
   wire interrupts_software = irq_active && pending_sources[0];
   wire interrupts_timer = irq_active && pending_sources[1];
