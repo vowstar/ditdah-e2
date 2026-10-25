@@ -16,6 +16,19 @@ class Channel[T <: Data](payload: T) extends Bundle:
   val ready = Flipped(Bool())
   val bits = Aligned(payload)
 
+class DmiRequest extends Bundle:
+  val address = Aligned(UInt(7))
+  val data = Aligned(UInt(32))
+  val op = Aligned(UInt(2))
+
+class DmiResponse extends Bundle:
+  val data = Aligned(UInt(32))
+  val status = Aligned(UInt(2))
+
+class DmiPort extends Bundle:
+  val request = Aligned(new Channel(new DmiRequest))
+  val response = Flipped(new Channel(new DmiResponse))
+
 class MemoryRequest extends Bundle:
   val address = Aligned(UInt(32))
   val machine = Aligned(Bool())
@@ -61,6 +74,7 @@ class Instruction extends Bundle:
 class Completion extends Bundle:
   val instruction = Aligned(new Instruction)
   val userMode = Aligned(Bool())
+  val debugBreak = Aligned(Bool())
   val nextPc = Aligned(UInt(32))
   val rd = Aligned(UInt(5))
   val writes = Aligned(Bool())
@@ -110,6 +124,8 @@ class FetchIO(p: Parameters) extends HWBundle(p):
 class CoreIO(p: Parameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
+  val dmi = Option.when(p.enableDebug)(Flipped(new DmiPort))
+  val systemReset = Option.when(p.enableDebug)(Aligned(Bool()))
   val interrupts = Flipped(new InterruptLevels)
   val timeValue = Flipped(UInt(64))
   val instruction = Aligned(new MemoryPort)

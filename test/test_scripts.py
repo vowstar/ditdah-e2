@@ -14,16 +14,16 @@ from model import Model
 class ConfigurationTests(unittest.TestCase):
     def test_reset_addresses(self):
         for address in (0, 4, 0x80000000, 0xFFFFFFFC):
-            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False})
+            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False})
 
     def test_multiply_configuration(self):
         for enabled in (False, True):
-            self.assertEqual(configuration({"enableM": enabled}), {"resetVector": 0, "enableM": enabled, "enableC": True, "protectedMode": False})
+            self.assertEqual(configuration({"enableM": enabled}), {"resetVector": 0, "enableM": enabled, "enableC": True, "protectedMode": False, "enableDebug": False})
 
     def test_compressed_alignment(self):
         for address in (0, 2, 0x80000002, 0xFFFFFFFE):
-            self.assertEqual(configuration({"resetVector": address, "enableC": True, "protectedMode": False}),
-                             {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False})
+            self.assertEqual(configuration({"resetVector": address, "enableC": True, "protectedMode": False, "enableDebug": False}),
+                             {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False})
 
     def test_protected_configuration(self):
         for enabled in (False, True):
@@ -31,6 +31,13 @@ class ConfigurationTests(unittest.TestCase):
         for value in (1, "true", None, []):
             with self.assertRaises(ValueError):
                 configuration({"protectedMode": value})
+
+    def test_debug_configuration(self):
+        for enabled in (False, True):
+            self.assertEqual(configuration({"enableDebug": enabled})["enableDebug"], enabled)
+        for value in (1, "true", None, []):
+            with self.assertRaises(ValueError):
+                configuration({"enableDebug": value})
 
     def test_reject_invalid_or_inactive_configuration(self):
         for value in ([], None, {"enableC": 1}, {"enableC": "true"}, {"enableC": None},

@@ -37,6 +37,7 @@ Permission faults prevent external issue.
 PMP supports TOR, NA4 and NAPOT. The first matching entry must cover the whole access.
 Locked entries also constrain M mode. MPRV selects data privilege from MPP, without changing fetch privilege.
 PMP updates drain fetch. MRET to U clears MPRV.
+Debug resume to U also clears MPRV.
 
 `misa` is fixed by configuration.
 HPM state and `mstatush` read zero and ignore writes. Identification registers are read-only zero.
@@ -45,5 +46,13 @@ Interrupt inputs are synchronous and require external synchronization.
 Interrupt priority is external, software, then timer. Older synchronous exceptions complete first.
 The platform supplies coherent 64-bit time.
 
+`enableDebug` exposes synchronous DMI. Synchronize it externally.
+Counters stop while halted, while platform time continues.
+JTAG transport is external. Halt drains older work before register or abstract memory access.
+Debug memory uses M privilege with MPRV applied. Its faults do not change machine trap CSRs.
+Single step completes one instruction or exception with interrupts masked, then halts.
+Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
+
 The retirement port reports completed instructions and synchronous exceptions.
+Debug EBREAK emits no retirement event.
 A separate interrupt event carries the interrupted PC, target and cause.

@@ -33,11 +33,12 @@ def freeze_design(rtl, root, wrapper, runner):
     manifest_bytes = (rtl / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
     parameters = manifest["parameters"]
-    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode"}
+    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug"}
             and type(parameters.get("resetVector")) is int and parameters["resetVector"] == 0
             and type(parameters.get("enableM", False)) is bool
             and type(parameters.get("enableC", False)) is bool
-            and type(parameters.get("protectedMode", False)) is bool), "Unsupported formal ROM configuration"
+            and type(parameters.get("protectedMode", False)) is bool
+            and type(parameters.get("enableDebug", False)) is bool), "Unsupported formal ROM configuration"
     assert manifest["sourceHashes"] == source_hashes(root), "Stale RTL inputs"
     contents = {"manifest.json": manifest_bytes, "test/" + wrapper.name: wrapper.read_bytes(),
                 "test/" + runner.name: runner.read_bytes()}
@@ -70,7 +71,8 @@ def write_snapshot(work, contents):
 
 
 def mutate_trap_cancellation(content):
-    pattern = r"xValid <= ~(\w+) & ([^;]+);"
+    guard = r"(?:\w+|\(\s*\w+(?:\s*\|\s*\w+)*\s*\))"
+    pattern = rf"xValid\s*<=\s*~({guard})\s*&\s*([^;]+);"
     matches = list(re.finditer(pattern, content))
     assert len(matches) == 1, "Trap cancellation mutation no longer matches RTL"
     match = matches[0]
@@ -86,7 +88,9 @@ def mutate_trap_cancellation(content):
             result.extend(terms(item, (*visited, name)))
         return list(dict.fromkeys(result))
 
-    causes = terms(match[1])
+    initial = match[1].strip().removeprefix("(").removesuffix(")").strip()
+    causes = list(dict.fromkeys(cause for item in re.split(r"\s*\|\s*", initial)
+                               for cause in terms(item)))
     assert {"trap", "interrupt", "returning", "waiting", "waking"} <= set(causes), "Changed cancellation semantics"
     retained = " | ".join(cause for cause in causes if cause != "trap")
     replacement = f"xValid <= ~({retained}) & {match[2]};"
@@ -205,13 +209,13 @@ def main():
                         "ordered memory peers with arbitrary request and response delays",
                         "data fault response at least four cycles after request acceptance",
                         "interrupt inputs and time input tied to zero",
-                        "no eventual response assumption"],
+                        "optional DMI requests tied inactive", "no eventual response assumption"],
         "command": f"python3 test/core_formal.py --depth {args.depth}",
         "exitStatus": 0, "outcomes": outcomes, "selectedCases": args.case,
         "negativeControl": "retain the younger X instruction on trap entry",
         "coverSchedule": "ready requests, prompt fetch responses except the younger word, data response after seven cycles",
         **tool_versions(),
-        "excluded": ["unbounded core proof", "arbitrary programs", "nonzero reset vectors", "memory liveness"]}
+        "excluded": ["unbounded core proof", "debug entry and commands", "arbitrary programs", "nonzero reset vectors", "memory liveness"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"PASS: {len(outcomes)} core formal checks at depth {args.depth}")
 

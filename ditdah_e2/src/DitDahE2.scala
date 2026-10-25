@@ -7,21 +7,53 @@ import me.jiuyang.zaozi.default.{*, given}
 import me.jiuyang.zaozi.reftpe.*
 import me.jiuyang.zaozi.valuetpe.*
 
+private class PipelineReset extends Bundle:
+  val value = Aligned(Reset())
+
 @generator
 object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   override def moduleName(p: Parameters): String = "DitDahE2"
   def architecture(p: Parameters) =
     val io = summon[Interface[CoreIO]]
     given ClockScope = ClockScope.posedge(io.clock)
-    given ResetScope = ResetScope.syncActiveHigh(io.reset)
+    val systemReset = Wire(Bool())
+    systemReset := false.B
+    val resets = Wire(new PipelineReset)
+    val coreReset = resets.value
+    coreReset := (io.reset.asBool | systemReset).asReset
+    given ResetScope = ResetScope.syncActiveHigh(coreReset)
+    val debugStop = Wire(Bool())
+    val debugResume = Wire(Bool())
+    val debugResumePc = Wire(UInt(32))
+    val debugResumeUser = Wire(Bool())
+    val debugStep = Wire(Bool())
+    val debugFreeze = Wire(Bool())
+    val debugAccess = Wire(Bool())
+    val debugBreakMachine = Wire(Bool())
+    val debugBreakUser = Wire(Bool())
+    debugStop := false.B
+    debugResume := false.B
+    debugResumePc := 0.U(32)
+    debugResumeUser := false.B
+    debugStep := false.B
+    debugFreeze := false.B
+    debugAccess := false.B
+    debugBreakMachine := false.B
+    debugBreakUser := false.B
+    val programData = Wire(new MemoryPort)
+    io.data :<>= programData
     val fetch = Fetch.instantiate(p)
     fetch.io.clock := io.clock
-    fetch.io.reset := io.reset
+    fetch.io.reset := coreReset
     val csr = Csr.instantiate(p)
     csr.io.clock := io.clock
-    csr.io.reset := io.reset
+    csr.io.reset := coreReset
     csr.io.interrupts :<= io.interrupts
     csr.io.timeValue := io.timeValue
+    csr.io.debugAccess := debugAccess
+    csr.io.debugHalted := debugFreeze
+    csr.io.debugRestore := debugResume
+    csr.io.debugUser := debugResumeUser
     fetch.io.machine := !csr.io.userMode
     csr.io.instructionProtection.address := fetch.io.memory.request.bits.address
     csr.io.instructionProtection.size := 2.U(2)
@@ -30,7 +62,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     if p.protectedMode then
       val protection = MemoryProtection.instantiate(p)
       protection.io.clock := io.clock
-      protection.io.reset := io.reset
+      protection.io.reset := coreReset
       protection.io.allowed := csr.io.instructionProtection.allowed
       protection.io.input :<>= fetch.io.memory
       io.instruction :<>= protection.io.output
@@ -46,11 +78,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val registers = Seq.fill(31)(RegInit(0.U(32)))
 
     val localWake = csr.io.interruptPending =/= 0.U(12)
-    val eligibleInterrupt = localWake & csr.io.interruptsEnabled
+    val eligibleInterrupt = localWake & csr.io.interruptsEnabled & !debugStop & !debugStep
     val interrupt = !mValid & eligibleInterrupt
     val interruptCause = csr.io.interruptPending.asBits.bit(11).?(0x8000000bL.U(32),
       csr.io.interruptPending.asBits.bit(3).?(0x80000003L.U(32), 0x80000007L.U(32)))
-    val waking = sleeping & localWake
+    val waking = sleeping & localWake & !debugStop
 
     val memory = m.load | m.store
     csr.io.dataProtection.address := m.address
@@ -58,28 +90,29 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.io.dataProtection.machine := csr.io.dataMachine
     csr.io.dataProtection.kind := m.store.?(1.U(2), 0.U(2))
     val denied = mValid & memory & !m.trap & !csr.io.dataProtection.allowed
-    io.data.request.valid := mValid & memory & !m.trap & !sent & !denied
-    io.data.request.bits.address := m.address
-    io.data.request.bits.machine := csr.io.dataMachine
-    io.data.request.bits.write := m.store
+    programData.request.valid := mValid & memory & !m.trap & !sent & !denied
+    programData.request.bits.address := m.address
+    programData.request.bits.machine := csr.io.dataMachine
+    programData.request.bits.write := m.store
     val lane = m.address.asBits.bits(1, 0).asUInt
     val shift = (m.address.asBits.bits(1, 0) ## 0.B(3)).asUInt
-    io.data.request.bits.data := (m.storeData << shift).asBits.bits(31, 0).asUInt
+    programData.request.bits.data := (m.storeData << shift).asBits.bits(31, 0).asUInt
     val mask = (m.size === 0.U(2)).?(1.U(4), (m.size === 1.U(2)).?(3.U(4), 15.U(4)))
-    io.data.request.bits.mask := m.store.?((mask << lane).asBits.bits(3, 0).asUInt, 0.U(4))
-    io.data.request.bits.size := m.size
-    io.data.response.ready := mValid & memory & sent
-    val response = io.data.response.valid & io.data.response.ready
+    programData.request.bits.mask := m.store.?((mask << lane).asBits.bits(3, 0).asUInt, 0.U(4))
+    programData.request.bits.size := m.size
+    programData.response.ready := mValid & memory & sent
+    val response = programData.response.valid & programData.response.ready
     val csrError = m.csr & csr.io.illegal
     val protectionUpdate = mValid & m.csr & m.csrWrite & csr.io.protectionSelected & !csrError & !m.trap
     val synchronize = m.fenceI | protectionUpdate
     val synchronizing = mValid & synchronize & !m.trap
     val complete = mValid & (m.trap | denied | (!memory & (!synchronize | fetch.io.idle)) | response)
-    val failed = m.trap | csrError | denied | (response & io.data.response.bits.fault)
+    val failed = m.trap | csrError | denied | (response & programData.response.bits.fault)
     val trap = complete & failed
     val returning = complete & m.mret & !failed
     val waiting = complete & m.wfi & !failed
     val synchronized = complete & synchronize & !failed
+    val debugBreakpoint = complete & m.debugBreak & !failed
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
     val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
     csr.io.address := m.csrAddress
@@ -92,13 +125,13 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.io.cause := interrupt.?(interruptCause, finalCause)
     csr.io.tval := interrupt.?(0.U(32), finalTval)
     csr.io.mret := returning
-    csr.io.retire := complete & !failed
+    csr.io.retire := complete & !failed & !debugBreakpoint
     io.interrupt.valid := interrupt
     io.interrupt.pc := architecturalPc
     io.interrupt.target := csr.io.trapTarget
     io.interrupt.cause := interruptCause
     io.sleeping := sleeping
-    val loaded = (io.data.response.bits.data >> shift).asBits
+    val loaded = (programData.response.bits.data >> shift).asBits
     val loadValue = Wire(UInt(32))
     loadValue := loaded.asUInt
     when(m.size === 0.U(2)) {
@@ -108,7 +141,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       loadValue := ((loaded.bit(15) & !m.unsignedLoad).?(0xffff.B(16), 0.B(16)) ## loaded.bits(15, 0)).asUInt
     }
     val writeback = m.csr.?(csr.io.readData, m.load.?(loadValue, m.value))
-    io.retire.valid := complete
+    io.retire.valid := complete & !debugBreakpoint
     io.retire.userMode := m.userMode
     io.retire.pc := m.instruction.pc
     io.retire.word := m.instruction.word
@@ -119,7 +152,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.retire.trap := trap
     io.retire.cause := finalCause
     io.retire.tval := finalTval
-    when(complete) { architecturalPc := io.retire.nextPc }
+    when(complete & !debugBreakpoint) { architecturalPc := io.retire.nextPc }
+    when(debugResume) { architecturalPc := debugResumePc }
     when(interrupt) { architecturalPc := csr.io.trapTarget }
     for i <- 1 to 31 do
       when(io.retire.writes & (m.rd === i.U(5))) { registers(i - 1) := writeback }
@@ -155,6 +189,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isJal = opcode === 0x6f.B(7)
     val isJalr = (opcode === 0x67.B(7)) & (funct3 === 0.B(3))
     val isBreak = decoded === 0x00100073.U(32)
+    val isDebugBreak = isBreak & xUser.?(debugBreakUser, debugBreakMachine)
     val isCall = decoded === 0x00000073.U(32)
     val isFence = (opcode === 0x0f.B(7)) & (funct3 === 0.B(3))
     val isFenceI = (opcode === 0x0f.B(7)) & (funct3 === 1.B(3))
@@ -184,7 +219,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     arithmeticValue := 0.U(32)
     val advance = xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
       (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping &
-      (!isMultiplyDivide | x.fault | arithmeticReady)
+      (!isMultiplyDivide | x.fault | arithmeticReady) & !debugStop
     io.mulDiv.start := false.B
     io.mulDiv.resultValid := false.B
     io.mulDiv.finish := false.B
@@ -195,10 +230,10 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       val multiplyDivide = MultiplyDivide.instantiate(p)
       val arithmeticPending = RegInit(false.B)
       multiplyDivide.io.clock := io.clock
-      multiplyDivide.io.reset := io.reset
-      multiplyDivide.io.cancel := trap | interrupt
+      multiplyDivide.io.reset := coreReset
+      multiplyDivide.io.cancel := trap | interrupt | debugStop
       multiplyDivide.io.request.valid := xValid & isMultiplyDivide & !arithmeticPending &
-        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault
+        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault & !debugStop
       multiplyDivide.io.request.bits.operation := funct3.asUInt
       multiplyDivide.io.request.bits.left := a
       multiplyDivide.io.request.bits.right := b
@@ -210,11 +245,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       io.mulDiv.start := started
       io.mulDiv.resultValid := arithmeticPending & multiplyDivide.io.response.valid
       io.mulDiv.finish := finished
-      io.mulDiv.cancel := arithmeticPending & (trap | interrupt)
+      io.mulDiv.cancel := arithmeticPending & (trap | interrupt | debugStop)
       io.mulDiv.pc := x.pc
       io.mulDiv.value := multiplyDivide.io.response.valid.?(multiplyDivide.io.response.bits, 0.U(32))
       when(started) { arithmeticPending := true.B }
-      when(finished | trap | interrupt) { arithmeticPending := false.B }
+      when(finished | trap | interrupt | debugStop) { arithmeticPending := false.B }
     io.loadUse := xValid & loadUse
     io.forward := advance & !m.load & (match1 | match2)
     io.memoryWait := mValid & memory & !complete
@@ -240,7 +275,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       ((size === 2.U(2)) & (address.asBits.bits(1, 0) =/= 0.B(2))) |
       ((size === 1.U(2)) & address.asBits.bit(0)))
     val systemFault = (isMret & xUser) | (isWfi & csr.io.wfiIllegal)
-    val fault = x.fault | !legal | isBreak | isCall | badTarget | badData | systemFault
+    val fault = x.fault | !legal | (isBreak & !isDebugBreak) | isCall | badTarget | badData | systemFault
     val cause = Wire(UInt(32))
     val tval = Wire(UInt(32))
     cause := 2.U(32)
@@ -268,21 +303,22 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(isMultiplyDivide) { value := arithmeticValue }
 
     val branchRedirect = advance & jump & !fault
-    val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect
+    val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect | debugResume
     fetch.io.redirect := redirect
-    fetch.io.target := (trap | interrupt).?(csr.io.trapTarget,
-      returning.?(csr.io.returnPc, (waiting | synchronized).?(m.nextPc, waking.?(architecturalPc, target))))
-    fetch.io.pause := trap | interrupt | sleeping | waiting | synchronizing | (advance & isFenceI & !fault)
-    fetch.io.output.ready := (!xValid | advance) & !redirect & !sleeping & !eligibleInterrupt
+    fetch.io.target := debugResume.?(debugResumePc, (trap | interrupt).?(csr.io.trapTarget,
+      returning.?(csr.io.returnPc, (waiting | synchronized).?(m.nextPc, waking.?(architecturalPc, target)))))
+    fetch.io.pause := trap | interrupt | sleeping | waiting | synchronizing | (advance & isFenceI & !fault) | debugStop
+    fetch.io.output.ready := (!xValid | advance) & !redirect & !sleeping & !eligibleInterrupt & !debugStop
     io.redirect := redirect
     when(complete) { mValid := false.B }
-    when(io.data.request.valid & io.data.request.ready) { sent := true.B }
+    when(programData.request.valid & programData.request.ready) { sent := true.B }
     when(advance) {
       xValid := false.B
       mValid := true.B
       sent := false.B
       m.instruction :<= x
       m.userMode := xUser
+      m.debugBreak := isDebugBreak
       m.nextPc := jump.?(target, sequential)
       m.rd := bits.bits(11, 7).asUInt
       m.writes := isImmediate | isRegister | isMultiplyDivide | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
@@ -310,6 +346,67 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       x :<= fetch.io.output.bits
       xUser := csr.io.userMode
     }
-    when(waiting) { sleeping := !localWake }
-    when(waking | trap | interrupt) { sleeping := false.B }
+    when(waiting) { sleeping := !localWake & !debugStep }
+    when(waking | trap | interrupt | debugStop | debugResume) { sleeping := false.B }
     when(trap | interrupt | returning | waiting | waking | synchronized) { xValid := false.B; mValid := false.B }
+    when(debugStop | debugResume) { xValid := false.B }
+    if p.enableDebug then
+      val dm = DebugModule.instantiate(p)
+      val debug = DebugHart.instantiate(DebugHartParameters(p.resetVector, p.enableC, p.protectedMode))
+      dm.io.clock := io.clock
+      dm.io.reset := io.reset
+      dm.io.dmi :<>= io.dmi.get
+      debug.io.clock := io.clock
+      debug.io.reset := io.reset
+      debug.io.debug :<>= dm.io.hart
+      debug.io.core.empty := !mValid
+      debug.io.core.fetchIdle := fetch.io.idle
+      debug.io.core.architecturalPc := architecturalPc
+      debug.io.core.userMode := csr.io.userMode
+      debug.io.core.completed := complete & !debugBreakpoint
+      debug.io.core.breakpoint := debugBreakpoint
+      debug.io.core.breakpointPc := m.instruction.pc
+      debugStop := debug.io.core.stop
+      debugResume := debug.io.core.resume
+      debugResumePc := debug.io.core.resumePc
+      debugResumeUser := debug.io.core.resumeUser
+      debugStep := debug.io.core.singleStep
+      debugFreeze := debug.io.core.freezeCounters
+      debugAccess := debug.io.debug.status.halted
+      debugBreakMachine := debug.io.core.ebreakMachine
+      debugBreakUser := debug.io.core.ebreakUser
+      systemReset := debug.io.core.coreReset
+      io.systemReset.get := systemReset
+      val register = debug.io.backend.register
+      val gpr = (register >= 0x1000.U(16)) & (register <= 0x101f.U(16))
+      val csrRegister = register <= 0x0fff.U(16)
+      debug.io.backend.readData := csrRegister.?(csr.io.readData, 0.U(32))
+      debug.io.backend.error := !(gpr | csrRegister) | (csrRegister & csr.io.illegal)
+      for index <- 1 to 31 do
+        when(register === (0x1000 + index).U(16)) {
+          debug.io.backend.readData := registers(index - 1)
+          when(debug.io.backend.writePulse) { registers(index - 1) := debug.io.backend.writeData }
+        }
+      when(debugAccess) {
+        csr.io.address := register.asBits.bits(11, 0).asUInt
+        csr.io.operand := debug.io.backend.writeData
+        csr.io.operation := 1.U(2)
+        csr.io.writeRequested := debug.io.backend.writeRequested
+        csr.io.commit := debug.io.backend.writePulse & csrRegister
+        csr.io.dataProtection.address := debug.io.protection.address
+        csr.io.dataProtection.size := debug.io.protection.size
+        csr.io.dataProtection.kind := debug.io.protection.write.?(1.U(2), 0.U(2))
+      }
+      debug.io.protection.allowed := csr.io.dataProtection.allowed
+      debug.io.protection.machine := csr.io.dataMachine
+      val debugMemory = debugAccess | debug.io.memory.request.valid | debug.io.memory.response.ready
+      debug.io.memory.request.ready := io.data.request.ready & debugMemory
+      debug.io.memory.response.valid := io.data.response.valid & debugMemory
+      debug.io.memory.response.bits :<= io.data.response.bits
+      when(debugMemory) {
+        io.data.request.valid := debug.io.memory.request.valid
+        io.data.request.bits :<= debug.io.memory.request.bits
+        io.data.response.ready := debug.io.memory.response.ready
+        programData.request.ready := false.B
+        programData.response.valid := false.B
+      }

@@ -29,6 +29,14 @@ module core_formal(input clock);
   wire [31:0] interrupt_pc, interrupt_target, interrupt_cause;
   wire mulDiv_start, mulDiv_resultValid, mulDiv_finish, mulDiv_cancel;
   wire [31:0] mulDiv_pc, mulDiv_value;
+  // Ordinary execution proofs keep the optional debug transport inactive.
+  wire dmi_request_valid = 0, dmi_response_ready = 1;
+  wire [6:0] dmi_request_bits_address = 0;
+  wire [31:0] dmi_request_bits_data = 0;
+  wire [1:0] dmi_request_bits_op = 0;
+  wire dmi_request_ready, dmi_response_valid, systemReset;
+  wire [31:0] dmi_response_bits_data;
+  wire [1:0] dmi_response_bits_status;
   DitDahE2 dut (.*);
 
   function [31:0] rom(input [31:0] address);

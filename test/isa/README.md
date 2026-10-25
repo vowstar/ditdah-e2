@@ -22,4 +22,4 @@ Use a new `--output` directory for each run. Sources and versions are pinned in 
 | `add`, `rv32i` | Default ADD test or the RV32I collection |
 | `rv32m`, `rv32c` | Enable M or C respectively |
 
-For the ordinary adapter, keep `protectedMode` false.
+For the ordinary adapter, keep `enableDebug`, `protectedMode` false.

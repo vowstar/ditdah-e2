@@ -35,6 +35,14 @@ module interrupt_formal #(parameter integer SCENARIO = -1)(input clock);
   wire wfi_case = scenario == 2 || scenario == 3;
   wire [31:0] expected_cause = pending_sources[2] ? 32'h8000000b :
                               pending_sources[0] ? 32'h80000003 : 32'h80000007;
+  // Ordinary execution proofs keep the optional debug transport inactive.
+  wire dmi_request_valid = 0, dmi_response_ready = 1;
+  wire [6:0] dmi_request_bits_address = 0;
+  wire [31:0] dmi_request_bits_data = 0;
+  wire [1:0] dmi_request_bits_op = 0;
+  wire dmi_request_ready, dmi_response_valid, systemReset;
+  wire [31:0] dmi_response_bits_data;
+  wire [1:0] dmi_response_bits_status;
   DitDahE2 dut (.*);
 
   function [31:0] rom(input [31:0] address);

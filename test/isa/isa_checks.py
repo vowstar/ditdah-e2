@@ -59,13 +59,15 @@ def execution_case(words, reset, complete, *, enable_m=False, enable_c=False):
 
 
 def validate_rtl_configuration(parameters, enable_m, enable_c):
-    names = {"resetVector", "enableM", "enableC", "protectedMode"}
+    names = {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug"}
     if not isinstance(parameters, dict) or parameters.keys() - names:
         raise ValueError("Unsupported RTL configuration")
     if any(type(parameters.get(name, False)) is not bool for name in names - {"resetVector"}):
         raise ValueError("RTL ISA configuration must be Boolean")
     if type(parameters.get("resetVector")) is not int or parameters["resetVector"] != RESET:
         raise ValueError("RTL reset configuration mismatch")
+    if parameters.get("enableDebug", False):
+        raise ValueError("This ISA collection requires debug disabled")
     if parameters.get("protectedMode", False):
         raise ValueError("This ISA collection requires the machine profile")
     if any(type(value) is not bool for value in (enable_m, enable_c)) or (

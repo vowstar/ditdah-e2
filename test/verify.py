@@ -21,7 +21,7 @@ from build_rtl import digest, sources
 
 def checker_inputs():
     paths = ("test/model.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
-             "test/compressed_unit.py", "test/sim.cpp", "test/verify.py", "scripts/build_rtl.py")
+             "test/compressed_unit.py", "test/sim.cpp", "test/inactive_debug.hpp", "test/verify.py", "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in paths}
 
 
@@ -115,7 +115,7 @@ def check(case, text):
             port, request = fields[2], tuple(map(int, fields[3:]))
             assert port in ("I", "D") and port not in offered and len(request) == 6, "Invalid first request offer"
             status = model.csrs[0x300]
-            effective_user = bool(status >> 11 & 3 == 0) if status & (1 << 17) else model.user_mode
+            effective_user = model.user_mode or bool(status & (1 << 17) and status >> 11 & 3 == 0)
             machine = not (model.user_mode if port == "I" else effective_user)
             assert request[5] == int(machine), "Offered request privilege differs"
             if model.protected_mode:

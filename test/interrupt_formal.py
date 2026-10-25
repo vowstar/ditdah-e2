@@ -104,7 +104,7 @@ def main():
                               "all three local enables set by the ROM",
                               "ordered memory peers with arbitrary request and response delays",
                               "data response at least four cycles after acceptance", "time input tied to zero",
-                              "no eventual response assumption"],
+                              "optional DMI requests tied inactive", "no eventual response assumption"],
               "covers": ["interrupt pending during memory wait", "software interrupt handler",
                          "timer interrupt handler", "external interrupt handler", "all sources pending",
                          "synchronous fault with all sources pending", "WFI local wake without global enable",
@@ -114,7 +114,7 @@ def main():
                                    "fault-priority": "enter an interrupt on a synchronous data fault",
                                    "saved-pc": "save the following instruction address in mepc",
                                    "local-wake": "require global enable for WFI wakeup"},
-              "excluded": ["unbounded core proof", "arbitrary programs", "all CSR enable combinations",
+              "excluded": ["unbounded core proof", "debug entry and commands", "arbitrary programs", "all CSR enable combinations",
                            "interrupt pulse capture", "memory liveness", "nonzero reset vectors"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"PASS: {len(outcomes)} interrupt formal checks at depth {args.depth}")

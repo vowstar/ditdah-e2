@@ -89,6 +89,18 @@ class PlatformTests(unittest.TestCase):
             with self.subTest(cycle=cycle, records=records), self.assertRaisesRegex(AssertionError, "Console transfer"):
                 platform.device_expectations(groups)
 
+    def test_user_workload_keeps_device_checks(self):
+        groups = device_groups()
+        groups[0][1][5] = "85"
+        groups[1][1][2] = "85"
+        for cycle in range(3, 9):
+            groups[cycle] = groups[cycle][:1]
+        _, _, _, counts = platform.device_expectations(groups, b"U\n")
+        self.assertEqual(counts["writes"], 2)
+        groups[1][1][2] = "86"
+        with self.assertRaisesRegex(AssertionError, "Console transfer"):
+            platform.device_expectations(groups, b"U\n")
+
     def test_trace_clock_and_final_words(self):
         groups, words = platform.cycles("T 0 0 1 0 0 0 0\nF 1\nW 0 111\n")
         self.assertEqual(len(groups), 1)
@@ -116,6 +128,24 @@ class PlatformTests(unittest.TestCase):
         groups[101][1][3] = "1"
         self.assertEqual(platform.rejected(lambda: platform.device_expectations(groups)),
                          "Device response differs")
+
+    def test_permission_mutants_change_real_rtl_outputs(self):
+        data = "assign data_allowed = size_ok & permitted;"
+        self.assertEqual(platform.data_permission_mutant(data), "assign data_allowed = 1'b1;")
+        axi = "wire [2:0]  protection = {~dataOwner, 1'h0, request_machine};"
+        self.assertEqual(platform.axi_privilege_mutant(axi),
+                         "wire [2:0]  protection = {~dataOwner, 1'h0, 1'h1};")
+        for mutate, source in ((platform.data_permission_mutant, data), (platform.axi_privilege_mutant, axi)):
+            for changed in ("", source + source):
+                with self.subTest(source=changed), self.assertRaisesRegex(AssertionError, "mutation"):
+                    mutate(changed)
+
+    def test_request_offer_records_keep_their_clock(self):
+        trace = "T 0 0 1 0 0 0 0\nP 0 I 0 0 0 0 2 1\nQ 0 I 0 0 0 0 2 1\nF 1\nW 0 111\n"
+        groups, _ = platform.cycles(trace)
+        self.assertEqual([fields[0] for fields in groups[0]], ["T", "P", "Q"])
+        with self.assertRaisesRegex(AssertionError, "clock"):
+            platform.cycles(trace.replace("P 0 I", "P 1 I"))
 
     def test_one_architectural_event_per_cycle(self):
         retirement = "R 0 0 111 0 0 0 0 0 0 0\n"

@@ -44,12 +44,14 @@ class FrozenDesignTests(unittest.TestCase):
         manifest = json.loads(path.read_text())
         for enabled in (False, True):
             for compressed in (False, True):
-                manifest["parameters"] = {"resetVector": 0, "enableM": enabled, "enableC": compressed}
-                path.write_text(json.dumps(manifest))
-                self.assertEqual(self.freeze()[2]["parameters"], manifest["parameters"])
+                for debug in (False, True):
+                    manifest["parameters"] = {"resetVector": 0, "enableM": enabled, "enableC": compressed, "enableDebug": debug}
+                    path.write_text(json.dumps(manifest))
+                    self.assertEqual(self.freeze()[2]["parameters"], manifest["parameters"])
         for parameters in ({"resetVector": 4}, {"resetVector": False},
                            {"resetVector": 0, "enableM": 1},
-                           {"resetVector": 0, "enableC": 1}):
+                           {"resetVector": 0, "enableC": 1},
+                           {"resetVector": 0, "enableDebug": 1}):
             manifest["parameters"] = parameters
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(AssertionError, "configuration"):
@@ -133,6 +135,9 @@ class MutationTests(unittest.TestCase):
         extended = source.replace(" | waking", " | waking | synchronized")
         extended += "wire synchronized = complete & m_fenceI & ~failed;\n"
         self.assertIn("waiting | waking | synchronized)", mutate_trap_cancellation(extended))
+        debug = source.replace("xValid <= ~guard &", "xValid <=\n  ~(debugStop | debugResume | guard)\n  &")
+        self.assertIn("~(debugStop | debugResume | interrupt | returning | waiting | waking)",
+                      mutate_trap_cancellation(debug))
         with self.assertRaisesRegex(AssertionError, "semantics"):
             mutate_trap_cancellation(source.replace(" | waking", ""))
 

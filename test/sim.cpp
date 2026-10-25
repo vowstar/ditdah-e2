@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "VDitDahE2.h"
 #include "verilated.h"
+#include "inactive_debug.hpp"
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -43,6 +44,7 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
+        inactiveDebug(dut);
         std::map<uint32_t, uint32_t> memory;
         std::ifstream file(argv[1]);
         if (!file) throw std::runtime_error("Cannot open program image");

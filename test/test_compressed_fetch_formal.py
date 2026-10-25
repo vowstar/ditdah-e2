@@ -72,6 +72,16 @@ class CompressedFetchInputTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Changed formal input"):
             freeze(self.args)
 
+    def test_debug_option_does_not_change_fetch_scope(self):
+        for value in (False, True):
+            self.manifest["parameters"]["enableDebug"] = value
+            self.save_manifest()
+            self.assertEqual(freeze(self.args)[1]["parameters"]["enableDebug"], value)
+        self.manifest["parameters"]["enableDebug"] = 1
+        self.save_manifest()
+        with self.assertRaisesRegex(AssertionError, "Invalid debug"):
+            freeze(self.args)
+
     def test_observations_preserve_the_original_implementation(self):
         original = example_rtl()
         observed = observe(original)

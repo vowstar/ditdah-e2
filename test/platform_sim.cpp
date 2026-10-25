@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "VPlatformBench.h"
 #include "verilated.h"
+#include "inactive_debug.hpp"
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -21,6 +22,7 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VPlatformBench dut{&context};
+        inactiveDebug(dut);
         std::ifstream file(argv[1]);
         uint64_t rom, romSize, ram, ramSize;
         if (!(file >> std::hex >> rom >> romSize >> ram >> ramSize))
@@ -77,12 +79,18 @@ int main(int argc, char **argv) {
                 auto &port = ports[index];
                 if (port.held && (!valid || request != port.request))
                     throw std::runtime_error("Native request changed under backpressure");
+                const bool first = valid && !port.held;
                 port.held = valid && !ready;
                 port.request = request;
                 if (rv && rr) {
                     if (!port.active) throw std::runtime_error("Native response has no owner");
                     port.active = false;
                     std::cout << "S " << cycle << ' ' << name << ' ' << value << ' ' << fault << '\n';
+                }
+                if (first && index < 2) {
+                    std::cout << "P " << cycle << ' ' << name;
+                    for (auto item : request) std::cout << ' ' << item;
+                    std::cout << '\n';
                 }
                 if (valid && ready) {
                     if (port.active) throw std::runtime_error("Native transaction overlapped");

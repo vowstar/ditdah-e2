@@ -10,6 +10,7 @@ import me.jiuyang.zaozi.valuetpe.*
 class PlatformIO(p: PlatformParameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
+  val dmi = Option.when(p.core.enableDebug)(Flipped(new DmiPort))
   val tick = Flipped(Bool())
   val externalInterrupt = Flipped(Bool())
   val transmit = Aligned(new Channel(UInt(8)))
@@ -38,14 +39,19 @@ object DitDahE2Platform extends Generator[PlatformParameters, PlatformLayers, Pl
     val timer = MachineTimer.instantiate(p.core)
     core.io.clock := io.clock
     core.io.reset := io.reset
+    val platformReset = Wire(Reset())
+    platformReset := io.reset
+    if p.core.enableDebug then
+      core.io.dmi.get :<>= io.dmi.get
+      platformReset := (io.reset.asBool | core.io.systemReset.get).asReset
     router.io.clock := io.clock
-    router.io.reset := io.reset
+    router.io.reset := platformReset
     bus.io.clock := io.clock
-    bus.io.reset := io.reset
+    bus.io.reset := platformReset
     console.io.clock := io.clock
-    console.io.reset := io.reset
+    console.io.reset := platformReset
     timer.io.clock := io.clock
-    timer.io.reset := io.reset
+    timer.io.reset := platformReset
     router.io.instruction :<>= core.io.instruction
     router.io.data :<>= core.io.data
     bus.io.instruction :<>= router.io.memoryInstruction

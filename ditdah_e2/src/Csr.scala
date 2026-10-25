@@ -21,6 +21,10 @@ class CsrIO(p: Parameters) extends HWBundle(p):
   val tval = Flipped(UInt(32))
   val mret = Flipped(Bool())
   val retire = Flipped(Bool())
+  val debugAccess = Flipped(Bool())
+  val debugHalted = Flipped(Bool())
+  val debugRestore = Flipped(Bool())
+  val debugUser = Flipped(Bool())
   val interrupts = Flipped(new InterruptLevels)
   val timeValue = Flipped(UInt(64))
   val readData = Aligned(UInt(32))
@@ -51,7 +55,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     val tw = RegInit(false.B)
     val counterEnable = RegInit(0.U(3))
     io.userMode := (if p.protectedMode then userMode else false.B)
-    io.dataMachine := (if p.protectedMode then !mprv.?(mppUser, userMode) else true.B)
+    io.dataMachine := (if p.protectedMode then (!userMode | io.debugAccess) & !(mprv & mppUser) else true.B)
     io.wfiIllegal := (if p.protectedMode then userMode & tw else false.B)
     val protectionRead = Wire(UInt(32))
     val protectionWrite = Wire(Bool())
@@ -78,7 +82,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     counters.io.clock := io.clock
     counters.io.reset := io.reset
     counters.io.retire := io.retire
-    counters.io.inhibit := inhibit
+    counters.io.inhibit := (inhibit.asBits | io.debugHalted.?(5.B(3), 0.B(3))).asUInt
     counters.io.high := io.address.asBits.bit(7)
     val mtvec = RegInit(BigInt(p.resetVector & 0xfffffffcL).U(32))
     val mscratch = RegInit(0.U(32))
@@ -111,7 +115,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
           userCounterDenied := !counterEnable.asBits.bit(index)
         }
     io.illegal := !implemented | (io.writeRequested & readOnly) |
-      (io.userMode & ((io.address.asBits.bits(9, 8) =/= 0.B(2)) | userCounterDenied))
+      (io.userMode & !io.debugAccess & ((io.address.asBits.bits(9, 8) =/= 0.B(2)) | userCounterDenied))
     io.readData := 0.U(32)
     when(io.address === 0x300.U(12)) { io.readData := status }
     val misa = 0x40000100L | (if p.enableM then 0x1000L else 0L) | (if p.enableC then 4L else 0L) |
@@ -183,6 +187,11 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
         mppUser := true.B
         when(mppUser) { mprv := false.B }
     }
+    if p.protectedMode then
+      when(io.debugRestore) {
+        userMode := io.debugUser
+        when(io.debugUser) { mprv := false.B }
+      }
     when(io.trap) {
       mie := false.B
       mpie := mie

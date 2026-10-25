@@ -24,8 +24,8 @@ C_INSTRUCTIONS = ["c.addi4spn", "c.lw", "c.sw", "c.addi", "c.jal", "c.li", "c.lu
 
 
 def configuration(value):
-    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC", "protectedMode"}:
-        raise ValueError("Only resetVector, enableM, enableC and protectedMode are supported")
+    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug"}:
+        raise ValueError("Only resetVector, enableM, enableC, protectedMode and enableDebug are supported")
     enable_c = value.get("enableC", True)
     if type(enable_c) is not bool:
         raise ValueError("enableC must be a Boolean")
@@ -38,7 +38,10 @@ def configuration(value):
     protected = value.get("protectedMode", False)
     if type(protected) is not bool:
         raise ValueError("protectedMode must be a Boolean")
-    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected}
+    debug = value.get("enableDebug", False)
+    if type(debug) is not bool:
+        raise ValueError("enableDebug must be a Boolean")
+    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected, "enableDebug": debug}
 
 
 def digest(path):
@@ -85,6 +88,7 @@ def main():
             "machineInterrupts": ["software", "timer", "external"],
             "privilegeModes": ["M", "U"] if params["protectedMode"] else ["M"],
             "pmpEntries": 16 if params["protectedMode"] else 0,
+            "debug": "synchronous DMI" if params["enableDebug"] else None,
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},
             "firtool": subprocess.check_output(["firtool", "--version"], text=True).strip(),
