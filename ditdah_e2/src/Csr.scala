@@ -93,9 +93,10 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
       (0.B(10) ## tw.asBits ## 0.B(3) ## mprv.asBits ## 0.B(4) ##
         mppUser.?(0.B(2), 3.B(2)) ## 0.B(3) ## mpie.asBits ## 0.B(3) ## mie.asBits ## 0.B(3)).asUInt
     else (0.B(19) ## 3.B(2) ## 0.B(3) ## mpie.asBits ## 0.B(3) ## mie.asBits ## 0.B(3)).asUInt
-    val named = Seq(0x300, 0x301, 0x304, 0x305, 0x310, 0x320, 0x340, 0x341,
+    val named = (Seq(0x300, 0x301, 0x304, 0x305, 0x310, 0x320, 0x340, 0x341,
       0x342, 0x343, 0x344, 0xb00, 0xb80, 0xb02, 0xb82,
-      0xc00, 0xc80, 0xc01, 0xc81, 0xc02, 0xc82, 0xf11, 0xf12, 0xf13, 0xf14, 0xf15)
+      0xc00, 0xc80, 0xc01, 0xc81, 0xc02, 0xc82, 0xf11, 0xf12, 0xf13, 0xf14, 0xf15) ++
+      (if p.protectedMode then Seq(0x30a) else Seq.empty))
       .map(address => io.address === address.U(12)).reduce(_ | _)
     val zeroCounter = ((io.address >= 0xb03.U(12)) & (io.address <= 0xb1f.U(12))) |
       ((io.address >= 0xb83.U(12)) & (io.address <= 0xb9f.U(12))) |

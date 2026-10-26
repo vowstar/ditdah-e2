@@ -60,6 +60,7 @@ Debug resume to U also clears MPRV.
 
 `misa` is fixed by configuration.
 HPM state and `mstatush` read zero and ignore writes. Identification registers are read-only zero.
+Protected `menvcfg` reads zero and ignores writes. M-only mode has no `menvcfg`.
 
 Interrupt inputs are synchronous and require external synchronization.
 Interrupt priority is external, software, then timer. Older synchronous exceptions complete first.

@@ -7,6 +7,7 @@ import unittest
 from model import M_INSTRUCTIONS, Model
 from protected_programs import COMPLETION, cases
 from verify import InputSchedule
+from verify_protected import without_menvcfg
 
 
 def execute(case):
@@ -53,6 +54,27 @@ def execute(case):
 
 
 class ProtectedProgramTests(unittest.TestCase):
+    def test_menvcfg_rtl_control_requires_one_address(self):
+        self.assertEqual(without_menvcfg("address == 12'h30A"), "address == 12'h30B")
+        for text in ("address == 12'h306", "12'h30A | 12'h30a"):
+            with self.assertRaisesRegex(ValueError, "Expected one menvcfg"):
+                without_menvcfg(text)
+
+    def test_menvcfg_machine_values_and_user_faults(self):
+        selected = {case.name: case for case in cases()}
+        model, events, _ = execute(selected["protected_menvcfg_zero"])
+        accesses = [event for event in events if event.word >> 20 == 0x30A and event.word & 0x7F == 0x73]
+        self.assertEqual({event.instruction for event in accesses},
+                         {"csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"})
+        self.assertTrue(all(not event.trap and not event.user_mode and event.value == 0 for event in accesses))
+        self.assertEqual(model.read_csr(0x30A), 0)
+        for operation in (1, 2, 3, 5, 6, 7):
+            _, events, _ = execute(selected[f"protected_user_menvcfg_{operation}"])
+            denied = [event for event in events if event.cause == 2]
+            self.assertEqual(len(denied), 2)
+            self.assertTrue(all(event.user_mode and event.tval == event.word and event.rd == 0 for event in denied))
+        execute(selected["protected_menvcfgh_absent"])
+
     def test_fixed_program_signatures(self):
         for enable_m in (False, True):
             for enable_c in (False, True):

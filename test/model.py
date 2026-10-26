@@ -97,6 +97,7 @@ class Model:
                                        0xC00, 0xC80, 0xC01, 0xC81, 0xC02, 0xC82), 0))
         if protected_mode:
             self.csrs[0x306] = 0
+            self.csrs[0x30A] = 0
         self.counters = {0xB00: 0, 0xB02: 0}
         self.cycle = -1
         self.time = TIME_BASE
