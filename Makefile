@@ -9,7 +9,9 @@ DEBUG_LATENCY_OUTPUT ?= result/debug-latency
 
 INTERRUPT_OUTPUT ?= result/interrupt-stress
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts
+PMP_DATA_OUTPUT ?= result/pmp-data
+
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -107,3 +109,9 @@ verify-atomic-formal:
 
 verify-interrupts: rtl
 	python3 test/interrupt_stress.py --rtl result/rtl --output "$(INTERRUPT_OUTPUT)"
+
+verify-pmp-data:
+	mkdir -p "$(PMP_DATA_OUTPUT)"
+	printf '%s\n' '{"enableM":false,"enableC":false,"protectedMode":true}' > "$(PMP_DATA_OUTPUT)/configuration.json"
+	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
+	python3 test/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
