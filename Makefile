@@ -5,7 +5,9 @@ export PYTHONDONTWRITEBYTECODE = 1
 CONFIG ?=
 PLATFORM_OUTPUT ?= result/platform
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance
+DEBUG_LATENCY_OUTPUT ?= result/debug-latency
+
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -78,3 +80,19 @@ verify-compliance:
 	python3 -m unittest discover -s test -p 'test_*.py'
 	python3 -m unittest discover -s test/isa -p 'test_*.py'
 	reuse lint
+
+verify-debug-formal:
+	mkdir -p result
+	printf '%s\n' '{"enableM":false,"enableC":false,"enableDebug":true}' > result/debug-formal.json
+	python3 scripts/build_rtl.py --config result/debug-formal.json --output result/debug-formal-rtl
+	python3 test/debug_core_formal.py --rtl result/debug-formal-rtl --output result/debug-core-formal
+
+verify-debug-latency:
+	mkdir -p "$(DEBUG_LATENCY_OUTPUT)"
+	printf '%s\n' '{"enableM":true,"enableC":true,"enableDebug":true}' > "$(DEBUG_LATENCY_OUTPUT)/configuration.json"
+	python3 scripts/build_rtl.py --config "$(DEBUG_LATENCY_OUTPUT)/configuration.json" --output "$(DEBUG_LATENCY_OUTPUT)/design"
+	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/control" --depth 192 --timeout 1800 --case safety --case halt-blocked --case resume-blocked
+	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/step" --depth 384 --timeout 1800 \
+		--case step-safety --case payload --case step-payload --case complete --case instruction-accepted \
+		--case data-accepted --case instruction-offered --case data-offered --case step-retire --case step-trap \
+		--case step-memory --case step-multiply --case step-crossing --case extra-step

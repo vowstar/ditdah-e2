@@ -13,7 +13,7 @@
 struct Port {
     bool active = false, held = false;
     std::array<uint32_t, 6> request{}, previous{};
-    uint64_t due = 0;
+    uint64_t due = 0, accepted = 0;
     uint32_t data = 0;
     bool fault = false;
 };
@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
         std::vector<Action> actions;
         Action action{};
         while (script >> action.kind >> action.address >> action.value >> action.mask) {
-            if (action.kind > 9) throw std::runtime_error("Unknown debug action");
+            if (action.kind > 10) throw std::runtime_error("Unknown debug action");
             actions.push_back(action);
         }
         if (!script.eof() || actions.empty()) throw std::runtime_error("Malformed debug actions");
@@ -52,6 +52,11 @@ int main(int argc, char **argv) {
         uint64_t idleStart = 0, completion = 0;
         bool completing = false, finished = false;
         unsigned busControl = 0, interruptMask = 0;
+        unsigned acceptBound = 0, responseBound = 0;
+        uint64_t blockedOffer = 0;
+        bool offerSeen = false;
+        uint64_t interrupts = 0;
+        uint32_t lastInterruptCause = 0;
         dut.reset = 1;
         dut.instruction_request_ready = dut.data_request_ready = 0;
         dut.instruction_response_valid = dut.data_response_valid = 0;
@@ -66,7 +71,16 @@ int main(int argc, char **argv) {
         for (uint64_t cycle = 0; cycle < limit; ++cycle) {
             dut.clock = 0;
             const auto current = actions.at(index);
-            if (current.kind == 6) busControl = current.value;
+            if (current.kind == 6) {
+                busControl = current.value;
+                acceptBound = current.address;
+                responseBound = current.mask;
+                offerSeen = false;
+                if ((acceptBound || responseBound) && (acceptBound != 8 || responseBound != 24))
+                    throw std::runtime_error("Unsupported bounded native service");
+                if (responseBound && delay > responseBound)
+                    throw std::runtime_error("Delay exceeds bounded native response service");
+            }
             if (current.kind == 9) {
                 if (current.value > 7) throw std::runtime_error("Invalid interrupt mask");
                 interruptMask = current.value;
@@ -76,9 +90,10 @@ int main(int argc, char **argv) {
             dut.interrupts_external = (interruptMask >> 2) & 1;
             dut.timeValue = cycle;
             dut.instruction_request_ready = !completing && !instruction.active && (!delay || cycle % 8 == 7 || random() % 3 == 0);
-            dut.data_request_ready = !(busControl & 1) && !data.active && (!delay || cycle % 8 == 7 || random() % 3 == 0);
+            const bool requestDeadline = acceptBound && offerSeen && cycle - blockedOffer >= acceptBound;
+            dut.data_request_ready = !data.active && (requestDeadline || (!(busControl & 1) && (!delay || cycle % 8 == 7 || random() % 3 == 0)));
             dut.instruction_response_valid = instruction.active && cycle >= instruction.due;
-            dut.data_response_valid = !(busControl & 2) && data.active && cycle >= data.due;
+            dut.data_response_valid = (!(busControl & 2) || (responseBound && cycle - data.accepted >= responseBound)) && data.active && cycle >= data.due;
             dut.instruction_response_bits_data = instruction.data;
             dut.data_response_bits_data = data.data;
             dut.data_response_bits_fault = data.fault;
@@ -86,7 +101,7 @@ int main(int argc, char **argv) {
             dut.dmi_request_bits_address = current.address;
             dut.dmi_request_bits_data = current.kind == 2 ? current.value : 0;
             dut.dmi_request_bits_op = current.kind == 2 ? 2 : 1;
-            dut.dmi_response_ready = !delay || cycle % 8 == 7 || random() % 4 == 0;
+            dut.dmi_response_ready = acceptBound || !delay || cycle % 8 == 7 || random() % 4 == 0;
             dut.eval();
             if (!delay && !completing && instruction.active && dut.instruction_response_valid && dut.instruction_response_ready) {
                 dut.instruction_request_ready = 1;
@@ -114,6 +129,7 @@ int main(int argc, char **argv) {
                     port.active = false;
                 }
                 if (valid && !port.held) {
+                    if (name == 'D' && acceptBound && !offerSeen) { blockedOffer = cycle; offerSeen = true; }
                     std::cout << "P " << cycle << ' ' << name;
                     for (auto part : request) std::cout << ' ' << part;
                     std::cout << '\n';
@@ -128,6 +144,7 @@ int main(int argc, char **argv) {
                         request[3] != (request[1] ? ((1u << (1u << size)) - 1) << (request[0] % 4) : 0u))
                         throw std::runtime_error("Invalid native request");
                     port.active = true;
+                    port.accepted = cycle;
                     port.request = request;
                     port.data = memory[request[0] & ~3u];
                     port.fault = name == 'D' && request[0] == dataFault;
@@ -146,13 +163,19 @@ int main(int argc, char **argv) {
 #undef OBSERVE
             bool advance = false;
             if (dut.retire_valid) {
+                if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '
                           << dut.retire_nextPc << ' ' << unsigned(dut.retire_rd) << ' ' << unsigned(dut.retire_writes)
                           << ' ' << dut.retire_value << ' ' << unsigned(dut.retire_trap) << ' ' << dut.retire_cause
                           << ' ' << dut.retire_tval << ' ' << unsigned(dut.retire_userMode) << '\n';
                 advance = current.kind == 0 && dut.retire_pc == current.address;
             }
-            if (dut.interrupt_valid) throw std::runtime_error("Unexpected debug workload interrupt");
+            if (dut.interrupt_valid) {
+                ++interrupts;
+                lastInterruptCause = dut.interrupt_cause;
+                std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target
+                          << ' ' << dut.interrupt_cause << '\n';
+            }
             if (dut.dmi_request_valid && dut.dmi_request_ready) {
                 if (dmiOwned) throw std::runtime_error("DMI owner overwritten");
                 dmiOwned = true;
@@ -176,6 +199,7 @@ int main(int argc, char **argv) {
             if (current.kind == 6 || current.kind == 9) advance = true;
             if (current.kind == 7) advance = data.active && data.request[0] == current.address;
             if (current.kind == 8) advance = data.held && data.previous[0] == current.address;
+            if (current.kind == 10) advance = current.value && interrupts >= current.value && lastInterruptCause == current.address;
             if (current.kind == 5 && !completing) { completing = true; completion = cycle; }
             if (completing && dut.data_request_valid) throw std::runtime_error("Data offer after completion");
             dut.clock = 1;

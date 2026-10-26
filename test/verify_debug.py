@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 
-from debug_programs import cases, WAIT_RETIRE, READ, WRITE, POLL, IDLE, FINISH, BUS_CONTROL, WAIT_ACCEPT, WAIT_OFFER, INTERRUPTS
+from debug_programs import cases, WAIT_RETIRE, READ, WRITE, POLL, IDLE, FINISH, BUS_CONTROL, WAIT_ACCEPT, WAIT_OFFER, INTERRUPTS, WAIT_IRQ
 from model import Model, MASK
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -30,6 +30,7 @@ class DebugReference:
         self.cause = 3
         self.halts = self.resumes = self.steps = 0
         self.step_start = None
+        self.step_requested = None
         self.register_reads = Counter()
         self.register_writes = Counter()
         self.error = 0
@@ -43,6 +44,11 @@ class DebugReference:
         self.cycle = -1
         self.run_control = None
         self.latencies = []
+        self.halt_states = []
+        self.memory_faults = []
+        self.halt_on_reset = self.reset_halt_pending = False
+        self.reset_halts = 0
+        self.reset_events = []
 
     def register(self, number, value=None):
         if number == 0x7B1:
@@ -82,6 +88,11 @@ class DebugReference:
             if not self.active:
                 self.active = True
                 return
+            if self.pending is None:
+                if value & 8:
+                    self.halt_on_reset = True
+                if value & 4:
+                    self.halt_on_reset = False
             if value & (1 << 31):
                 self.run_control = ("halt", self.cycle)
             if value & (1 << 30):
@@ -95,6 +106,7 @@ class DebugReference:
                 self.resume_ack = False
                 self.resumes += 1
                 self.step_start = retirements if self.control & 4 else None
+                self.step_requested = self.cycle if self.control & 4 else None
                 self.counter_value = None
                 self.run_control = ("resume", self.cycle)
             self.reset_requested = bool(value & 2)
@@ -144,21 +156,35 @@ class DebugReference:
                 assert unavailable == 3 and halted == running == 0 and snapshot.get("resetPending"), "Unexpected unavailable hart"
             else:
                 assert halted in (0, 3) and running in (0, 3) and halted != running, "Inconsistent single hart status"
-            if halted:
+            awaiting_resume = self.run_control is not None and self.run_control[0] == "resume" and data >> 16 & 3 != 3
+            if halted and not awaiting_resume:
                 assert not snapshot["outstanding"] and not snapshot["completed"] and not snapshot.get("offered"), "Halt crossed unfinished memory"
                 if not self.halted:
                     self.halts += 1
+                    self.halt_states.append({"pc": snapshot["pc"], "user": snapshot["user"],
+                                             "mepc": self.model.read_csr(0x341), "mstatus": self.model.read_csr(0x300),
+                                             "mcause": self.model.read_csr(0x342)})
                     self.dpc = snapshot["pc"]
                     self.control = (self.control & ~3) | (0 if snapshot["user"] else 3)
                     self.cause = 1 if self.model.word(snapshot["pc"]) == 0x100073 and self.control & (1 << (12 if snapshot["user"] else 15)) else 3
+                    if self.reset_halt_pending:
+                        assert snapshot["pc"] == 0 and not snapshot["user"], "Reset halt lost its initial boundary"
+                        self.cause = 5
+                        self.reset_halts += 1
+                        self.reset_halt_pending = False
                     if self.step_start is not None:
                         assert snapshot["retirements"] - self.step_start == 1, "Single step retired an incorrect instruction count"
                         self.steps += 1
                         self.cause = 4
                         self.step_start = None
+                        self.latencies.append({"operation": "step", "acceptedCycle": self.step_requested,
+                                              "observedCycle": self.cycle, "cycles": self.cycle - self.step_requested})
+                        self.step_requested = None
                 self.halted = True
                 self.model.sleeping = False
             self.resume_ack = data >> 16 & 3 == 3
+            if self.resume_ack:
+                assert not snapshot.get("orphan"), "Resume acknowledged before orphan memory completion"
             if self.run_control is not None:
                 operation, accepted = self.run_control
                 if operation == "halt" and halted or operation == "resume" and self.resume_ack:
@@ -170,7 +196,7 @@ class DebugReference:
             if not data & (1 << 12) and self.pending is not None:
                 pending = self.pending
                 if "request" in pending:
-                    self.error = 4 if pending.get("aborted") else 3 if pending["denied"] else 0
+                    self.error = 4 if pending.get("aborted") else 3 if pending["denied"] else 5 if pending.get("fault") else 0
                     assert pending["completed"] == (not pending["denied"]), "Abstract memory completion differs"
                     if not self.error and not pending["request"][1]:
                         address, _, _, _, size, _ = pending["request"]
@@ -204,6 +230,8 @@ def check(case, trace):
     debug = DebugReference(model)
     physical = dict(case.image)
     offered, outstanding = {}, {}
+    abstract_owner = None
+    orphans, data_history = [], []
     completed = deque()
     dmi = None
     cycle, events, sequence, action_index = -1, 0, 0, 0
@@ -216,6 +244,8 @@ def check(case, trace):
     interrupt_mask = 0
     first_offer = {}
     maximum = Counter()
+    interrupts, steps, returns = [], [], []
+    retired_cycle = -1
     for line in trace.splitlines():
         fields = line.split()
         kind = fields[0]
@@ -239,6 +269,11 @@ def check(case, trace):
                 debug.halted = False
                 debug.resets += 1
                 debug.control, debug.cause, debug.dpc = 3, 0, 0
+                debug.reset_halt_pending = False
+                debug.reset_events.append({"assertCycle": now})
+            if not reset and resetting:
+                debug.reset_halt_pending = debug.active and debug.halt_on_reset
+                debug.reset_events[-1].update({"releaseCycle": now, "haltOnReset": debug.reset_halt_pending})
             resetting = bool(reset)
             model.clock(now, interrupt_mask)
             model.time = time
@@ -265,12 +300,19 @@ def check(case, trace):
                 assert pending is not None and "request" in pending and not pending["denied"], "Unowned debug memory offer"
                 expected = pending["request"]
                 assert request[:2] + request[3:] == expected[:2] + expected[3:] and (not write or data == expected[2]), "Abstract memory request differs"
+                assert abstract_owner is None, "Abstract native owner overwritten"
+                abstract_owner = pending
+                pending["offeredCycle"] = cycle
         elif kind == "Q":
             port, request = fields[2], tuple(map(int, fields[3:]))
             assert port not in outstanding and offered.pop(port) == request, "Native request ownership differs"
             maximum[port + "OfferToAcceptance"] = max(maximum[port + "OfferToAcceptance"], cycle - first_offer.pop(port))
             outstanding[port] = (cycle, request, physical.get(request[0] & ~3, 0))
             physical.setdefault(request[0] & ~3, 0)
+            if port == "D":
+                data_history.append({"acceptedCycle": cycle, "request": request, "abstract": abstract_owner is not None})
+                if abstract_owner is not None:
+                    abstract_owner["acceptedCycle"] = cycle
         elif kind == "S":
             port, value, fault = fields[2], int(fields[3]), int(fields[4])
             assert port in outstanding, "Unowned native response"
@@ -285,20 +327,28 @@ def check(case, trace):
                         old = (old & ~(255 << (8 * lane))) | (data & (255 << (8 * lane)))
                 physical[address & ~3] = old
             if port == "D":
-                if debug.halted:
-                    pending = debug.pending or debug.orphan
+                data_history[-1]["completedCycle"] = cycle
+                if abstract_owner is not None:
+                    pending = abstract_owner
                     assert pending is not None and "request" in pending and not pending["completed"], "Duplicate abstract memory completion"
                     pending["completed"] = True
+                    pending["completedCycle"] = cycle
+                    pending["fault"] = bool(fault)
+                    if fault:
+                        debug.memory_faults.append({"cycle": cycle, "address": address, "write": bool(write)})
                     if write and not fault:
                         for lane in range(4):
                             if mask >> lane & 1:
                                 model.memory[(address & ~3) + lane] = data >> (8 * lane) & 255
                     if debug.orphan is pending:
                         debug.orphan = None
+                    abstract_owner = None
                 else:
                     completed.append(request)
         elif kind == "R":
             assert not debug.halted, "Instruction retired during a confirmed halt"
+            assert debug.orphan is None, "Instruction completed before orphan memory"
+            assert not resetting and not debug.reset_halt_pending, "Instruction retired before reset halt"
             values = list(map(int, fields[2:]))
             expected = model.step()
             pc, word, target, rd, writes, value, trap, cause, tval, user = values
@@ -312,9 +362,24 @@ def check(case, trace):
             else:
                 assert not completed, "Unexpected completed data transaction"
             events += 1
+            retired_cycle = cycle
+            if debug.step_start is not None:
+                steps.append({"cycle": cycle, "pc": pc, "nextPc": target, "trap": bool(trap),
+                              "cause": cause if trap else 0, "user": bool(user), "nextUser": model.user_mode})
+            if expected.instruction == "mret" and not trap:
+                returns.append({"cycle": cycle, "pc": pc, "target": target, "user": model.user_mode})
             coverage[expected.instruction] += 1
             action = case.actions[action_index]
             action_eligible |= action[0] == WAIT_RETIRE and action[1] == pc
+        elif kind == "N":
+            assert cycle != retired_cycle, "Interrupt and instruction completed together"
+            assert not debug.halted and debug.step_start is None, "Interrupt entered during debug halt or step"
+            assert "D" not in outstanding and "D" not in offered and not completed, "Interrupt crossed unfinished data memory"
+            user = model.user_mode
+            observed = tuple(map(int, fields[2:]))
+            assert observed == model.interrupt(), "Interrupt metadata differs"
+            interrupts.append({"cycle": cycle, "pc": observed[0], "target": observed[1],
+                               "cause": observed[2], "user": user})
         elif kind == "J":
             seq, index, address, op, value = map(int, fields[2:])
             assert dmi is None and seq == sequence and index == action_index, "DMI ownership differs"
@@ -323,8 +388,18 @@ def check(case, trace):
             assert (address, op, value) == (action[1], 2 if action[0] == WRITE else 1, action[2] if action[0] == WRITE else 0), "DMI request differs from script"
             snapshot = {"pc": model.pc, "user": model.user_mode, "outstanding": bool(outstanding),
                         "completed": bool(completed), "retirements": events, "offered": bool(offered),
+                        "orphan": debug.orphan is not None,
                         "resetPending": debug.reset_expected or debug.reset_requested or resetting}
             debug.request(address, op, value, events)
+            if case.orphan_step and (address, op, value) == (0x10, 2, 0):
+                assert debug.orphan is not None and not debug.orphan["completed"], "Deactivation missed old memory"
+                expected_offered = "offered" in case.name
+                assert ("D" in offered) == expected_offered and ("D" in outstanding) != expected_offered, "Wrong deactivation ownership boundary"
+                debug.orphan["deactivatedCycle"] = cycle
+                orphans.append(debug.orphan)
+            if case.orphan_step and (address, op, value) == (0x10, 2, 0x40000001) and len(orphans) == 1 and "resumeCycle" not in orphans[0]:
+                assert debug.orphan is orphans[0] and not debug.orphan["completed"], "Resume waited for old memory"
+                debug.orphan["resumeCycle"] = cycle
             dmi = (seq, cycle, address, op, value, snapshot)
             sequence += 1
         elif kind == "K":
@@ -341,6 +416,7 @@ def check(case, trace):
             eligible = action_eligible or action[0] == IDLE and cycle - action_start >= action[2] or action[0] in (BUS_CONTROL, INTERRUPTS)
             eligible |= action[0] == WAIT_ACCEPT and "D" in outstanding and outstanding["D"][1][0] == action[1]
             eligible |= action[0] == WAIT_OFFER and "D" in offered and offered["D"][0] == action[1]
+            eligible |= action[0] == WAIT_IRQ and action[2] > 0 and len(interrupts) >= action[2] and interrupts[-1]["cause"] == action[1]
             assert eligible, "Script action completed before its condition"
             action_index += 1
             action_start = cycle + 1
@@ -349,7 +425,7 @@ def check(case, trace):
             cycles, index = map(int, fields[1:])
             assert cycles == cycle + 1 and index == action_index == len(case.actions) - 1, "Incomplete script"
             assert case.actions[index][0] == FINISH and cycles - action_start >= 8, "Missing completion window"
-            assert not outstanding and not completed and dmi is None and debug.pending is None and debug.orphan is None, "Unfinished transaction"
+            assert not outstanding and not completed and abstract_owner is None and dmi is None and debug.pending is None and debug.orphan is None, "Unfinished transaction"
             final = {"cycles": cycles, "retirements": events, "dmiTransactions": sequence}
         elif kind == "W":
             address, value = map(int, fields[1:])
@@ -362,13 +438,43 @@ def check(case, trace):
         assert words[address] == value & MASK and model.word(address) == value & MASK, "Program signature differs"
     assert debug.steps == case.steps and debug.halts == case.halts and debug.resumes == (case.halts if case.resumes is None else case.resumes), "Missing halt or resume"
     assert (debug.resets, debug.cancellations) == (case.resets, case.cancellations), "Missing reset or command cancellation"
+    assert len(debug.memory_faults) == case.bus_faults, "Missing abstract memory fault"
+    assert debug.reset_halts == case.reset_halts, "Missing reset halt"
     assert all(debug.register_reads[0x1000 + index] for index in range(32)), "Incomplete GPR readback"
     assert debug.counter_reads == 2, "Missing stable halt counter samples"
+    assert len(interrupts) == case.interrupts, "Unexpected interrupt count"
+    if case.step_outcome is not None:
+        assert len(steps) == 1, "Missing directed step event"
+        assert tuple(steps[0][key] for key in ("pc", "nextPc", "trap", "cause", "user")) == case.step_outcome, "Directed step outcome differs"
+    timing = None
+    if case.orphan_step:
+        assert len(orphans) == 1 and orphans[0]["resumeCycle"] < orphans[0]["completedCycle"] < steps[0]["cycle"], "Step did not include orphan drain"
+        assert len([item for item in data_history if item["abstract"]]) == 1, "Old abstract transfer completed more than once"
+        assert tuple(model.read_csr(number) for number in (0x341, 0x342, 0x343)) == (0x234, 7, 0xABCDEF), "Orphan step changed trap state"
+        assert all(maximum[port + "OfferToAcceptance"] <= 8 and maximum[port + "AcceptanceToCompletion"] <= 24 for port in ("I", "D")), "Native service exceeded the declared bound"
+        assert maximum["dmiAcceptanceToCompletion"] <= 8, "DMI service exceeded the declared bound"
+        general = 38 + (3 + int(case.enable_c)) * 32 + 34 * int(case.enable_m) + 16
+        observed = next(item for item in debug.latencies if item["operation"] == "step")
+        assert observed["cycles"] <= general + 20, "Orphan step exceeded its observation bound"
+        timing = {"nativeAcceptBound": 8, "nativeResponseBound": 24, "dmiResponseBound": 8,
+                  "elapsedConvention": "Q cycle minus first P cycle is at most eight. S cycle minus Q cycle is at most 24. The formal acceptance assumption instead forces the eighth sampled edge, which is seven elapsed cycles.",
+                  "resumeBoundCycles": 38, "generalStepBoundCycles": general, "pollBoundCycles": 20,
+                  "minimumClockHz": 1000, "generalStepObservationMilliseconds": general + 20,
+                  "physicalFrequencyClaim": False, "observation": observed}
+    if case.name == "user_irq_handler_halt":
+        assert interrupts[0]["user"] and interrupts[0]["pc"] == 0x200, "Interrupt did not preserve the U boundary"
+        stopped = debug.halt_states[-1]
+        assert stopped["pc"] in (0x180, 0x184) and not stopped["user"], "Halt missed the M handler"
+        assert (stopped["mepc"], stopped["mstatus"], stopped["mcause"]) == (0x200, 0, 0x8000000B), "Halt lost U trap state"
+        assert len(returns) == 1 and returns[0]["target"] == 0x200 and returns[0]["user"] and model.user_mode, "Handler did not return to U"
     return {**final, "halts": debug.halts, "resumes": debug.resumes, "steps": debug.steps,
+            "interruptEvents": interrupts, "stepEvents": steps, "returnEvents": returns, "haltStates": debug.halt_states,
             "instructions": dict(coverage), "registerReads": dict(debug.register_reads),
             "registerWrites": dict(debug.register_writes), "stableCounterSamples": debug.counter_reads,
             "abstractMemoryCommands": debug.memory_commands, "abstractMemoryDenials": debug.memory_denials,
+            "abstractMemoryFaults": debug.memory_faults, "resetHalts": debug.reset_halts, "resetEvents": debug.reset_events,
             "resets": debug.resets, "commandCancellations": debug.cancellations,
+            "orphanTransfers": orphans, "dataHistory": data_history if case.orphan_step else [], "orphanStepTiming": timing,
             "runControlObservations": debug.latencies, "maximumObservedCycles": dict(maximum)}
 
 
@@ -389,6 +495,46 @@ def mutate_reset(text):
     target = "assign core_coreReset = resetting;"
     assert text.count(target) == 1 and "wire        resetRequest =" in text, "Debug reset mutation target changed"
     return text.replace(target, "assign core_coreReset = resetting | resetRequest;")
+
+
+def mutate_trap_pc(text):
+    pattern = r"(mepc <= )(\{trapPc\[[^\n]+)(;)"
+    assert len(re.findall(pattern, text)) == 1, "Trap PC mutation target changed"
+    return re.sub(pattern, r"\1(\2) + 32'd4\3", text)
+
+
+def mutate_mret_privilege(text):
+    pattern = r"(_GEN_\d+ \? )mppUser( : userMode_0)"
+    assert len(re.findall(pattern, text)) == 1, "MRET privilege mutation target changed"
+    return re.sub(pattern, r"\g<1>1'h0\2", text)
+
+
+def mutate_step_pc(text):
+    target = ": core_architecturalPc;"
+    assert text.count(target) == 1, "Step PC mutation target changed"
+    return text.replace(target, ": core_architecturalPc + (entryCause == 3'h4 ? 32'd4 : 32'd0);")
+
+
+def mutate_memory_fault(text):
+    target = "memory_response_bits_fault ? 3'h5 : 3'h0"
+    assert text.count(target) == 1, "Debug memory fault mutation target changed"
+    return text.replace(target, "memory_response_bits_fault ? 3'h0 : 3'h0")
+
+
+def mutate_reset_halt(text):
+    target = "debug_control_active & debug_control_haltOnReset"
+    assert text.count(target) == 1, "Reset halt mutation target changed"
+    return text.replace(target, "debug_control_active & 1'h0")
+
+
+def mutate_orphan_resume(text):
+    pattern = r"(wire\s+resume\s*=\s*)([^;]+);"
+    matches = list(re.finditer(pattern, text))
+    assert len(matches) == 1, "Orphan resume mutation target changed"
+    expression = matches[0][2]
+    changed, count = re.subn(r"\s*&\s*~(?:sending|waiting)\b", "", expression)
+    assert count == 2, "Orphan resume ownership target changed"
+    return text[:matches[0].start(2)] + changed + text[matches[0].end(2):]
 
 
 def checker_inputs():
@@ -436,9 +582,10 @@ def main():
     tool = Path(shutil.which("verilator")).resolve()
     tool_info = {}
     for name in ("verilator", "g++", "make", "python3"):
-        executable = Path(shutil.which(name)).resolve()
+        executable = Path(sys.executable if name == "python3" else shutil.which(name)).resolve()
         tool_info[name] = {"hash": digest(executable), "version": subprocess.check_output([str(executable), "--version"], text=True).splitlines()[0]}
-    report = {"parameters": manifest["parameters"], "command": "python3 test/verify_debug.py",
+    report = {"parameters": manifest["parameters"], "command": ["python3", "test/verify_debug.py", "--rtl", "rtl", "--output", "verification",
+              *[part for name in args.case for part in ("--case", name)]],
               "scope": "DMI halt, registers, resume, step, EBREAK, abstract memory and U return on the processor",
               "checkerHashes": initial, "sourceHashes": manifest["sourceHashes"], "rtlHashes": manifest["rtlHashes"],
               "manifestHash": manifest_hash, "simulatorHash": digest(tool),
@@ -448,6 +595,7 @@ def main():
         "nativeRequestReady": "At least once in eight cycles when no request is outstanding and the script permits acceptance",
         "nativeResponseOffer": "One through delay cycles after acceptance, or one cycle when delay is zero, except explicit script holds",
         "dmiResponseReady": "At least once in eight cycles", "runControlTiming": "Observed bounds for these workloads, not unbounded hardware guarantees"}
+    report["environment"]["boundedScriptHolds"] = "For orphan step cases, data acceptance occurs within eight cycles and response within 24 cycles. DMI ready stays high during this bounded hold. Other phases retain the normal peer timing."
 
     def compile_rtl(rtl, name):
         build = args.output / name
@@ -508,6 +656,8 @@ def main():
         for name, mutation, case_name, failure in (
                 ("reset", mutate_reset, "reset_accepted_memory", "System reset preceded accepted memory completion"),
                 *(([("protection", mutate_protection, "abstract_memory_user", None)] if parameters["protectedMode"] else []))):
+            if not any(case.name == case_name for case in workloads):
+                continue
             changed = args.output / (name + "-rtl")
             shutil.copytree(args.output / "rtl", changed)
             path = changed / "DitDahE2DebugHart.sv"
@@ -525,6 +675,31 @@ def main():
                     raise AssertionError("Bypassed protection passed the checker")
             record["rtlHash"] = digest(path)
             report["negativeControls"].append(record)
+        for name, mutation, module, case_name, failure in (
+                ("memory-fault", mutate_memory_fault, "DitDahE2DebugHart.sv", "abstract_read_fault", "Abstract command error differs"),
+                ("reset-halt", mutate_reset_halt, "DitDahE2DebugHart.sv", "reset_halt_accepted_memory", "Instruction retired before reset halt"),
+                ("orphan-resume", mutate_orphan_resume, "DitDahE2DebugHart.sv", "orphan_accepted_step_load", "Resume acknowledged before orphan memory completion"),
+                ("step-pc", mutate_step_pc, "DitDahE2DebugHart.sv", "step_taken_branch", "Abstract register result mismatch"),
+                ("trap-pc", mutate_trap_pc, "DitDahE2Csr.sv", "user_irq_handler_halt", "Abstract register result mismatch"),
+                ("mret-privilege", mutate_mret_privilege, "DitDahE2Csr.sv", "step_mret_user", "Abstract register result mismatch")):
+            selected = [case for case in workloads if case.name == case_name]
+            if not selected:
+                continue
+            changed = args.output / (name + "-rtl")
+            shutil.copytree(args.output / "rtl", changed)
+            path = changed / module
+            path.write_text(mutation(path.read_text()))
+            binary = compile_rtl(changed, name + "-build")
+            trace, record = execute(binary, selected[0], 0, 0, "changed-" + name,
+                                    "Debug execution exceeded cycle limit" if name == "reset-halt" else None)
+            try:
+                check(selected[0], trace)
+            except AssertionError as error:
+                assert str(error) == failure, "Mutation failed outside the intended check"
+                record.update({"rejected": str(error), "rtlHash": digest(path)})
+                report["negativeControls"].append(record)
+            else:
+                raise AssertionError("Changed debug boundary passed the checker")
         assert checker_inputs() == initial and sources() == manifest["sourceHashes"], "Verification inputs changed"
         assert digest(args.rtl / "manifest.json") == manifest_hash, "RTL manifest changed"
         assert all(digest(args.rtl / name) == value for name, value in manifest["rtlHashes"].items()), "RTL inputs changed"

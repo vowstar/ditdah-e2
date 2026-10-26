@@ -45,7 +45,8 @@ OUTPUTS = (("ready", "debug_request_ready", 1), ("valid", "debug_response_valid"
            ("bus_valid", "memory_request_valid", 1), ("bus_address", "memory_request_bits_address", 32),
            ("bus_machine", "memory_request_bits_machine", 1), ("bus_write", "memory_request_bits_write", 1),
            ("bus_data", "memory_request_bits_data", 32), ("bus_mask", "memory_request_bits_mask", 4),
-           ("bus_size", "memory_request_bits_size", 2), ("bus_ready", "memory_response_ready", 1))
+           ("bus_size", "memory_request_bits_size", 2), ("bus_operation", "memory_request_bits_operation", 4),
+           ("bus_ready", "memory_response_ready", 1))
 WRAPPER = """// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
 package ditdah_e2
@@ -195,7 +196,8 @@ class Reference:
                   "freeze": self.halted or bool(state["breakpoint"]) or self.pending_halt == "breakpoint",
                   "register": state["register"], "write_requested": not state["memory"] and state["write"],
                   "write_pulse": write_pulse, "write_data": state["data"], "query_address": state["address"],
-                  "query_size": state["size"], "query_write": state["write"], "bus_valid": bus_valid, "bus_ready": bus_ready}
+                  "query_size": state["size"], "query_write": state["write"], "bus_valid": bus_valid,
+                  "bus_operation": 0, "bus_ready": bus_ready}
         payload = native["request"] if bus_valid else (0,) * 6
         result.update(zip(("bus_address", "bus_machine", "bus_write", "bus_data", "bus_mask", "bus_size"), payload, strict=True))
         output = (cycle, *(int(result[name]) for name, _, _ in OUTPUTS))

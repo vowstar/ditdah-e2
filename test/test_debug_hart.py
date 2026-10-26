@@ -101,8 +101,8 @@ class DebugHartTests(unittest.TestCase):
         second = driver.tick(active=0, allowed=0, machine=1)
         third = driver.tick(valid=1, register=0x1001, allowed=0, machine=1)
         for result in (first, second, third):
-            self.assertEqual(tuple(result[name] for name in ("bus_valid", "bus_address", "bus_machine", "bus_data", "bus_mask")),
-                             (1, 0x421, 0, 0xAB00, 2))
+            self.assertEqual(tuple(result[name] for name in ("bus_valid", "bus_address", "bus_machine", "bus_data", "bus_mask", "bus_operation")),
+                             (1, 0x421, 0, 0xAB00, 2, 0))
         self.assertEqual(third["ready"], 0)
         driver.inputs["bus_ready"] = 1
         for _ in range(driver.delay + 2):
@@ -151,6 +151,23 @@ class DebugHartTests(unittest.TestCase):
             cycle = next(index for index, value in enumerate(samples) if value[field])
             changed[cycle] = (*changed[cycle][:field], changed[cycle][field] ^ 1, *changed[cycle][field + 1:])
             with self.assertRaisesRegex(AssertionError, "mismatch"):
+                check(driver.rows, render(changed))
+
+    def test_atomic_operation_on_debug_memory_is_rejected(self):
+        driver = Driver()
+        driver.halt()
+        driver.command(memory=1, address=0x400)
+        driver.command(memory=1, write=1, address=0x400, data=0x12345678)
+        samples, _ = expected(driver.rows)
+        fields = {name: index for index, (name, _, _) in enumerate(OUTPUTS, 1)}
+        cycle = next(index for index, sample in enumerate(samples) if sample[fields["bus_valid"]])
+        field = fields["bus_operation"]
+        self.assertTrue(all(sample[field] == 0 for sample in samples))
+        check(driver.rows, render(samples))
+        for operation in (1, 2, 11):
+            changed = list(samples)
+            changed[cycle] = (*changed[cycle][:field], operation, *changed[cycle][field + 1:])
+            with self.assertRaisesRegex(AssertionError, "bus_operation"):
                 check(driver.rows, render(changed))
 
     def test_fixed_and_random_vectors(self):
