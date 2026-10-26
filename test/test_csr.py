@@ -139,6 +139,17 @@ class CsrModelTests(unittest.TestCase):
                 for address, value in case.signature.items():
                     self.assertEqual(model.word(address), value, f"Signature at {address:#x}")
 
+    def test_store_fault_cancels_the_younger_branch(self):
+        case = next(case for case in cases() if case.name == "store_fault_younger_branch")
+        model, events = execute(case)
+        fault = next(event for event in events if event.trap)
+        self.assertEqual((fault.pc, fault.next_pc, fault.cause, fault.tval),
+                         (PROGRAM_PC + 4, case.handler_pc, 7, 256))
+        self.assertFalse(any(PROGRAM_PC + 8 <= event.pc < PROGRAM_PC + 32 for event in events))
+        for address, value in case.signature.items():
+            self.assertEqual(model.word(address), value)
+        self.assertEqual(check(case, trace(case))["traps"], 1)
+
     def test_image_regions_reject_overlap(self):
         for case in (Case("data_overlap", [], data={PROGRAM_PC: 0}),
                      Case("program_overlap", [0] * 1025),

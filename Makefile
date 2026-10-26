@@ -7,7 +7,9 @@ PLATFORM_OUTPUT ?= result/platform
 
 DEBUG_LATENCY_OUTPUT ?= result/debug-latency
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal
+INTERRUPT_OUTPUT ?= result/interrupt-stress
+
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -102,3 +104,6 @@ verify-atomic-formal:
 	printf '%s\n' '{"baseAddress":0,"sizeBytes":16}' > result/atomic-small.json
 	python3 test/atomic_memory.py --config result/atomic-small.json --output result/atomic-small
 	python3 test/atomic_memory_formal.py --rtl result/atomic-small --output result/atomic-formal
+
+verify-interrupts: rtl
+	python3 test/interrupt_stress.py --rtl result/rtl --output "$(INTERRUPT_OUTPUT)"

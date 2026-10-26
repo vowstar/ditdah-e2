@@ -11,6 +11,8 @@ from pathlib import Path
 import re
 import tempfile
 
+from control_witness import witness
+
 from core_formal import check_inputs, freeze_design, freeze_tools, run_case, tool_versions, write_snapshot
 
 
@@ -40,6 +42,11 @@ def mutate_local_wake(content):
                         r"wire waking = \1 & eligibleInterrupt;")
 
 
+def mutate_source_priority(content):
+    return replace_once(content, r"(_csr_interruptPending)\[11\](\s*\? 32'h8000000B)",
+                        r"(\1[11] & ~\1[3])\2")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
@@ -48,7 +55,7 @@ def main():
     parser.add_argument("--depth", type=int, default=72)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--case", action="append", choices=("safety", "safety-load", "safety-fault", "safety-local-wake",
-                        "safety-wfi-interrupt", "safety-store", "reachability", "drain", "fault-priority", "saved-pc", "local-wake"))
+                        "safety-wfi-interrupt", "safety-store", "reachability", "drain", "fault-priority", "saved-pc", "local-wake", "source-priority"))
     args = parser.parse_args()
     if args.depth < 72:
         parser.error("Interrupt handler coverage requires at least 72 cycles")
@@ -59,6 +66,9 @@ def main():
     helper = Path(__file__).with_name("core_formal.py")
     contents["test/core_formal.py"] = helper.read_bytes()
     bindings["helperHash"] = hashlib.sha256(contents["test/core_formal.py"]).hexdigest()
+    witness_path = Path(__file__).with_name("control_witness.py")
+    contents["test/control_witness.py"] = witness_path.read_bytes()
+    bindings["witnessHash"] = hashlib.sha256(contents["test/control_witness.py"]).hexdigest()
     tool_inputs, bindings["toolHashes"] = freeze_tools()
     args.output.mkdir(parents=True, exist_ok=True)
     archived = write_snapshot(args.output, contents)
@@ -73,7 +83,8 @@ def main():
              ("drain", "bmc", "abc bmc3", mutate_drain, 0),
              ("fault-priority", "bmc", "abc bmc3", mutate_fault_priority, 1),
              ("saved-pc", "bmc", "abc bmc3", mutate_saved_pc, 0),
-             ("local-wake", "bmc", "abc bmc3", mutate_local_wake, 2))
+             ("local-wake", "bmc", "abc bmc3", mutate_local_wake, 2),
+             ("source-priority", "bmc", "abc bmc3", mutate_source_priority, 0))
     selected = [case for case in cases if not args.case or case[0] in args.case or
                 ("safety" in args.case and case[0].startswith("safety-"))]
     outcomes = []
@@ -89,7 +100,12 @@ def main():
                                        engine, args.depth, mutation, () if scenario is None else (("SCENARIO", scenario),))
                        for name, mode, engine, mutation, scenario in selected]
             for future in as_completed(futures):
-                outcomes.append(future.result())
+                outcome = future.result()
+                if outcome["name"] == "source-priority":
+                    trace = next(args.output.glob("source-priority-*.vcd"))
+                    outcome["witness"] = witness(trace.read_text(), "source-priority")
+                    (args.output / "source-priority.json").write_text(json.dumps(outcome, indent=2) + "\n")
+                outcomes.append(outcome)
                 outcomes.sort(key=lambda result: next(index for index, case in enumerate(cases) if case[0] == result["name"]))
                 (args.output / "outcomes.json").write_text(json.dumps(outcomes, indent=2) + "\n")
         check_inputs(frozen)
@@ -110,7 +126,8 @@ def main():
                          "synchronous fault with all sources pending", "WFI local wake without global enable",
                          "WFI interrupt entry", "store completion before interrupt entry"],
               "coverSchedule": "ready requests, prompt fetch responses, data response after five cycles",
-              "negativeControls": {"drain": "enter an interrupt with M occupied",
+              "negativeControls": {"source-priority": "select software while external is also pending",
+                                   "drain": "enter an interrupt with M occupied",
                                    "fault-priority": "enter an interrupt on a synchronous data fault",
                                    "saved-pc": "save the following instruction address in mepc",
                                    "local-wake": "require global enable for WFI wakeup"},

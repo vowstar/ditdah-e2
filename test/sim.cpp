@@ -39,8 +39,11 @@ struct InputEvent {
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 8 && argc != 9)
+        if (argc != 8 && argc != 9 && argc != 10)
             throw std::runtime_error("Expected image seed delay instruction-fault data-fault limit completion-pc and optional input schedule");
+        const bool observeSleep = argc == 10;
+        if (observeSleep && std::string(argv[9]) != "--observe-sleep")
+            throw std::runtime_error("Unknown observation argument");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
@@ -58,7 +61,7 @@ int main(int argc, char **argv) {
         const auto limit = std::stoul(argv[6]);
         const uint32_t completionPc = std::stoul(argv[7]);
         std::vector<InputEvent> schedule;
-        if (argc == 9 && std::string(argv[8]) != "-") {
+        if (argc >= 9 && std::string(argv[8]) != "-") {
             std::ifstream events(argv[8]);
             if (!events) throw std::runtime_error("Cannot open input schedule");
             std::string line;
@@ -137,6 +140,8 @@ int main(int argc, char **argv) {
                 dut.eval();
             }
             std::cout << "T " << cycle << ' ' << pending << ' ' << dut.timeValue << '\n';
+            if (observeSleep)
+                std::cout << "L " << cycle << ' ' << unsigned(dut.sleeping) << '\n';
             if (completing && dut.data_request_valid)
                 throw std::runtime_error("Data request after program completion");
             forwards += dut.forward; loadUse += dut.loadUse; redirects += dut.redirect;

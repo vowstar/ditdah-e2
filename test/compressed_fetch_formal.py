@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import tempfile
 
+from control_witness import witness
+
 from core_formal import check_inputs, digest, freeze_tools, source_hashes, tool_versions, write_snapshot
 
 
@@ -23,6 +25,9 @@ def replace_once(content, old, new):
 
 def mutate(content, name):
     changes = {
+        "address-increment": ("nextWord <= nextWord + 32'h4;", "nextWord <= nextWord + 32'h8;"),
+        "stale-response": ("request ? flush | held & heldDiscarded : flush & outstanding | discarded;",
+                           "request ? flush | held & heldDiscarded : pause & outstanding | discarded;"),
         "release": ("assemble & (assemblyPc[1] | crossing & ~headFault)",
                     "assemble & (headFault | assemblyPc[1] | crossing)"),
         "fault-address": (": failed ? tailAddress : assemblyPc;", ": failed ? assemblyPc : assemblyPc;"),
@@ -73,6 +78,8 @@ def freeze(args):
     contents = {"manifest.json": raw_manifest, "rtl/manifest.json": raw_manifest,
                 "test/" + wrapper.name: wrapper.read_bytes(), "test/" + Path(__file__).name: Path(__file__).read_bytes(),
                 "test/core_formal.py": helper.read_bytes(), "test/formal.py": Path(__file__).with_name("formal.py").read_bytes()}
+    witness_path = Path(__file__).with_name("control_witness.py")
+    contents["test/control_witness.py"] = witness_path.read_bytes()
     for group, prefix, root in (("sourceHashes", "source", args.source_root), ("rtlHashes", "rtl", args.rtl)):
         for name, expected in manifest[group].items():
             value = (root / name).read_bytes()
@@ -81,7 +88,7 @@ def freeze(args):
     assert manifest["sourceHashes"] == source_hashes(args.source_root), "Inputs changed before freezing"
     bindings = {"parameters": parameters, "sourceHashes": manifest["sourceHashes"], "rtlHashes": manifest["rtlHashes"],
                 "manifestHash": hashlib.sha256(raw_manifest).hexdigest(), "runnerHash": digest(Path(__file__)),
-                "wrapperHash": digest(wrapper), "helperHash": digest(helper)}
+                "wrapperHash": digest(wrapper), "helperHash": digest(helper), "witnessHash": digest(witness_path)}
     return contents, bindings
 
 
@@ -130,6 +137,10 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compr
     assert status == ("FAIL" if negative else "PASS") and run.returncode == (2 if negative else 0), f"{name}: {status} (exit {run.returncode})"
     if negative:
         assert any(path.suffix == ".vcd" for path in traces), "Missing semantic counterexample"
+    if name in ("address-increment", "stale-response"):
+        trace = next(path for path in traces if path.suffix == ".vcd")
+        result["witness"] = witness(trace.read_text(), name)
+        (output / (name + ".json")).write_text(json.dumps(result, indent=2) + "\n")
     if mode == "cover":
         assert len(reached) == (15 if compressed else 11), "Missing fetch cover"
     return result
@@ -138,7 +149,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compr
 def verification_cases(compressed, depth, selected):
     cases = [("prove", "prove", depth, False), ("cover", "cover", 32, False)]
     mutations = ("release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity") if compressed else ("held-request", "held-privilege", "idle", "capacity")
-    cases += [(name, "bmc", 24, True) for name in mutations]
+    cases += [(name, "bmc", 24, True) for name in (*mutations, "address-increment", "stale-response")]
     assert not selected or set(selected) <= {item[0] for item in cases}, "Unsupported fetch case for this configuration"
     return [item for item in cases if not selected or item[0] in selected]
 
@@ -148,7 +159,7 @@ def main():
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("result/compressed-fetch-formal"))
-    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity"))
+    parser.add_argument("--case", action="append", choices=("prove", "cover", "release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity", "address-increment", "stale-response"))
     parser.add_argument("--prove-depth", type=int, default=4)
     args = parser.parse_args()
     if args.prove_depth < 2:

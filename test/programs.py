@@ -96,10 +96,17 @@ def csr_cases(enable_m=False, enable_c=False, *, enable_a=False, enable_zba=Fals
         result.append(Case(f"csr_readonly_write_{operation}", [word, store(2, 0, 256)],
                            signature={256: 0, TRAP_RECORD: PROGRAM_PC,
                                       TRAP_RECORD + 4: 2, TRAP_RECORD + 8: word}, expected_causes=(2,)))
-    for address in (0x302, 0x306, 0xB01, 0xC03, 0x7B0):
+    for address in (0x302, 0x306, 0x31A, 0xB01, 0xC03, 0x7B0):
         word = csr(1, address)
         result.append(Case(f"csr_unimplemented_{address:x}", [word],
                            signature={TRAP_RECORD + 8: word}, expected_causes=(2,)))
+    for operation in (1, 2, 3, 5, 6, 7):
+        for source in (0, 1):
+            word = csr(10, 0x30A, source, operation)
+            result.append(Case(f"csr_menvcfg_absent_{operation}_{source}",
+                               [immediate(1, 0, -1), immediate(10, 0, 55), word, store(10, 0, 256)],
+                               signature={256: 0, TRAP_RECORD: PROGRAM_PC + 8,
+                                          TRAP_RECORD + 4: 2, TRAP_RECORD + 8: word}, expected_causes=(2,)))
     for memory_write in (False, True):
         memory = store(1, 0, 256) if memory_write else immediate(2, 0, 256, 3, 2)
         for younger in (csr(0, 0x340, 31, 5), MRET):
@@ -563,6 +570,10 @@ def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba
              data_fault=256, signature={260: 0}, expected_causes=(5,)),
         Case("load_fault_younger_branch", [load(1, 0, 256), jump(0, 8), store(1, 0, 260), BREAK],
              data_fault=256, signature={260: 0}, expected_causes=(5,)),
+        Case("store_fault_younger_branch", [a(1, 0, 55), store(1, 0, 256), branch(0, 0, 12),
+             store(1, 0, 260), BREAK, a(2, 0, 99), store(2, 0, 264), BREAK],
+             data_fault=256, signature={256: 0, 260: 0, 264: 0, TRAP_RECORD: PROGRAM_PC + 4,
+                                       TRAP_RECORD + 4: 7, TRAP_RECORD + 8: 256}, expected_causes=(7,)),
         Case("store_fault", [a(1, 0, 9), store(1, 0, 256), store(1, 0, 260), BREAK],
              data_fault=256, signature={256: 0, 260: 0}, expected_causes=(7,)),
         Case("fetch_fault", [a(1, 0, 9), store(1, 0, 256), BREAK],

@@ -25,6 +25,8 @@ def example_rtl():
   assign memory_request_bits_address = memory_request_bits_address_0;
   assign memory_request_bits_machine = held ? heldMachine : machine;
   assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;
+  always @(posedge clock) nextWord <= nextWord + 32'h4;
+  always @(posedge clock) discarded <= request ? flush | held & heldDiscarded : flush & outstanding | discarded;
   wire offer = ~held & ~flush & (~outstanding | response) & (~tailValid | release_0);
 endmodule
 """
@@ -105,8 +107,8 @@ class CompressedFetchInputTests(unittest.TestCase):
             observe(original.replace("reg firstValid;", "reg unrelated;"))
 
     def test_case_selection_matches_the_configuration(self):
-        self.assertEqual(len(verification_cases(False, 4, None)), 6)
-        self.assertEqual(len(verification_cases(True, 4, None)), 9)
+        self.assertEqual(len(verification_cases(False, 4, None)), 8)
+        self.assertEqual(len(verification_cases(True, 4, None)), 11)
         self.assertEqual(verification_cases(False, 4, ["idle"]), [("idle", "bmc", 24, True)])
         with self.assertRaisesRegex(AssertionError, "Unsupported fetch case"):
             verification_cases(False, 4, ["release"])
@@ -120,7 +122,9 @@ class CompressedFetchInputTests(unittest.TestCase):
         self.assertIn("assign memory_request_bits_machine = machine;", mutate(original, "held-privilege"))
         self.assertIn("assign idle = ~outstanding", mutate(original, "idle"))
         self.assertIn("& 1'b1;", mutate(original, "capacity"))
-        for name in ("release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity"):
+        self.assertIn("nextWord + 32'h8", mutate(original, "address-increment"))
+        self.assertIn(": pause & outstanding | discarded", mutate(original, "stale-response"))
+        for name in ("address-increment", "stale-response", "release", "fault-address", "cross-word", "held-request", "held-privilege", "idle", "capacity"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(AssertionError, "no longer matches"):
                     mutate(original + original, name)
