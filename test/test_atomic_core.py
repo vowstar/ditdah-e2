@@ -3,9 +3,11 @@
 """Check atomic instruction semantics without a hardware decoder."""
 
 import unittest
+from types import SimpleNamespace
 
 from atomic_programs import atomic, cases, RAM
 from model import Model, atomic_value
+from verify_atomic import mutate_atomic, trace_cycles, selected_cases, check_competitors, atomic_write_witness, boundary_witness
 
 
 class AtomicModelTests(unittest.TestCase):
@@ -107,10 +109,10 @@ class AtomicModelTests(unittest.TestCase):
         programs = cases()
         self.assertEqual(len({case.name for case in programs}), len(programs))
         for case in programs:
-            if case.competitors or case.interrupts or case.debug:
+            if case.competitors or case.interrupts or case.debug or case.console or case.boundary:
                 continue
             with self.subTest(case=case.name):
-                model = Model(case.image, enable_a=True, enable_m=True, enable_c=True, protected_mode=True)
+                model = Model(case.image, data_fault=case.pma_fault, enable_a=True, enable_m=True, enable_c=True, protected_mode=True)
                 causes = []
                 for _ in range(300):
                     event = model.step()
@@ -122,6 +124,134 @@ class AtomicModelTests(unittest.TestCase):
                     self.fail("Atomic program did not complete")
                 self.assertEqual(tuple(causes), case.expected_causes)
                 self.assertEqual({address: model.word(address) for address in case.signature}, case.signature)
+
+    def test_mutations_require_exact_targets(self):
+        for kind in ("amo", "invalidation", "clear", "response", "reset", "forward", "split", "duplicate", "early-irq-clear", "early-halt-clear"):
+            with self.assertRaisesRegex(AssertionError, "target changed"):
+                mutate_atomic("", kind)
+        source = "assign competitor_response_bits_data = responses_data_2;"
+        self.assertIn("_memory_readData", mutate_atomic(source, "response"))
+        with self.assertRaisesRegex(AssertionError, "target changed"):
+            mutate_atomic(source + source, "response")
+        source = "wire [31:0] b = match2 & ~m_load ? m_value : data;"
+        self.assertIn("~isAtomic", mutate_atomic(source, "forward"))
+
+    def test_bit_dependency_program(self):
+        case = next(case for case in cases(True, True, True) if case.name == "atomic_bit_dependencies")
+        model = Model(case.image, enable_a=True, enable_zba=True, enable_zbb=True, enable_zbs=True)
+        operations = []
+        for _ in range(100):
+            event = model.step()
+            self.assertFalse(event.trap)
+            operations.append(event.instruction)
+            if event.pc == case.completion_pc:
+                break
+        else:
+            self.fail("Atomic bit program did not complete")
+        self.assertEqual({address: model.word(address) for address in case.signature}, case.signature)
+        for name in ("rev8", "bclri", "sh1add", "rori", "bseti", "sh2add", "amoadd.w", "amoxor.w", "lr.w", "sc.w"):
+            self.assertEqual(operations.count(name), 1)
+
+    def test_bit_program_requires_each_extension(self):
+        for subset in range(7):
+            self.assertNotIn("atomic_bit_dependencies", {case.name for case in cases(bool(subset & 1), bool(subset & 2), bool(subset & 4))})
+
+    def test_forward_program_requires_multiply(self):
+        self.assertNotIn("atomic_input_forward", {case.name for case in cases(enable_m=False)})
+        self.assertTrue(next(case for case in cases() if case.name == "atomic_input_forward").requires_atomic_forward)
+
+    def test_minimal_configuration_selects_executable_programs(self):
+        parameters = dict.fromkeys(("enableM", "enableC", "protectedMode", "enableDebug"), False)
+        programs = selected_cases(parameters)
+        self.assertEqual(len(programs), 134)
+        for case in programs:
+            self.assertFalse(case.enable_m or case.enable_c or case.protected_mode or case.debug)
+            if case.competitors or case.interrupts or case.console or case.boundary:
+                continue
+            model = Model(case.image, data_fault=case.pma_fault, enable_a=True)
+            causes = []
+            for _ in range(300):
+                event = model.step()
+                if event.trap:
+                    causes.append(event.cause)
+                if event.pc == case.completion_pc:
+                    break
+            else:
+                self.fail("Minimal atomic program did not finish")
+            self.assertEqual(tuple(causes), case.expected_causes)
+            self.assertEqual({address: model.word(address) for address in case.signature}, case.signature)
+
+    def test_disabled_program_requirements_are_rejected(self):
+        parameters = dict.fromkeys(("enableM", "enableC", "protectedMode", "enableDebug"), False)
+        for name in ("debug_halt_reservation", "user_atomic_execution", "lr_w_pmp_denied", "atomic_input_forward"):
+            with self.assertRaisesRegex(AssertionError, "disabled required feature"):
+                selected_cases(parameters, [name])
+
+    def test_partial_trace_is_not_a_completed_run(self):
+        source = "T 0 0 0 0 0 0 0 0\n"
+        with self.assertRaisesRegex(AssertionError, "did not finish"):
+            trace_cycles(source)
+        self.assertEqual(len(trace_cycles(source, partial=True)), 1)
+
+    def test_competitor_must_observe_flag_before_message(self):
+        case = SimpleNamespace(competitors=[
+            {"address": RAM, "size": 2, "write": False, "data": 0, "pollUntil": 1},
+            {"address": RAM + 4, "size": 2, "write": False, "data": 0, "expectedRead": 42}])
+        def read(address, value):
+            return {"request": (address, 1, 0, 0, 0, 2, 0), "response": (value, 0)}
+        history = [read(RAM, 0), read(RAM, 1), read(RAM + 4, 42)]
+        self.assertEqual(check_competitors(case, history), {"transactions": 3, "actions": 2, "pollRetries": 1})
+        with self.assertRaisesRegex(AssertionError, "payload differs"):
+            check_competitors(case, [history[0], history[2]])
+        with self.assertRaisesRegex(AssertionError, "wrong message"):
+            check_competitors(case, [*history[:2], read(RAM + 4, 0)])
+        with self.assertRaisesRegex(AssertionError, "Extra competing transaction"):
+            check_competitors(case, history + history[-1:])
+
+    def test_atomic_control_requires_a_real_pending_window(self):
+        case = SimpleNamespace(boundary=("interrupt", 100, 1))
+        groups = [[list(map(str, ("T", cycle, 0, 0, int(cycle == 3), 0, 0, 0, int(1 <= cycle <= 3))))]
+                  for cycle in range(6)]
+        for cycle, text in ((0, f"Q 0 D {RAM} 0 0 0 2 1 1"), (2, "S 2 D 42 0"),
+                (2, "R 2 100 0 104"), (3, "N 3 104 2048 2147483659"),
+                (4, "R 4 2056 807403635 104"), (5, "R 5 104 0 108")):
+            groups[cycle].append(text.split())
+        self.assertEqual(boundary_witness(case, groups)["controlCycle"], 1)
+        groups[1][0][-1] = "0"
+        with self.assertRaisesRegex(AssertionError, "did not arrive during"):
+            boundary_witness(case, groups)
+        groups[1][0][-1] = "1"
+        groups[1][0][4] = "1"
+        with self.assertRaisesRegex(AssertionError, "Reservation cleared before"):
+            boundary_witness(case, groups)
+        groups[1][0][4] = "0"
+        groups[2].append(f"Q 2 D {RAM + 4} 1 17 15 2 1 0".split())
+        with self.assertRaisesRegex(AssertionError, "Younger data request"):
+            boundary_witness(case, groups)
+        groups[2].pop()
+        groups[3][1][2] = "108"
+        with self.assertRaisesRegex(AssertionError, "saved the wrong PC"):
+            boundary_witness(case, groups)
+
+    def test_memory_fault_witness_requires_actual_writes(self):
+        rows = [[0] * 57 for _ in range(4)]
+        rows[0][-3:] = [0, 15, 16]
+        rows[1][14], rows[1][15], rows[1][18], rows[1][21], rows[1][23] = 1, RAM, 3, 4, 1
+        rows[1][-4:-2] = [1, 0]
+        rows[2][-3:] = rows[3][-3:] = [0, 15, 19]
+        def trace():
+            return '\n'.join('B ' + str(cycle) + ' ' + ' '.join(map(str, row)) for cycle, row in enumerate(rows))
+        self.assertEqual(atomic_write_witness(trace(), "duplicate")["secondWriteCycle"], 3)
+        rows[3][-2] = 0
+        with self.assertRaisesRegex(AssertionError, "faulty write effects"):
+            atomic_write_witness(trace(), "duplicate")
+        rows[3][-2] = 15
+        rows[2][40], rows[2][41], rows[2][43], rows[2][44], rows[2][45], rows[2][49] = 1, RAM, 1, 128, 15, 1
+        rows[2][-1] = 128
+        self.assertEqual(atomic_write_witness(trace(), "split")["firstWriteCycle"], 2)
+        rows[3][-1] = 128
+        with self.assertRaisesRegex(AssertionError, "did not split"):
+            atomic_write_witness(trace(), "split")
 
 
 if __name__ == "__main__":

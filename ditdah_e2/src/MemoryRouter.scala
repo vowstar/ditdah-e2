@@ -63,7 +63,7 @@ object MemoryRouter extends Generator[PlatformParameters, PlatformLayers, Memory
     val rom = contains(request.address, p.romBase, p.romSize) & !request.write
     val ram = contains(request.address, p.ramBase, p.ramSize)
     val ordinary = request.operation === 0.U(4)
-    val atomicAllowed = if p.core.enableA then (request.operation <= 11.U(4)) & word else ordinary
+    val atomicAllowed = if p.core.enableA then ordinary | ((request.operation <= 11.U(4)) & word) else ordinary
     val memory = shape & ((ordinary & rom) | (atomicAllowed & ram))
     val console = ordinary & shape & word & contains(request.address, p.consoleBase, p.consoleSize)
     val timer = ordinary & shape & word & contains(request.address, p.timerBase, p.timerSize)

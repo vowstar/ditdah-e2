@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from model import Model, TIME_BASE, MASK64, M_INSTRUCTIONS, multiply_divide
+from model import Model, TIME_BASE, MASK64, M_INSTRUCTIONS, ATOMIC_FUNCTIONS, multiply_divide
 from programs import cases
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -23,6 +23,11 @@ def checker_inputs():
     paths = ("test/model.py", "test/bit_model.py", "test/bit_programs.py", "test/bit_pipeline.py", "test/bit_operations.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
              "test/compressed_unit.py", "test/sim.cpp", "test/inactive_debug.hpp", "test/verify.py", "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in paths}
+
+
+def retirement_coverage(instructions, enable_a):
+    excluded = sorted({name for name, _ in ATOMIC_FUNCTIONS.values()} & set(instructions)) if enable_a else []
+    return set(instructions) - set(excluded), excluded
 
 
 class InputSchedule:
@@ -563,6 +568,7 @@ def main():
     for case in selected:
         if case.name.startswith("bit_") and case.name.endswith("_load") and not case.name.endswith("_no_false_load"):
             assert sum(run["loadUseCycles"] for run in results if run["case"] == case.name), "Unreached bit load interlock"
+    ordinary, excluded = retirement_coverage(manifest["instructions"], manifest["parameters"].get("enableA", False))
     if not args.case:
         if not manifest["parameters"]["resetVector"]:
             for metric in ("forwards", "loadUseCycles", "redirects", "memoryWaitCycles", "blockedFetchRedirects", "fetchDrainsAfterCompletion"):
@@ -574,11 +580,11 @@ def main():
         observed = set().union(*(set(result["instructions"]) for result in results))
         required = {"lui", "auipc", "addi", "sw", "jal", "csrrw", "csrrs", "csrrwi", "ecall", "ebreak", "mret"}
         if not manifest["parameters"]["resetVector"]:
-            required = set(manifest["instructions"])
+            required = ordinary
         assert required <= observed, f"Unexecuted instructions: {required - observed}"
     summary = {"scope": "integer instructions, native memory, machine traps, interrupts, counters and WFI",
                "command": "python3 test/verify.py", "exitStatus": 0,
-               "parameters": manifest["parameters"], "instructions": manifest["instructions"],
+               "parameters": manifest["parameters"], "instructions": manifest["instructions"], "excludedInstructions": excluded,
                "rtlManifestHash": manifest_hash, "checkerHashes": inputs,
                "simulator": subprocess.check_output(["verilator", "--version"], text=True).strip(),
                "negativeControls": controls, "rtlNegativeControls": rtl_controls, "runs": results,

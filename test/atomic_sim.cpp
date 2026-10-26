@@ -1,6 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
 #include "VAtomicBench.h"
+#ifndef DITDAH_E2_ROM_BASE
+#define DITDAH_E2_ROM_BASE 0
+#endif
+#ifndef DITDAH_E2_ROM_SIZE
+#define DITDAH_E2_ROM_SIZE 65536
+#endif
+#ifndef DITDAH_E2_MAX_CYCLES
+#define DITDAH_E2_MAX_CYCLES 100000
+#endif
+
 #include "verilated.h"
 #include <array>
 #include <cstdint>
@@ -14,7 +24,11 @@ struct Port {
     bool held = false, active = false;
     std::array<uint32_t, 7> request{};
 };
-struct Competition { uint32_t trigger, address, size, write, data, hold; };
+struct Competition {
+    uint32_t trigger, address, size, write, data, hold;
+    unsigned mode = 0, poll = 0;
+    uint32_t target = 0;
+};
 struct DebugAction { unsigned kind; uint32_t address, value, mask; };
 
 int main(int argc, char **argv) {
@@ -45,8 +59,30 @@ int main(int argc, char **argv) {
         if (!(events >> count)) throw std::runtime_error("Missing DMI schedule");
         std::vector<DebugAction> debugActions(count);
         for (auto &item : debugActions)
-            if (!(events >> item.kind >> item.address >> item.value >> item.mask) || item.kind > 4)
+            if (!(events >> item.kind >> item.address >> item.value >> item.mask) || (item.kind > 4 && item.kind != 11))
                 throw std::runtime_error("Malformed DMI action");
+        unsigned atomicInterrupt = 0;
+        if (events >> count) {
+            for (unsigned i = 0; i < count; ++i) {
+                unsigned index, mode, poll;
+                uint32_t target;
+                if (!(events >> index >> mode >> poll >> target) || index >= competitors.size() ||
+                    mode > 2 || poll > 1 || (poll && competitors[index].write))
+                    throw std::runtime_error("Malformed competitor policy");
+                competitors[index].mode = mode;
+                competitors[index].poll = poll;
+                competitors[index].target = target;
+            }
+            if (events >> atomicInterrupt) {
+                if (atomicInterrupt != 1 && atomicInterrupt != 2 && atomicInterrupt != 4)
+                    throw std::runtime_error("Invalid atomic interrupt operation");
+            }
+            events >> std::ws;
+        }
+        if (!events.eof()) throw std::runtime_error("Trailing atomic events");
+#if !DITDAH_E2_ENABLE_DEBUG
+        if (!debugActions.empty()) throw std::runtime_error("DMI actions require debug support");
+#endif
         uint32_t state = std::stoul(argv[3]) + 1;
         const unsigned delay = std::stoul(argv[4]);
         const uint32_t done = std::stoul(argv[5]);
@@ -59,9 +95,18 @@ int main(int argc, char **argv) {
         bool compOffered = false, compActive = false, compSignature = false;
         Competition comp{};
         uint64_t compReadyCycle = 0;
+        uint64_t compDue = 0;
         size_t competitorIndex = 0, signatureIndex = 0;
         size_t interruptIndex = 0;
-        bool externalInterrupt = false;
+        bool externalInterrupt = false, atomicInterruptSent = false;
+        bool observeHalt = false;
+        for (const auto &item : debugActions) {
+            if (item.kind != 11) continue;
+            if (item.address != 0x10 || item.value != 0x80000001 ||
+                (item.mask != 1 && item.mask != 2 && item.mask != 4))
+                throw std::runtime_error("Invalid atomic halt command");
+            observeHalt = true;
+        }
         size_t debugIndex = 0;
         bool dmiActive = false, dmiHeld = false;
         uint64_t sequence = 0, currentSequence = 0, debugStart = 0;
@@ -69,8 +114,10 @@ int main(int argc, char **argv) {
         bool completed = false, finished = false;
         uint64_t completionCycle = 0;
         dut.reset = 1;
+#if DITDAH_E2_ENABLE_DEBUG
         dut.dmi_request_valid = dut.dmi_response_ready = 0;
         dut.dmi_request_bits_address = dut.dmi_request_bits_data = dut.dmi_request_bits_op = 0;
+#endif
         dut.tick = dut.externalInterrupt = 0;
         dut.transmit_ready = 1;
         dut.axi_aw_ready = dut.axi_w_ready = dut.axi_ar_ready = 0;
@@ -82,15 +129,18 @@ int main(int argc, char **argv) {
         dut.competitor_request_bits_mask = dut.competitor_request_bits_size = dut.competitor_request_bits_operation = 0;
         for (int edge = 0; edge < 4; ++edge) { dut.clock = edge & 1; dut.eval(); }
         dut.reset = 0;
-        for (uint64_t cycle = 0; cycle < 100000; ++cycle) {
+        for (uint64_t cycle = 0; cycle < DITDAH_E2_MAX_CYCLES; ++cycle) {
             dut.clock = 0;
+            dut.transmit_ready = !delay || cycle % 11 == 10;
             dut.externalInterrupt = externalInterrupt;
             const auto action = debugIndex < debugActions.size() ? debugActions[debugIndex] : DebugAction{5, 0, 0, 0};
+#if DITDAH_E2_ENABLE_DEBUG
             dut.dmi_request_valid = !dmiActive && action.kind >= 1 && action.kind <= 3;
             dut.dmi_request_bits_address = action.address;
-            dut.dmi_request_bits_data = action.kind == 2 ? action.value : 0;
-            dut.dmi_request_bits_op = action.kind == 2 ? 2 : 1;
+            dut.dmi_request_bits_data = (action.kind == 2 || action.kind == 11) ? action.value : 0;
+            dut.dmi_request_bits_op = (action.kind == 2 || action.kind == 11) ? 2 : 1;
             dut.dmi_response_ready = !delay || cycle % 8 == 7 || random() % 4 == 0;
+#endif
             if (completed && !compOffered && !compActive && signatureIndex < signatures.size()) {
                 comp = {0, signatures[signatureIndex], 2, 0, 0, 0};
                 compOffered = compSignature = true;
@@ -108,9 +158,19 @@ int main(int argc, char **argv) {
             dut.competitor_request_bits_mask = comp.write ? ((1u << (1u << comp.size)) - 1) << (comp.address % 4) : 0;
             dut.competitor_response_ready = compActive && cycle >= compReadyCycle;
             dut.eval();
+#if DITDAH_E2_ENABLE_DEBUG
+            if (action.kind == 11 && !dmiActive && dut.o_d_request_valid && dut.o_d_request_ready &&
+                dut.o_d_request_bits_operation == action.mask) {
+                dut.dmi_request_valid = 1;
+                dut.eval();
+                if (!dut.dmi_request_ready || !dut.o_d_request_valid || !dut.o_d_request_ready)
+                    throw std::runtime_error("Atomic halt did not accept both transactions");
+            }
+#endif
             std::cout << "T " << cycle << ' ' << dut.timeValue << ' ' << unsigned(dut.o_reset)
                       << ' ' << unsigned(dut.o_clear) << ' ' << unsigned(dut.o_debug)
                       << ' ' << unsigned(dut.loadUse) << ' ' << unsigned(dut.forward) << ' ' << unsigned(dut.externalInterrupt) << '\n';
+            if (observeHalt) std::cout << "H " << cycle << ' ' << unsigned(dut.o_halt) << '\n';
             std::cout << "B " << cycle << ' ' << unsigned(dut.o_clear);
 #define SRAM(p) \
             std::cout << ' ' << unsigned(dut.o_s_##p##_request_valid) << ' ' << dut.o_s_##p##_request_bits_address \
@@ -128,6 +188,17 @@ int main(int argc, char **argv) {
             std::cout << ' ' << unsigned(dut.o_sram_read) << ' '
                       << ((dut.o_sram_read || dut.o_sram_mask) ? dut.o_sram_address : 0) << ' '
                       << unsigned(dut.o_sram_mask) << ' ' << (dut.o_sram_mask ? dut.o_sram_data : 0) << '\n';
+            std::cout << "C " << cycle << ' ' << unsigned(dut.o_reset) << ' ' << unsigned(dut.o_console_request_valid)
+                      << ' ' << unsigned(dut.o_console_response_ready) << ' ' << unsigned(dut.transmit_ready)
+                      << ' ' << dut.o_console_request_bits_address << ' ' << unsigned(dut.o_console_request_bits_write)
+                      << ' ' << dut.o_console_request_bits_data << ' ' << unsigned(dut.o_console_request_bits_mask)
+                      << ' ' << unsigned(dut.o_console_request_bits_size) << ' ' << unsigned(dut.o_console_request_ready)
+                      << ' ' << unsigned(dut.o_console_response_valid)
+                      << ' ' << (dut.o_console_response_valid ? dut.o_console_response_bits_data : 0)
+                      << ' ' << unsigned(dut.o_console_response_valid && dut.o_console_response_bits_fault)
+                      << ' ' << unsigned(dut.transmit_valid) << ' ' << (dut.transmit_valid ? dut.transmit_bits : 0) << '\n';
+            if (compActive && cycle >= compDue && !dut.competitor_response_valid)
+                throw std::runtime_error("Competitor completion missing after accepted SRAM access");
             auto native = [&](unsigned index, char name, bool valid, bool ready, std::array<uint32_t, 7> request,
                               bool rv, bool rr, uint32_t data, bool fault) {
                 auto &port = ports[index];
@@ -174,7 +245,7 @@ int main(int argc, char **argv) {
             if (dut.axi_ar_valid && dut.axi_ar_ready) {
                 if (readActive) throw std::runtime_error("Overlapping AXI read");
                 readActive = true;
-                readFault = dut.axi_ar_bits_address >= 65536 || (dut.axi_ar_bits_address & 3);
+                readFault = uint64_t(dut.axi_ar_bits_address) < DITDAH_E2_ROM_BASE || uint64_t(dut.axi_ar_bits_address) >= uint64_t(DITDAH_E2_ROM_BASE) + DITDAH_E2_ROM_SIZE || (dut.axi_ar_bits_address & 3);
                 readData = rom[dut.axi_ar_bits_address];
                 readDue = cycle + 1 + (delay ? random() % delay : 0);
                 std::cout << "A " << cycle << " AR " << dut.axi_ar_bits_address << ' ' << unsigned(dut.axi_ar_bits_protection) << '\n';
@@ -187,13 +258,29 @@ int main(int argc, char **argv) {
                               << ' ' << unsigned(dut.competitor_response_bits_fault) << '\n';
                     ++signatureIndex;
                 }
+                const bool repeat = !compSignature && comp.poll && dut.competitor_response_bits_data != comp.target;
+                const bool follow = !compSignature && !repeat && competitorIndex < competitors.size() &&
+                                    competitors[competitorIndex].mode == 1;
                 compActive = compSignature = false;
+                if (repeat) compOffered = true;
+                if (follow) { comp = competitors[competitorIndex++]; compOffered = true; }
             }
             if (dut.competitor_request_valid && dut.competitor_request_ready) {
                 if (compActive) throw std::runtime_error("Overlapping competitor request");
                 compOffered = false;
                 compActive = true;
                 compReadyCycle = cycle + comp.hold;
+                compDue = cycle + 2;
+            }
+            if (competitorIndex < competitors.size() && competitors[competitorIndex].mode == 2 &&
+                dut.o_d_request_valid && dut.o_d_request_ready && dut.o_d_request_bits_operation >= 3) {
+                if (compOffered || compActive) throw std::runtime_error("AMO competitor overlapped another request");
+                comp = competitors[competitorIndex++]; compOffered = true;
+            }
+            if (atomicInterrupt && !atomicInterruptSent && dut.o_d_request_valid && dut.o_d_request_ready &&
+                dut.o_d_request_bits_operation == atomicInterrupt) {
+                externalInterrupt = true;
+                atomicInterruptSent = true;
             }
             bool debugAdvance = false;
             if (dut.retire_valid) {
@@ -201,7 +288,8 @@ int main(int argc, char **argv) {
                           << ' ' << unsigned(dut.retire_rd) << ' ' << unsigned(dut.retire_writes) << ' ' << dut.retire_value
                           << ' ' << unsigned(dut.retire_trap) << ' ' << dut.retire_cause << ' ' << dut.retire_tval
                           << ' ' << unsigned(dut.retire_userMode) << '\n';
-                if (competitorIndex < competitors.size() && dut.retire_pc == competitors[competitorIndex].trigger) {
+                if (competitorIndex < competitors.size() && competitors[competitorIndex].mode == 0 &&
+                    dut.retire_pc == competitors[competitorIndex].trigger) {
                     if (compOffered || compActive) throw std::runtime_error("Competitor trigger overlapped a transaction");
                     comp = competitors[competitorIndex++];
                     compOffered = true;
@@ -217,7 +305,7 @@ int main(int argc, char **argv) {
                 std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target << ' ' << dut.interrupt_cause << '\n';
                 externalInterrupt = false;
             }
-            if (dut.transmit_valid) throw std::runtime_error("Unexpected atomic workload console output");
+#if DITDAH_E2_ENABLE_DEBUG
             if (dut.dmi_request_valid && dut.dmi_request_ready) {
                 if (dmiActive) throw std::runtime_error("Overlapping DMI owner");
                 dmiActive = true;
@@ -243,6 +331,7 @@ int main(int argc, char **argv) {
                 dmiActive = false;
                 debugAdvance = action.kind != 3 || (dmiResponse[1] & action.mask) == action.value;
             }
+#endif
             if (action.kind == 4) debugAdvance = cycle - debugStart >= action.value;
             dut.clock = 1;
             dut.eval();
@@ -254,7 +343,7 @@ int main(int argc, char **argv) {
             if (completed && cycle >= completionCycle + 8 && !readActive && !ports[0].active && !ports[1].active &&
                 !ports[2].active && !ports[3].active && !compActive && !compOffered && signatureIndex == signatures.size()) {
                 if (competitorIndex != competitors.size()) throw std::runtime_error("Missing competitor trigger");
-                if (interruptIndex != interrupts.size() || externalInterrupt) throw std::runtime_error("Missing interrupt completion");
+                if (interruptIndex != interrupts.size() || externalInterrupt || (atomicInterrupt && !atomicInterruptSent)) throw std::runtime_error("Missing interrupt completion");
                 if (debugIndex != debugActions.size() || dmiActive) throw std::runtime_error("Missing DMI completion");
                 std::cout << "F " << cycle + 1 << '\n';
                 finished = true;

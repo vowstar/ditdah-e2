@@ -6,12 +6,14 @@ from dataclasses import dataclass, field
 
 from programs import add, branch, constant, csr, immediate, jump, store
 from debug_programs import WAIT_RETIRE, WRITE, POLL, IDLE, register, memory
+from bit_operations import encode as bit_instruction
 
 
 RAM = 0x20000000
 SIGNATURE = RAM + 0x100
 DONE = 0xF00
 HANDLER = 0x800
+HALT_ATOMIC = 11
 FUNCTIONS = {"lr.w": 2, "sc.w": 3, "amoswap.w": 1, "amoadd.w": 0, "amoxor.w": 4,
              "amoand.w": 12, "amoor.w": 8, "amomin.w": 16, "amomax.w": 20,
              "amominu.w": 24, "amomaxu.w": 28}
@@ -38,10 +40,18 @@ class AtomicCase:
     expected_resumes: int = 0
     expected_resets: int = 0
     requires_warm_write: bool = False
+    pma_fault: int | None = None
+    requires_sram_fetch: bool = False
+    requires_atomic_forward: bool = False
+    expected_sc_failures: int | None = None
+    expected_fences: int = 0
+    console: tuple = ()
+    requires_lock_contention: bool = False
     debug: list = field(default_factory=list)
-    enable_m: bool = True
-    enable_c: bool = True
-    protected_mode: bool = True
+    boundary: tuple | None = None
+    enable_m: bool = False
+    enable_c: bool = False
+    protected_mode: bool = False
 
 
 class Program:
@@ -69,8 +79,21 @@ class Program:
         return AtomicCase(name, image, {SIGNATURE + index * 4: value for index, value in enumerate(values)}, **options)
 
 
-def cases():
+def cases(zba=False, zbb=False, zbs=False, *, enable_m=True):
     result = []
+    for size, offsets, value, signed_value in ((0, range(4), 0x80, 0xFFFFFF80), (1, (0, 2), 0x8001, 0xFFFF8001)):
+        for offset in offsets:
+            program = Program()
+            program.setup(0x11223344, value)
+            program.emit(*constant(8, HANDLER), csr(0, 0x305, 8, 1),
+                         store(2, 1, offset, size), immediate(5, 1, offset, 3, size),
+                         immediate(6, 1, offset, 3, size + 4), immediate(7, 1, 0, 3, 2))
+            program.signature((5, 6, 7))
+            mask = ((1 << (8 << size)) - 1) << (offset * 8)
+            updated = (0x11223344 & ~mask) | (value << (offset * 8))
+            case = program.finish(f"sram_{'byte' if size == 0 else 'halfword'}_{offset}", (signed_value, value, updated))
+            case.image[HANDLER] = jump(0, DONE - HANDLER)
+            result.append(case)
     updates = {"amoswap.w": 0x7FFFFFFE, "amoadd.w": 1, "amoxor.w": 0xFFFFFFFD,
                "amoand.w": 2, "amoor.w": 0xFFFFFFFF, "amomin.w": 0x80000003,
                "amomax.w": 0x7FFFFFFE, "amominu.w": 0x7FFFFFFE, "amomaxu.w": 0x80000003}
@@ -143,6 +166,78 @@ def cases():
     result.append(program.finish("constrained_retry", (0xA5A5A5A5, 0, 0xA5A5A5A6),
         competitors=[{"triggerPc": retry, "trigger": "lr_completion", "address": RAM,
                       "size": 2, "write": True, "data": 0xA5A5A5A5, "holdResponse": 0}]))
+    program = Program()
+    program.setup(0x10203040, 0)
+    retry = program.emit(atomic("lr.w", 5, 1, aq=True), immediate(7, 5, 1),
+                         atomic("sc.w", 6, 1, 7, rl=True))
+    program.emit(branch(6, 0, retry - len(program.words) * 4, unequal=True),
+                 immediate(8, 1, 0, 3, 2))
+    program.signature((5, 6, 8))
+    result.append(program.finish("repeated_interference", (0xA5A50004, 0, 0xA5A50005),
+        competitors=[{"triggerPc": retry, "trigger": "lr_completion", "address": RAM,
+                      "size": 2, "write": True, "data": 0xA5A50000 + index, "holdResponse": 0}
+                     for index in range(1, 5)], expected_sc_failures=4))
+    program = Program()
+    program.setup(0, 0x12345678)
+    start = program.emit(store(0, 1, 8))
+    program.emit(store(2, 1), 0x0310000F, immediate(9, 1, 4), immediate(10, 0, 1),
+                 atomic("amoswap.w", 5, 9, 10, rl=True))
+    wait = program.emit(immediate(6, 1, 8, 3, 2))
+    program.emit(branch(6, 0, wait - len(program.words) * 4),
+                 immediate(7, 1, 0, 3, 2), immediate(8, 1, 4, 3, 2))
+    program.signature((5, 6, 7, 8))
+    result.append(program.finish("message_passing", (0, 1, 0x12345678, 1), expected_fences=1,
+        competitors=[{"triggerPc": start, "address": RAM + 4, "size": 2, "write": False,
+                      "data": 0, "holdResponse": 0, "pollUntil": 1},
+                     {"triggerPc": 0, "address": RAM, "size": 2, "write": False,
+                      "data": 0, "holdResponse": 0, "afterPrevious": True, "expectedRead": 0x12345678},
+                     {"triggerPc": 0, "address": RAM + 8, "size": 2, "write": True,
+                      "data": 1, "holdResponse": 0, "afterPrevious": True}]))
+    program = Program()
+    program.setup(1, 1)
+    start = program.emit(store(0, 1, 8))
+    lock = program.emit(atomic("lr.w", 5, 1, aq=True))
+    program.emit(branch(5, 0, lock - len(program.words) * 4, unequal=True),
+                 atomic("sc.w", 6, 1, 2),
+                 branch(6, 0, lock - (len(program.words) * 4 + 8), unequal=True))
+    program.emit(immediate(7, 1, 4, 3, 2), immediate(7, 7, 1), store(7, 1, 4),
+                 0x0310000F, store(0, 1))
+    wait = program.emit(immediate(8, 1, 8, 3, 2))
+    program.emit(branch(8, 0, wait - len(program.words) * 4), immediate(9, 1, 0, 3, 2))
+    program.signature((5, 6, 7, 8, 9))
+    result.append(program.finish("contended_lock", (0, 0, 42, 1, 0), expected_fences=1,
+        requires_lock_contention=True,
+        competitors=[{"triggerPc": start, "address": RAM + 4, "size": 2, "write": True,
+                      "data": 41, "holdResponse": 24},
+                     {"triggerPc": 0, "address": RAM, "size": 2, "write": True,
+                      "data": 0, "holdResponse": 0, "afterPrevious": True},
+                     {"triggerPc": 0, "address": RAM, "size": 2, "write": False,
+                      "data": 0, "holdResponse": 0, "afterPrevious": True, "pollUntil": 1},
+                     {"triggerPc": 0, "address": RAM, "size": 2, "write": False,
+                      "data": 0, "holdResponse": 0, "afterPrevious": True, "pollUntil": 0},
+                     {"triggerPc": 0, "address": RAM + 4, "size": 2, "write": False,
+                      "data": 0, "holdResponse": 0, "afterPrevious": True, "expectedRead": 42},
+                     {"triggerPc": 0, "address": RAM + 8, "size": 2, "write": True,
+                      "data": 1, "holdResponse": 0, "afterPrevious": True}]))
+    program = Program()
+    program.setup(0x10, 0x20)
+    program.emit(*constant(9, 0x10000000), immediate(10, 0, 70),
+                 atomic("amoadd.w", 5, 1, 2), 0x0FF0000F, store(10, 9), 0x0FF0000F,
+                 atomic("lr.w", 6, 1), immediate(7, 0, 0x40), atomic("sc.w", 8, 1, 7),
+                 0x0FF0000F)
+    ready = program.emit(immediate(11, 9, 4, 3, 2))
+    program.emit(branch(11, 0, ready - len(program.words) * 4), immediate(12, 1, 0, 3, 2))
+    program.signature((5, 6, 8, 11, 12))
+    result.append(program.finish("sram_mmio_fence", (0x10, 0x30, 0, 1, 0x40),
+                                 expected_fences=3, console=(70,)))
+    program = Program()
+    program.setup(0x10, 3)
+    pc = program.emit(atomic("amoadd.w", 5, 1, 2))
+    program.emit(immediate(6, 1, 0, 3, 2))
+    program.signature((5, 6))
+    result.append(program.finish("amo_competing_boundary", (0x10, 0x80),
+        competitors=[{"triggerPc": pc, "trigger": "amo_accept", "address": RAM, "size": 2,
+                      "write": True, "data": 0x80, "holdResponse": 0}]))
     for offset in (0, 4):
         program = Program()
         program.setup(0x10203040, 0x55667788)
@@ -168,7 +263,7 @@ def cases():
                      *constant(8, 1 << 17), csr(0, 0x300, 8, 1))
         pc = program.emit(atomic(name, 5, 1, 0 if name == "lr.w" else 2))
         case = program.finish(name.replace(".", "_") + "_pmp_denied", (expected_cause, RAM, pc, 0x80000003),
-                              expected_causes=(expected_cause,))
+                              expected_causes=(expected_cause,), protected_mode=True)
         handler = [csr(5, 0x342), csr(6, 0x343), csr(7, 0x341), immediate(8, 1, 0, 3, 2),
                    store(5, 3), store(6, 3, 4), store(7, 3, 8), store(8, 3, 12)]
         handler.append(jump(0, DONE - HANDLER - len(handler) * 4))
@@ -216,6 +311,24 @@ def cases():
         actions.extend(((WRITE, 0x10, 0x40000001, 0), (POLL, 0x11, 0x30000, 0x30000)))
         result.append(program.finish("debug_memory_reservation" if use_memory else "debug_halt_reservation",
                                      (0x10203040, 1, 0x10203040), debug=actions, expected_halts=1, expected_resumes=1))
+    for size, offsets, value in ((0, range(4), 0xA5), (1, (0, 2), 0xBEEF)):
+        for offset in offsets:
+            program = Program()
+            program.setup(0x10203040, 0x55667788)
+            pc = program.emit(atomic("lr.w", 5, 1))
+            program.emit(*(immediate(0, 0, 0) for _ in range(64)))
+            program.emit(atomic("sc.w", 6, 1, 2), immediate(7, 1, 0, 3, 2))
+            program.signature((5, 6, 7))
+            actions = [(WAIT_RETIRE, pc, 0, 0), (WRITE, 0x10, 1, 0),
+                       (WRITE, 0x10, 0x80000001, 0), (POLL, 0x11, 0x300, 0x300)]
+            memory(actions, RAM + offset, size=size)
+            memory(actions, RAM + offset, value, size=size)
+            memory(actions, RAM + offset, size=size)
+            actions.extend(((WRITE, 0x10, 0x40000001, 0), (POLL, 0x11, 0x30000, 0x30000)))
+            mask = ((1 << (8 << size)) - 1) << (offset * 8)
+            updated = (0x10203040 & ~mask) | (value << (offset * 8))
+            result.append(program.finish(f"debug_sram_{'byte' if size == 0 else 'halfword'}_{offset}",
+                (0x10203040, 1, updated), debug=actions, expected_halts=1, expected_resumes=1))
     program = Program()
     program.setup(0x10203040, 0x55667788)
     pc = program.emit(atomic("lr.w", 5, 1))
@@ -231,4 +344,110 @@ def cases():
                       "size": 2, "write": True, "data": 0xA5A5A5A5, "holdResponse": 32}])
     case.signature[RAM + 0x40] = 0xA5A5A5A5
     result.append(case)
+    for target, region in ((0, "rom"), (0x10000000, "console"), (0x30000000, "unmapped")):
+        for name in ("lr.w", "sc.w", "amoadd.w"):
+            program = Program()
+            program.setup()
+            program.emit(*constant(8, HANDLER), csr(0, 0x305, 8, 1), *constant(1, target))
+            pc = program.emit(atomic(name, 5, 1, 0 if name == "lr.w" else 2))
+            cause = 5 if name == "lr.w" else 7
+            case = program.finish(name.replace(".", "_") + "_" + region, (cause, target, pc),
+                                  expected_causes=(cause,), pma_fault=target)
+            handler = [csr(5, 0x342), csr(6, 0x343), csr(7, 0x341), store(5, 3), store(6, 3, 4), store(7, 3, 8)]
+            handler.append(jump(0, DONE - HANDLER - len(handler) * 4))
+            case.image.update({HANDLER + index * 4: word for index, word in enumerate(handler)})
+            result.append(case)
+    program = Program()
+    program.setup(42, 17)
+    program.emit(*constant(8, RAM >> 2), csr(0, 0x3B0, 8, 1),
+                 *constant(8, 0xFFFFFFFF), csr(0, 0x3B1, 8, 1),
+                 *constant(8, 0x1F13), csr(0, 0x3A0, 8, 1),
+                 *constant(8, 1 << 17), csr(0, 0x300, 8, 1),
+                 atomic("amoadd.w", 5, 1, 2), immediate(6, 1, 0, 3, 2))
+    program.signature((5, 6))
+    result.append(program.finish("mprv_atomic_allowed", (42, 59), protected_mode=True))
+    program = Program()
+    program.setup(42, 17)
+    program.emit(*constant(8, 0xFFFFFFFF), csr(0, 0x3B0, 8, 1),
+                 *constant(8, 0x1F), csr(0, 0x3A0, 8, 1))
+    user_pc = len(program.words) * 4 + 20
+    program.emit(*constant(8, user_pc), csr(0, 0x341, 8, 1), csr(0, 0x300, 0, 1), 0x30200073,
+                 atomic("amoadd.w", 5, 1, 2), atomic("lr.w", 6, 1), atomic("sc.w", 7, 1, 2),
+                 immediate(8, 1, 0, 3, 2))
+    program.signature((5, 6, 7, 8))
+    result.append(program.finish("user_atomic_execution", (42, 59, 0, 17), protected_mode=True))
+    program = Program()
+    program.setup(42, 17)
+    code = [atomic("amoadd.w", 5, 1, 2), immediate(6, 5, 1), immediate(0, 9, 0, 0x67)] + [0x13] * 5
+    program.emit(*constant(8, RAM + 0x400))
+    for index, word in enumerate(code):
+        program.emit(*constant(10, word), store(10, 8, index * 4))
+    program.emit(0x100F)
+    return_pc = len(program.words) * 4 + 12
+    program.emit(*constant(9, return_pc), immediate(0, 8, 0, 0x67), immediate(7, 1, 0, 3, 2))
+    program.signature((5, 6, 7))
+    result.append(program.finish("sram_instruction_execution", (42, 43, 59), requires_sram_fetch=True))
+    if enable_m:
+        program = Program()
+        program.setup(42, 17)
+        multiply = (1 << 25) | (2 << 20) | (2 << 15) | (2 << 7) | 0x33
+        code = [multiply, immediate(2, 2, 1), atomic("amoadd.w", 5, 1, 2),
+                immediate(6, 1, 0, 3, 2), immediate(0, 9, 0, 0x67)] + [0x13] * 5
+        program.emit(*constant(8, RAM + 0x400))
+        for index, word in enumerate(code):
+            program.emit(*constant(10, word), store(10, 8, index * 4))
+        program.emit(0x100F)
+        return_pc = len(program.words) * 4 + 12
+        program.emit(*constant(9, return_pc), immediate(0, 8, 0, 0x67))
+        program.signature((2, 5, 6))
+        result.append(program.finish("atomic_input_forward", (290, 42, 332),
+                                     requires_sram_fetch=True, requires_atomic_forward=True, enable_m=True))
+    if zba and zbb and zbs:
+        program = Program()
+        program.setup(0x12345678, 0x10)
+        program.emit(atomic("amoadd.w", 5, 1, 2),
+                     bit_instruction("rev8", rd=6, rs1=5),
+                     bit_instruction("bclri", rd=7, rs1=6, shift=4),
+                     bit_instruction("sh1add", rd=8, rs1=7, rs2=2),
+                     atomic("amoxor.w", 9, 1, 8), atomic("lr.w", 10, 1),
+                     bit_instruction("rori", rd=11, rs1=10, shift=8),
+                     bit_instruction("bseti", rd=12, rs1=11, shift=0),
+                     bit_instruction("sh2add", rd=13, rs1=12, rs2=2),
+                     atomic("sc.w", 14, 1, 13), immediate(15, 1, 0, 3, 2))
+        program.signature(range(5, 16))
+        result.append(program.finish("atomic_bit_dependencies",
+            (0x12345678, 0x78563412, 0x78563402, 0xF0AC6814, 0x12345688,
+             0xE2983E9C, 0x9CE2983E, 0x9CE2983F, 0x738A610C, 0, 0x738A610C)))
+    for control in ("interrupt", "halt"):
+        for name, operation, returned, final_word in (("lr.w", 1, 42, 42),
+                ("sc.w", 2, 0, 17), ("amoadd.w", 4, 42, 59)):
+            program = Program()
+            program.setup(42, 17)
+            program.emit(*constant(8, HANDLER), csr(0, 0x305, 8, 1))
+            if control == "interrupt":
+                program.emit(*constant(8, 1 << 11), csr(0, 0x304, 8, 1),
+                             *constant(8, 0x1808), csr(0, 0x300, 8, 1))
+            if operation == 2:
+                program.emit(atomic("lr.w", 9, 1))
+            pc = program.emit(atomic(name, 5, 1, 0 if operation == 1 else 2))
+            program.emit(store(2, 1, 4), atomic("sc.w", 6, 1, 2), immediate(7, 1, 0, 3, 2),
+                         immediate(10, 1, 4, 3, 2))
+            program.signature((5, 6, 7, 10))
+            actions = []
+            if control == "halt":
+                actions = [(WRITE, 0x10, 1, 0), (HALT_ATOMIC, 0x10, 0x80000001, operation),
+                           (POLL, 0x11, 0x300, 0x300)]
+                for number in (0x7B1, 0x7B0, 0x1005, 0x341, 0x342, 0x343):
+                    register(actions, number)
+                memory(actions, RAM)
+                memory(actions, RAM + 4)
+                actions.extend(((WRITE, 0x10, 0x40000001, 0), (POLL, 0x11, 0x30000, 0x30000)))
+            case = program.finish("pending_" + name.replace(".", "_") + "_" + control,
+                (returned, 1, final_word, 17), boundary=(control, pc, operation), debug=actions,
+                expected_halts=int(control == "halt"), expected_resumes=int(control == "halt"),
+                expected_interrupts=(0x8000000B,) if control == "interrupt" else ())
+            if control == "interrupt":
+                case.image.update({HANDLER: csr(20, 0x341), HANDLER + 4: csr(21, 0x342),
+                                   HANDLER + 8: 0x30200073})
+            result.append(case)
     return result
