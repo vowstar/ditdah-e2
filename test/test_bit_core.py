@@ -62,6 +62,13 @@ class BitCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mutate("", "unknown")
 
+    def test_forwarding_mutation_uses_the_actual_register_array(self):
+        for name in ("_GEN", "_GEN_0", "register_values"):
+            source = f"wire [31:0] b = match2 & ~m_load ? m_value : {name}[bits[24:20]];\n.b(b), .valid(_bit_valid)"
+            changed = mutate(source, "forwarding")
+            self.assertIn(f".b({name}[bits[24:20]]), .valid(_bit_valid)", changed)
+            self.assertIn("match2 & ~m_load ? m_value", changed)
+
     def test_bit_options_and_misa(self):
         for subset in range(8):
             flags = tuple(bool(subset & (1 << index)) for index in range(3))

@@ -10,8 +10,10 @@ import subprocess
 
 def mutate(text, kind):
     if kind == "forwarding":
+        source = re.findall(r'wire\s+\[31:0\]\s+b\s*=\s*match2\s*&\s*~m_load\s*\?\s*m_value\s*:\s*(\w+\[bits\[24:20\]\]);', text)
+        assert len(source) == 1, "Changed bit operand register selection"
         pattern = r'(\.b\s*\()b(\),\s*\.valid\s*\(_bit_valid\))'
-        changed, count = re.subn(pattern, r'\g<1>_GEN[bits[24:20]]\2', text)
+        changed, count = re.subn(pattern, lambda match: match[1] + source[0] + match[2], text)
     elif kind == "load_interlock":
         pattern = r'(wire\s+match2\s*=.*?)(?=;)'
         matches = list(re.finditer(pattern, text, re.S))
