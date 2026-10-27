@@ -59,3 +59,5 @@ bash test/isa/protected.sh --verification result/protected-reference-platform --
 ```
 
 Keep the platform verification output with the reference report.
+
+Use `make verify-isa-menvcfg` for environment CSR checks and a new `ISA_MENVCFG_OUTPUT` directory for each run.
