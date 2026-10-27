@@ -25,3 +25,20 @@ Use a new `--output` directory for each run. Sources and versions are pinned in 
 | `cebreak` | Enable C |
 
 For the ordinary adapter, keep `enableA`, `enableDebug`, `protectedMode` false.
+
+## AMO tests
+
+Copy `platform.json` to `atomic-platform.json`. Set ROM base to `2147483648` and size to `4194304`. Keep other regions unchanged.
+Save this configuration as `atomic-core.json`.
+
+```json
+{"resetVector":2147483648,"enableM":false,"enableC":false,"enableA":true}
+```
+
+```sh
+python3 scripts/build_atomic_platform.py --platform atomic-platform.json --config atomic-core.json --output result/isa-atomic-design
+bash test/isa/atomic.sh --design result/isa-atomic-design --output result/isa-atomic-signatures
+```
+
+A selected subset must include `--test amoadd.w` for the RTL fault check.
+These official tests exclude LR/SC and acquire/release variants.
