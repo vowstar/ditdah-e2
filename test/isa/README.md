@@ -42,3 +42,20 @@ bash test/isa/atomic.sh --design result/isa-atomic-design --output result/isa-at
 
 A selected subset must include `--test amoadd.w` for the RTL fault check.
 These official tests exclude LR/SC and acquire/release variants.
+
+## Protected workload
+
+Copy `platform.json` to `platform-reference.json`. Set ROM to `0x80000000` and console to `0x30000000`, preserving region sizes and other addresses.
+Save this configuration as `protected-reference.json`. Keep debug, A and bit extensions disabled.
+
+```json
+{"resetVector":2147483648,"enableM":true,"enableC":true,"protectedMode":true}
+```
+
+```sh
+python3 scripts/build_platform.py --platform platform-reference.json --config protected-reference.json --output result/protected-reference-design
+python3 test/verify_platform.py --platform result/protected-reference-design --workload protected --output result/protected-reference-platform
+bash test/isa/protected.sh --verification result/protected-reference-platform --output result/protected-reference
+```
+
+Keep the platform verification output with the reference report.
