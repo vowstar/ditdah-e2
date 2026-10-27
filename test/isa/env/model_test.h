@@ -23,7 +23,11 @@
   .global fromhost; fromhost: .dword 0
 #define RVMODEL_IO_INIT
 #define RVMODEL_IO_WRITE_STR(_R, _STR)
+#ifdef DITDAH_E2_BIT_SIGNATURE
+#define RVMODEL_IO_ASSERT_GPR_EQ(_S, _R, _I)
+#else
 #define RVMODEL_IO_ASSERT_GPR_EQ(_S, _R, _I) \
   li _S, _I; beq _R, _S, 991f; ebreak; 991:
+#endif
 
 #endif

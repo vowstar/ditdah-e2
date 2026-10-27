@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 exec nix develop --impure --expr '
   let
-    project = builtins.getFlake (toString ./.);
+    project = builtins.getFlake ("git+file://" + toString ./.);
     pkgs = import ./nix/toolchain.nix {
       zaozi = project.inputs.zaozi;
       system = builtins.currentSystem;

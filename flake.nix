@@ -34,7 +34,7 @@
         softwareTools = [ crossCompiler crossCompiler.bintools pkgs.python3 ];
         tools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install
           pkgs.verilator pkgs.iverilog pkgs.yosys pkgs.sby pkgs.z3 pkgs.reuse
-          pkgs.python3 pkgs.gnumake maven ] ++ softwareTools;
+          pkgs.python3 pkgs.tcl pkgs.gnumake maven ] ++ softwareTools;
       in {
         packages.default = pkgs.runCommand "ditdah-e2-rtl" {
           nativeBuildInputs = tools;

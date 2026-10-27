@@ -15,7 +15,7 @@ FETCH_PERFORMANCE_ARGS ?=
 
 FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data verify-fetch-performance
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data verify-fetch-performance verify-isa-bit
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -122,3 +122,9 @@ verify-pmp-data:
 
 verify-fetch-performance: rtl platform
 	python3 test/fetch_performance.py --current-core result/rtl --current-platform "$(PLATFORM_OUTPUT)/design" --output "$(FETCH_PERFORMANCE_OUTPUT)" $(FETCH_PERFORMANCE_ARGS)
+
+verify-isa-bit:
+	mkdir -p result
+	printf '%s\n' '{"resetVector":2147483648,"enableM":false,"enableC":false,"enableZba":true,"enableZbb":true,"enableZbs":true}' > result/isa-bit-reset.json
+	python3 scripts/build_rtl.py --config result/isa-bit-reset.json --output result/isa-bit-rtl
+	bash test/isa/run.sh --rtl result/isa-bit-rtl --source-root . --suite rv32b
