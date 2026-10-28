@@ -32,6 +32,15 @@ Selected checks do not establish complete ISA conformance or physical signoff.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.
 
+## GDS utilities
+
+Both scripts require new `--output` and `--report` paths. Use `--help` for their inputs.
+`scripts/align_gds_units.py` preserves coordinate bytes and supports one SREF level with R0, R180, MX or MY and unit magnification.
+Arrays, deeper references and other transforms are rejected.
+`scripts/preserve_gds_structures.py` requires matching database units, unique names and complete structure references.
+Unselected referenced structures must already match the library bytes.
+Check layer and datatype correspondence before use.
+
 ## License
 
 Project-authored files use the MIT license. `REUSE.toml` records file declarations.
