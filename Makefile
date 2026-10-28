@@ -17,7 +17,9 @@ FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
 
 ISA_MENVCFG_OUTPUT ?= result/isa-menvcfg
 
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data verify-fetch-performance verify-isa-bit verify-isa-menvcfg
+GENERIC_OUTPUT ?= result/generic
+
+.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data verify-fetch-performance verify-isa-bit verify-isa-menvcfg verify-generic
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -138,3 +140,7 @@ verify-isa-menvcfg:
 	python3 scripts/build_rtl.py --config "$(ISA_MENVCFG_OUTPUT)/minimal.json" --output "$(ISA_MENVCFG_OUTPUT)/minimal-rtl"
 	python3 scripts/build_rtl.py --config "$(ISA_MENVCFG_OUTPUT)/machine.json" --output "$(ISA_MENVCFG_OUTPUT)/machine-rtl"
 	bash test/isa/menvcfg.sh --profile "minimal=$(ISA_MENVCFG_OUTPUT)/minimal-rtl" --profile "machine=$(ISA_MENVCFG_OUTPUT)/machine-rtl" --output "$(ISA_MENVCFG_OUTPUT)/verification"
+
+verify-generic: rtl
+	python3 scripts/synthesize.py --rtl result/rtl --output "$(GENERIC_OUTPUT)/synthesis"
+	python3 test/generic_netlist.py --synthesis "$(GENERIC_OUTPUT)/synthesis" --output "$(GENERIC_OUTPUT)/execution"

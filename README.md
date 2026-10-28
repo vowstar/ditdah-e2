@@ -27,7 +27,7 @@ The reset address must be word aligned, or halfword aligned when C is enabled.
 `make verify-platform` runs a timer interrupt program on the core, memory router, AXI adapter and console hardware.
 
 Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
-Use new directories for `PLATFORM_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`.
+Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`.
 Selected checks do not establish complete ISA conformance or physical signoff.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.
