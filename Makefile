@@ -4,27 +4,23 @@
 export PYTHONDONTWRITEBYTECODE = 1
 CONFIG ?=
 PLATFORM_OUTPUT ?= result/platform
-
+GENERIC_OUTPUT ?= result/generic
 DEBUG_LATENCY_OUTPUT ?= result/debug-latency
-
-INTERRUPT_OUTPUT ?= result/interrupt-stress
-
+ISA_MENVCFG_OUTPUT ?= result/isa-menvcfg
 PMP_DATA_OUTPUT ?= result/pmp-data
-
+INTERRUPT_OUTPUT ?= result/interrupt-stress
+FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
 FETCH_PERFORMANCE_ARGS ?=
 
-FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
-
-ISA_MENVCFG_OUTPUT ?= result/isa-menvcfg
-
-GENERIC_OUTPUT ?= result/generic
-
-.PHONY: rtl platform software verify-signoff verify-formal verify-throughput verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-multiply verify-timer verify-console verify-protection verify-pmp verify-compliance verify-debug-formal verify-debug-latency verify-atomic-formal verify-interrupts verify-pmp-data verify-fetch-performance verify-isa-bit verify-isa-menvcfg verify-generic
+.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
 platform:
 	python3 scripts/build_platform.py $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
+
+atomic-platform:
+	python3 scripts/build_atomic_platform.py $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
 
 software:
 	python3 scripts/build_software.py
@@ -44,6 +40,40 @@ verify-axi:
 
 verify-multiply:
 	python3 test/multiply_divide_formal.py
+
+verify-bit:
+	python3 test/bit_operations.py
+
+verify-debug: rtl
+	python3 test/verify_debug.py --rtl result/rtl --output result/debug-verification
+
+verify-debug-formal:
+	mkdir -p result
+	printf '%s\n' '{"enableM":false,"enableC":false,"enableDebug":true}' > result/debug-formal.json
+	python3 scripts/build_rtl.py --config result/debug-formal.json --output result/debug-formal-rtl
+	python3 test/debug_core_formal.py --rtl result/debug-formal-rtl --output result/debug-core-formal
+
+verify-debug-latency:
+	mkdir -p "$(DEBUG_LATENCY_OUTPUT)"
+	printf '%s\n' '{"enableM":true,"enableC":true,"enableDebug":true}' > "$(DEBUG_LATENCY_OUTPUT)/configuration.json"
+	python3 scripts/build_rtl.py --config "$(DEBUG_LATENCY_OUTPUT)/configuration.json" --output "$(DEBUG_LATENCY_OUTPUT)/design"
+	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/control" --depth 192 --timeout 1800 --case safety --case halt-blocked --case resume-blocked
+	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/step" --depth 384 --timeout 1800 \
+		--case step-safety --case payload --case step-payload --case complete --case instruction-accepted \
+		--case data-accepted --case instruction-offered --case data-offered --case step-retire --case step-trap \
+		--case step-memory --case step-multiply --case step-crossing --case extra-step
+
+verify-atomic: atomic-platform
+	python3 test/verify_atomic.py --design "$(PLATFORM_OUTPUT)/design" --output "$(PLATFORM_OUTPUT)/verification"
+
+verify-atomic-memory:
+	python3 test/atomic_memory.py
+
+verify-atomic-formal:
+	mkdir -p result
+	printf '%s\n' '{"baseAddress":0,"sizeBytes":16}' > result/atomic-small.json
+	python3 test/atomic_memory.py --config result/atomic-small.json --output result/atomic-small
+	python3 test/atomic_memory_formal.py --rtl result/atomic-small --output result/atomic-formal
 
 verify-timer:
 	python3 test/timer.py
@@ -69,64 +99,6 @@ verify-isa-c:
 	python3 scripts/build_rtl.py --config result/isa-c-reset.json --output result/isa-c-rtl
 	bash test/isa/run.sh --rtl result/isa-c-rtl --source-root . --suite rv32c
 
-verify-protection:
-	python3 test/protection_port.py
-	python3 test/protection_formal.py --rtl result/protection-port --output result/protection-formal
-
-verify-pmp:
-	python3 test/pmp.py
-
-verify-signoff: rtl
-	python3 test/verify.py
-	python3 test/formal.py
-	python3 test/core_formal.py
-
-verify-formal: rtl
-	python3 test/formal.py
-	python3 test/core_formal.py
-
-verify-throughput: rtl
-	python3 test/fetch_throughput.py
-
-verify-compliance:
-	python3 -m unittest discover -s test -p 'test_*.py'
-	python3 -m unittest discover -s test/isa -p 'test_*.py'
-	reuse lint
-
-verify-debug-formal:
-	mkdir -p result
-	printf '%s\n' '{"enableM":false,"enableC":false,"enableDebug":true}' > result/debug-formal.json
-	python3 scripts/build_rtl.py --config result/debug-formal.json --output result/debug-formal-rtl
-	python3 test/debug_core_formal.py --rtl result/debug-formal-rtl --output result/debug-core-formal
-
-verify-debug-latency:
-	mkdir -p "$(DEBUG_LATENCY_OUTPUT)"
-	printf '%s\n' '{"enableM":true,"enableC":true,"enableDebug":true}' > "$(DEBUG_LATENCY_OUTPUT)/configuration.json"
-	python3 scripts/build_rtl.py --config "$(DEBUG_LATENCY_OUTPUT)/configuration.json" --output "$(DEBUG_LATENCY_OUTPUT)/design"
-	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/control" --depth 192 --timeout 1800 --case safety --case halt-blocked --case resume-blocked
-	python3 test/debug_latency_formal.py --rtl "$(DEBUG_LATENCY_OUTPUT)/design" --output "$(DEBUG_LATENCY_OUTPUT)/step" --depth 384 --timeout 1800 \
-		--case step-safety --case payload --case step-payload --case complete --case instruction-accepted \
-		--case data-accepted --case instruction-offered --case data-offered --case step-retire --case step-trap \
-		--case step-memory --case step-multiply --case step-crossing --case extra-step
-
-verify-atomic-formal:
-	mkdir -p result
-	printf '%s\n' '{"baseAddress":0,"sizeBytes":16}' > result/atomic-small.json
-	python3 test/atomic_memory.py --config result/atomic-small.json --output result/atomic-small
-	python3 test/atomic_memory_formal.py --rtl result/atomic-small --output result/atomic-formal
-
-verify-interrupts: rtl
-	python3 test/interrupt_stress.py --rtl result/rtl --output "$(INTERRUPT_OUTPUT)"
-
-verify-pmp-data:
-	mkdir -p "$(PMP_DATA_OUTPUT)"
-	printf '%s\n' '{"enableM":false,"enableC":false,"protectedMode":true}' > "$(PMP_DATA_OUTPUT)/configuration.json"
-	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
-	python3 test/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
-
-verify-fetch-performance: rtl platform
-	python3 test/fetch_performance.py --current-core result/rtl --current-platform "$(PLATFORM_OUTPUT)/design" --output "$(FETCH_PERFORMANCE_OUTPUT)" $(FETCH_PERFORMANCE_ARGS)
-
 verify-isa-bit:
 	mkdir -p result
 	printf '%s\n' '{"resetVector":2147483648,"enableM":false,"enableC":false,"enableZba":true,"enableZbb":true,"enableZbs":true}' > result/isa-bit-reset.json
@@ -141,6 +113,42 @@ verify-isa-menvcfg:
 	python3 scripts/build_rtl.py --config "$(ISA_MENVCFG_OUTPUT)/machine.json" --output "$(ISA_MENVCFG_OUTPUT)/machine-rtl"
 	bash test/isa/menvcfg.sh --profile "minimal=$(ISA_MENVCFG_OUTPUT)/minimal-rtl" --profile "machine=$(ISA_MENVCFG_OUTPUT)/machine-rtl" --output "$(ISA_MENVCFG_OUTPUT)/verification"
 
+verify-protection:
+	python3 test/protection_port.py
+	python3 test/protection_formal.py --rtl result/protection-port --output result/protection-formal
+
+verify-pmp:
+	python3 test/pmp.py
+
+verify-interrupts: rtl
+	python3 test/interrupt_stress.py --rtl result/rtl --output "$(INTERRUPT_OUTPUT)"
+
+verify-pmp-data:
+	mkdir -p "$(PMP_DATA_OUTPUT)"
+	printf '%s\n' '{"enableM":false,"enableC":false,"protectedMode":true}' > "$(PMP_DATA_OUTPUT)/configuration.json"
+	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
+	python3 test/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
+
+verify-signoff: rtl
+	python3 test/verify.py
+	python3 test/formal.py
+	python3 test/core_formal.py
+
+verify-formal: rtl
+	python3 test/formal.py
+	python3 test/core_formal.py
+
+verify-throughput: rtl
+	python3 test/fetch_throughput.py
+
+verify-fetch-performance: rtl platform
+	python3 test/fetch_performance.py --current-core result/rtl --current-platform "$(PLATFORM_OUTPUT)/design" --output "$(FETCH_PERFORMANCE_OUTPUT)" $(FETCH_PERFORMANCE_ARGS)
+
 verify-generic: rtl
 	python3 scripts/synthesize.py --rtl result/rtl --output "$(GENERIC_OUTPUT)/synthesis"
 	python3 test/generic_netlist.py --synthesis "$(GENERIC_OUTPUT)/synthesis" --output "$(GENERIC_OUTPUT)/execution"
+
+verify-compliance:
+	python3 -m unittest discover -s test -p 'test_*.py'
+	python3 -m unittest discover -s test/isa -p 'test_*.py'
+	reuse lint

@@ -21,10 +21,13 @@ Use a new `--output` directory for each run. Sources and versions are pinned in 
 | --- | --- |
 | `add`, `rv32i` | Default ADD test or the RV32I collection |
 | `rv32m`, `rv32c` | Enable M or C respectively |
+| `rv32zba`, `rv32zbb`, `rv32zbs`, `rv32b` | Enable the selected bit extension, or all three for `rv32b` |
 | `machine-exceptions`, `ecall` | Disable M and C |
 | `cebreak` | Enable C |
 
 For the ordinary adapter, keep `enableA`, `enableDebug`, `protectedMode` false.
+
+B tests skip the upstream assertion hook because its ANDN constant is incorrect. Signature and retirement checks remain enabled.
 
 ## AMO tests
 

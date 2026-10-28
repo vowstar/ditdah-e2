@@ -1,11 +1,17 @@
 # DitDah-E2
 
 DitDah-E2 is a three-stage RV32 processor for embedded control.
-The core executes RV32I, Zicsr, Zicntr and Zifencei with machine traps, interrupts, MRET and WFI.
-The optional M and C extensions add integer multiplication, division and compressed instructions.
-It uses separate instruction and data ports with ordered memory completion.
+It issues at most one instruction per cycle and preserves program order.
+The default configuration implements RV32IMC, Zicsr, Zicntr and Zifencei in machine mode.
+It includes precise traps, software, timer and external interrupts, counters, MRET and WFI.
 
-The default configuration is RV32IMC with Zicsr, Zicntr, Zifencei and machine interrupts.
+| Option | Default | Effect |
+| --- | --- | --- |
+| `enableM`, `enableC` | True | Integer multiplication and division, compressed instructions |
+| `protectedMode` | False | User mode, counter permissions and 16 PMP entries |
+| `enableDebug` | False | Synchronous DMI, halt, resume, single step and abstract register and memory access |
+| `enableZba`, `enableZbb`, `enableZbs` | False | Standard address, basic and single-bit operations |
+| `enableA` | False | Word atomics through an atomic memory interface |
 
 ## Build and verify
 
@@ -17,14 +23,21 @@ make verify-software
 nix build .#default --no-link
 ```
 
-The Nix lock pins the Zaozi and CIRCT toolchain. Nix reads Git-tracked files.
-
+The Nix lock pins Zaozi and CIRCT. Nix reads Git-tracked files.
 `python3 scripts/build_rtl.py --config input.json --output result/rtl` generates SystemVerilog.
-`resetVector` defaults to zero. The Boolean fields `enableM` and `enableC` default to true.
-The reset address must be word aligned, or halfword aligned when C is enabled.
+The JSON configuration accepts the options above and `resetVector`, which defaults to zero.
+The reset address must be halfword aligned with C enabled, otherwise word aligned.
 
-`make verify-software` builds a freestanding C program and checks its RTL execution, signature and completed console stores.
-`make verify-platform` runs a timer interrupt program on the core, memory router, AXI adapter and console hardware.
+`make PLATFORM_OUTPUT=result/platform-check verify-platform` executes a timer program through the AXI4-Lite adapter and console.
+`make CONFIG=input.json verify-debug` requires debug enabled and a zero reset address.
+`make CONFIG=input.json PLATFORM_OUTPUT=result/atomic-check verify-atomic` uses the shared SRAM platform with the default map and a zero reset address.
+Use this configuration for its complete program collection:
+
+```json
+{"enableA": true, "enableDebug": true, "protectedMode": true}
+```
+
+`DitDahE2Platform` requires A disabled. `DitDahE2AtomicPlatform` requires A enabled.
 
 Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
 Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`.
@@ -49,5 +62,4 @@ Project-authored files use the MIT license. `REUSE.toml` records file declaratio
 
 DitDah-E1 and DitDah-A1 provided project organization and development conventions.
 The Nix toolchain shares code with DitDah-E1.
-
 [Zaozi](https://github.com/xinpian-tech/zaozi) provides hardware description and pinned tools.
