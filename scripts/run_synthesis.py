@@ -29,7 +29,7 @@ MARKER = "E2_RESULT "
 METRICS = {
     "standard_cell_area_um2", "memory_area_um2", "other_macro_area_um2", "standard_cells",
     "memory_cells", "leaf_cells", "unmapped_cells", "registers", "clocked_registers",
-    "latches", "clocks", "period_ns", "output_load_pf", "floorplan_utilization_target",
+    "latches", "clocks", "propagated_clocks", "period_ns", "output_load_pf", "floorplan_utilization_target",
     "setup_worst_slack_ns", "setup_wns_ns", "setup_tns_ns", "setup_violating_paths",
     "hold_worst_slack_ns", "hold_wns_ns", "hold_tns_ns", "hold_violating_paths",
     "unconstrained_endpoints",
@@ -97,8 +97,18 @@ def relative_name(name):
     return path
 
 
+def technology_library_index(config, reference_count=None):
+    index = config.get("technology_library_index", 0)
+    if type(index) is not int or index < 0:
+        raise ValueError("Technology library index must be a nonnegative integer")
+    if reference_count is not None and index >= reference_count:
+        raise ValueError("Technology library index is outside the reference list")
+    return index
+
+
 def settings(values):
     result = dict(values)
+    result["technology_library_index"] = technology_library_index(result)
     for key, value in result.items():
         if key == "threads":
             if type(value) is not int or not 1 <= value <= 16:
@@ -110,6 +120,53 @@ def settings(values):
     return result
 
 
+def acceptance_binding(rtl, acceptance_path, manifest, acceptance):
+    if "profiles" not in acceptance:
+        if manifest.get("sourceHashes") != acceptance.get("sourceHashes"):
+            raise ValueError("Acceptance source hashes differ from the RTL manifest")
+        accepted = [row for row in acceptance.get("checks", [])
+                    if row.get("configuration") == rtl.parent.name]
+        if len(accepted) != 1:
+            raise ValueError("Verification evidence does not bind this RTL")
+        return (acceptance_path.parent / relative_name(acceptance["sourceSnapshot"]),
+                accepted[0].get("reportHash"))
+    profiles = acceptance["profiles"]
+    if not isinstance(profiles, list):
+        raise ValueError("Invalid acceptance profiles")
+    matches = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise ValueError("Invalid acceptance profile")
+        name = profile.get("name", "")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+            raise ValueError("Invalid acceptance profile name")
+        candidate = acceptance_path.parent / name / "result/rtl"
+        if candidate.resolve() == rtl.resolve():
+            matches.append(profile)
+    if (len(matches) != 1 or type(matches[0].get("exitStatus")) is not int
+            or matches[0]["exitStatus"] != 0
+            or not isinstance(matches[0].get("parameters"), dict)
+            or matches[0].get("parameters") != manifest.get("parameters")
+            or matches[0].get("rtlHashes") != manifest.get("rtlHashes")):
+        raise ValueError("Acceptance profile does not bind this RTL")
+    name = matches[0]["name"]
+    artifacts = acceptance.get("artifactHashes", {})
+    required = {name + "/source/" + path for path in manifest["sourceHashes"]}
+    required.update(name + "/result/rtl/" + path for path in manifest["rtlHashes"])
+    required.update(name + "/result/" + path for path in
+                    ("rtl/manifest.json", "rtl/filelist.f", "verification/summary.json"))
+    if not isinstance(artifacts, dict) or not required <= artifacts.keys():
+        raise ValueError("Acceptance profile is missing required artifacts")
+    for path, expected in artifacts.items():
+        relative = relative_name(path)
+        if relative.parts[0] == name:
+            source = acceptance_path.parent / relative
+            if source.is_symlink() or digest(source) != expected:
+                raise ValueError("Acceptance profile artifact changed")
+    return (acceptance_path.parent / name / "source",
+            artifacts[name + "/result/verification/summary.json"])
+
+
 def freeze(rtl, acceptance_path, output, budgets):
     manifest_path = rtl / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -117,9 +174,7 @@ def freeze(rtl, acceptance_path, output, budgets):
     if (type(manifest.get("exitStatus")) is not int or manifest["exitStatus"] != 0
             or type(acceptance.get("exitStatus")) is not int or acceptance["exitStatus"] != 0):
         raise ValueError("Successful generation and acceptance records are required")
-    if manifest.get("sourceHashes") != acceptance.get("sourceHashes"):
-        raise ValueError("Acceptance source hashes differ from the RTL manifest")
-    source_root = acceptance_path.parent / relative_name(acceptance["sourceSnapshot"])
+    source_root, accepted_report_hash = acceptance_binding(rtl, acceptance_path, manifest, acceptance)
     for name, expected in manifest["sourceHashes"].items():
         if digest(source_root / relative_name(name)) != expected:
             raise ValueError("Accepted source snapshot differs")
@@ -138,9 +193,7 @@ def freeze(rtl, acceptance_path, output, budgets):
             raise ValueError("RTL input digest differs")
     report_path = rtl.parent / "verification/summary.json"
     report = json.loads(report_path.read_text())
-    accepted = [row for row in acceptance.get("checks", [])
-                if row.get("configuration") == rtl.parent.name]
-    if (len(accepted) != 1 or accepted[0].get("reportHash") != digest(report_path)
+    if (accepted_report_hash != digest(report_path)
             or report.get("rtlManifestHash") != digest(manifest_path)
             or report.get("exitStatus") != 0):
         raise ValueError("Verification evidence does not bind this RTL")
@@ -199,7 +252,7 @@ def load_site():
 
 
 def run_transport(environment, body, extra_keys=()):
-    if set(extra_keys) - {"FM_MODULE", "E2_TIMING_DBS"}:
+    if set(extra_keys) - {"FM_MODULE", "E2_TIMING_DBS", "CALIBRE_MODULE"}:
         raise ValueError("Unsupported remote setting")
     exports = "\n".join("export " + key + "=" + shlex.quote(environment[key])
                         for key in SITE_KEYS + tuple(extra_keys))
@@ -317,6 +370,9 @@ def freeze_equivalence(source, run, threads, timeout):
     for name, expected in inputs.items():
         if digest(source / relative_name(name)) != expected:
             raise ValueError("Synthesis input changed")
+    for name, expected in outputs.items():
+        if digest(source / relative_name(name)) != expected:
+            raise ValueError("Mapping output changed")
     config = json.loads((source / "configuration.json").read_text())
     guidance = config.get("guidance_outputs", ["mapping.svf"])
     if (not isinstance(guidance, list) or not guidance
@@ -415,7 +471,7 @@ def checked_status(result):
 def log_result(log, exit_status, complete):
     parts = log.split("\nE2_SCRIPT_BEGIN\n", 1)
     startup, script = (parts[0], parts[1]) if len(parts) == 2 else (log, "")
-    errors = len(re.findall(r"^\s*Error:", script, re.M))
+    errors = len(re.findall(r"^\s*Error:", script, re.M | re.I))
     versions = re.findall(r"Version\s*:?\s*([A-Z]-20\d\d\.\d+(?:-SP\d+)?)", log)
     return {"exitStatus": exit_status, "scriptStarted": len(parts) == 2,
             "scriptCompleted": complete, "scriptErrors": errors,
@@ -458,7 +514,13 @@ def write_settings(path, config, threads):
     scalar_names = {"period_ns", "input_delay_ns", "output_delay_ns", "uncertainty_ns",
                     "input_transition_ns", "output_load_ff", "timeout_seconds"}
     lines = ["set " + key + " " + str(config[key]) for key in sorted(scalar_names)]
-    for key in ("top", "power_net", "ground_net"):
+    lines.append("set technology_library_index " + str(technology_library_index(config)))
+    if "hold_margin_ns" in config:
+        margin = config["hold_margin_ns"]
+        if type(margin) not in (int, float) or not math.isfinite(margin) or margin < 0:
+            raise ValueError("Invalid hold optimization margin")
+        lines.append("set hold_margin_ns " + str(margin))
+    for key in ("top", "power_net", "ground_net", "input_label", "output_label", "guidance_name"):
         if key in config:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config[key]):
                 raise ValueError("Invalid flow identifier")
@@ -467,12 +529,21 @@ def write_settings(path, config, threads):
     path.write_text("\n".join(lines) + "\n")
 
 
+def artifact_hashes(run):
+    paths = [path for directory in ("outputs", "reports")
+             for path in (run / directory).rglob("*") if path.is_file()]
+    if (run / "tool.log").is_file():
+        paths.append(run / "tool.log")
+    return {str(path.relative_to(run)): digest(path) for path in sorted(paths)}
+
+
 def execute_worker(tool_script="flow/synthesis.tcl"):
     if tool_script not in {"flow/synthesis.tcl", "flow/physical.tcl"}:
         raise ValueError("Unsupported tool script")
     run = Path.cwd()
     inputs = validate_bundle(run, allowed_extra=("supervisor.log",))
     config = json.loads((run / "configuration.json").read_text())
+    technology_library_index(config, len(os.environ["E2_NDM_LIBS"].splitlines()))
     memory = Path("/proc/meminfo").read_text()
     available = int(re.search(r"MemAvailable:\s+(\d+)", memory).group(1)) * 1024
     if available < 16 * 1024 ** 3:
@@ -516,8 +587,7 @@ def execute_worker(tool_script="flow/synthesis.tcl"):
                                         for item in libraries)
     result["flowSucceeded"] = (result["flowSucceeded"] and result["frozenInputsStable"]
                                and result["libraryInputsStable"])
-    outputs = {str(path.relative_to(run)): digest(path)
-               for path in sorted((run / "outputs").rglob("*")) if path.is_file()}
+    outputs = artifact_hashes(run)
     write_json(run / "output-manifest.json", outputs)
     result["mappedNetlistHash"] = outputs.get("outputs/mapped.v")
     result["constraintsHash"] = outputs.get("outputs/mapped.sdc")
@@ -622,8 +692,7 @@ def equivalence_worker():
                 and proof["passing"] is not None and proof["passing"] > 0
                 and all(proof[key] == 0 for key in ("failing", "aborted", "unverified", "blackBoxes")))
     result["mappedEquivalence"] = "passed" if accepted else "not established"
-    write_json(run / "output-manifest.json", {str(path.relative_to(run)): digest(path)
-               for path in sorted((run / "outputs").rglob("*")) if path.is_file()})
+    write_json(run / "output-manifest.json", artifact_hashes(run))
     write_json(run / "summary.json", result)
 
 
@@ -639,6 +708,8 @@ def main():
                           ("output-load-ff", 2.0), ("timeout-seconds", 3600.0)):
         prepare.add_argument("--" + name, type=float, default=default)
     prepare.add_argument("--threads", type=int, default=16)
+    prepare.add_argument("--technology-library-index", type=int, default=0,
+                         help="Technology source index in E2_NDM_LIBS (default: 0)")
     launch = commands.add_parser("submit")
     launch.add_argument("--bundle", type=Path, required=True)
     launch.add_argument("--name", required=True)

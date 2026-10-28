@@ -12,9 +12,10 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from run_synthesis import (SITE_KEYS, TransportFailure, checked_status, digest, freeze, freeze_equivalence,
+from run_synthesis import (SITE_KEYS, TransportFailure, artifact_hashes, checked_status, digest, freeze, freeze_equivalence,
                            log_result, read_metrics, read_proof,
-                           relative_name, remote, run_transport, settings, validate_bundle)
+                           relative_name, remote, run_transport, settings, technology_library_index,
+                           validate_bundle, write_settings)
 
 
 class SynthesisInputs(unittest.TestCase):
@@ -66,6 +67,56 @@ class SynthesisInputs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RTL input digest"):
             freeze(self.rtl, self.acceptance, self.root / "bundle", self.budgets)
 
+    def profile_evidence(self):
+        self.manifest["parameters"] = {}
+        self.evidence()
+        result = self.root / "default/result"
+        result.mkdir()
+        self.rtl.rename(result / "rtl")
+        self.rtl = result / "rtl"
+        (self.root / "default/verification").rename(result / "verification")
+        source = self.root / "default/source/design.scala"
+        source.parent.mkdir()
+        source.write_bytes(self.source.read_bytes())
+        (result / "formal.log").write_text("checked synthetic proof input\n")
+        self.acceptance.write_text(json.dumps({
+            "exitStatus": 0,
+            "profiles": [{"name": "default", "exitStatus": 0,
+                          "parameters": self.manifest.get("parameters"),
+                          "rtlHashes": self.manifest["rtlHashes"]}],
+            "artifactHashes": {str(path.relative_to(self.root)): digest(path)
+                               for path in (self.root / "default").rglob("*") if path.is_file()},
+        }))
+
+    def test_freeze_binds_profile_acceptance(self):
+        self.profile_evidence()
+        output = self.root / "bundle"
+        freeze(self.rtl, self.acceptance, output, self.budgets)
+        validate_bundle(output)
+        self.assertEqual(digest(output / "evidence/acceptance.json"), digest(self.acceptance))
+
+    def test_profile_rejects_changed_proof_artifact(self):
+        self.profile_evidence()
+        (self.root / "default/result/formal.log").write_text("changed proof input\n")
+        with self.assertRaisesRegex(ValueError, "artifact changed"):
+            freeze(self.rtl, self.acceptance, self.root / "bundle", self.budgets)
+
+    def test_profile_requires_source_in_artifact_manifest(self):
+        self.profile_evidence()
+        record = json.loads(self.acceptance.read_text())
+        del record["artifactHashes"]["default/source/design.scala"]
+        self.acceptance.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "missing required artifacts"):
+            freeze(self.rtl, self.acceptance, self.root / "bundle", self.budgets)
+
+    def test_profile_rejects_failed_gate(self):
+        self.profile_evidence()
+        record = json.loads(self.acceptance.read_text())
+        record["profiles"][0]["exitStatus"] = 1
+        self.acceptance.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            freeze(self.rtl, self.acceptance, self.root / "bundle", self.budgets)
+
     def mapping_fixture(self):
         source = self.root / "mapping"
         freeze(self.rtl, self.acceptance, source, self.budgets)
@@ -98,6 +149,43 @@ class SynthesisInputs(unittest.TestCase):
         destination.mkdir()
         with self.assertRaisesRegex(ValueError, "Mapping output changed"):
             freeze_equivalence(source, destination, 4, 60)
+
+    def test_equivalence_binds_reports_and_tool_log(self):
+        source = self.mapping_fixture()
+        (source / "reports").mkdir()
+        (source / "reports/timing-check.txt").write_text("Warnings: 2\n")
+        (source / "tool.log").write_text("recorded tool execution\n")
+        outputs = artifact_hashes(source)
+        self.assertEqual(set(outputs), {"outputs/mapped.v", "outputs/mapped.sdc", "outputs/mapping.svf",
+                                       "reports/timing-check.txt", "tool.log"})
+        (source / "output-manifest.json").write_text(json.dumps(outputs))
+        model = self.root / "model.db"
+        model.write_text("synthetic model\n")
+        destination = self.root / "proof"
+        destination.mkdir()
+        with patch.dict(os.environ, {"E2_TIMING_DBS": str(model)}):
+            freeze_equivalence(source, destination, 4, 60)
+        frozen = json.loads((destination / "evidence/synthesis-outputs.json").read_text())
+        self.assertEqual(frozen, outputs)
+        validate_bundle(destination)
+
+    def test_equivalence_rejects_changed_bound_reports_and_log(self):
+        source = self.mapping_fixture()
+        (source / "reports").mkdir()
+        files = ("reports/timing-check.txt", "tool.log")
+        for name in files:
+            (source / name).write_text("original\n")
+        (source / "output-manifest.json").write_text(json.dumps(artifact_hashes(source)))
+        model = self.root / "model.db"
+        model.write_text("synthetic model\n")
+        for name in files:
+            with self.subTest(name=name):
+                (source / name).write_text("changed\n")
+                destination = self.root / ("proof-" + name.replace("/", "-"))
+                with patch.dict(os.environ, {"E2_TIMING_DBS": str(model)}):
+                    with self.assertRaisesRegex(ValueError, "Mapping output changed"):
+                        freeze_equivalence(source, destination, 4, 60)
+                (source / name).write_text("original\n")
 
     def test_equivalence_rejects_failed_mapping(self):
         source = self.mapping_fixture()
@@ -183,6 +271,58 @@ class SynthesisInputs(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 settings(dict(self.budgets, **{key: value}))
 
+    def technology_probe(self, index):
+        bundle = self.root / "technology-bundle"
+        freeze(self.rtl, self.acceptance, bundle,
+               dict(self.budgets, technology_library_index=index))
+        config = json.loads((bundle / "configuration.json").read_text())
+        write_settings(bundle / "settings.tcl", config, 1)
+        (bundle / "reports").mkdir()
+        probe = bundle / "probe.tcl"
+        probe.write_text("""proc set_host_options {args} {}
+proc create_lib {args} {
+    set position [lsearch -exact $args -use_technology_lib]
+    set output [open selected-technology.txt w]
+    puts $output [lindex $args [expr {$position + 1}]]
+    close $output
+    error {binding probe complete}
+}
+source flow/synthesis.tcl
+""")
+        result = subprocess.run(["tclsh", str(probe)], cwd=bundle,
+                                env=dict(os.environ, E2_NDM_LIBS="cells.ndm\ntechnology.ndm"),
+                                capture_output=True, text=True)
+        return bundle, config, result
+
+    def test_freezes_and_selects_nonfirst_technology_library(self):
+        bundle, config, result = self.technology_probe(1)
+        self.assertEqual(config["technology_library_index"], 1)
+        self.assertEqual((bundle / "selected-technology.txt").read_text(), "technology.ndm\n")
+        self.assertEqual((bundle / "reports/flow-error.txt").read_text().splitlines()[0],
+                         "binding probe complete")
+        self.assertEqual(result.returncode, 1)
+
+    def test_rejects_technology_index_outside_site_references(self):
+        bundle, _, result = self.technology_probe(2)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((bundle / "selected-technology.txt").exists())
+        self.assertEqual((bundle / "reports/flow-error.txt").read_text().splitlines()[0],
+                         "Technology library index is outside the reference list")
+
+    def test_legacy_configuration_selects_first_technology_library(self):
+        self.assertEqual(technology_library_index(self.budgets, 2), 0)
+        write_settings(self.root / "legacy-settings.tcl",
+                       dict(self.budgets, rtl_files=["Core.sv"]), 1)
+        self.assertIn("set technology_library_index 0\n",
+                      (self.root / "legacy-settings.tcl").read_text())
+
+    def test_rejects_invalid_technology_index(self):
+        for value in (-1, True, 1.5, "1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                settings(dict(self.budgets, technology_library_index=value))
+        with self.assertRaises(ValueError):
+            technology_library_index({"technology_library_index": 0}, 0)
+
     def test_reject_path_escape(self):
         for name in ("../file", "/file", "a/../../file", "a\nfile", None):
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -216,6 +356,23 @@ class SynthesisInputs(unittest.TestCase):
         report.write_text("site_detail\tunused\n")
         with self.assertRaisesRegex(ValueError, "Unexpected report field"):
             read_metrics(report)
+
+    def test_physical_module_is_forwarded_only_when_requested(self):
+        environment = {key: "unused" for key in SITE_KEYS}
+        environment.update(EDA_SSH_TARGET="unused", CALIBRE_MODULE="synthetic-module")
+        body = "python3 - <<'PYTHON'\nimport json, os\n"
+        body += "print('E2_RESULT ' + json.dumps({'physical': os.environ.get('CALIBRE_MODULE')}))\nPYTHON\n"
+        execute = subprocess.run
+
+        def shell(command, **arguments):
+            self.assertEqual(command[0], "ssh")
+            arguments["env"] = {"PATH": os.environ["PATH"]}
+            return execute(["bash", "-s"], **arguments)
+
+        with patch("run_synthesis.subprocess.run", side_effect=shell):
+            self.assertEqual(remote(environment, body), {"physical": None})
+            self.assertEqual(remote(environment, body, extra_keys=("CALIBRE_MODULE",)),
+                             {"physical": "synthetic-module"})
 
     def test_timing_coverage_needs_zero_errors_and_warnings(self):
         report = self.root / "metrics.tsv"
@@ -293,10 +450,13 @@ class SynthesisEvidence(unittest.TestCase):
         self.assertEqual(read_proof("", report + "e empty_cell\n", 1, "module Core(); endmodule")["unusedLibraryModels"], 2)
 
     def test_tool_exit_does_not_hide_script_errors(self):
-        record = log_result("banner\nE2_SCRIPT_BEGIN\nError: failed (CMD-001)\n", 0, True)
-        self.assertEqual(record["scriptErrors"], 1)
-        self.assertEqual(record["messageCodes"], ["CMD-001"])
-        self.assertFalse(record["cleanAcceptance"])
+        for prefix in ("Error", "ERROR", "error"):
+            with self.subTest(prefix=prefix):
+                record = log_result("banner\nE2_SCRIPT_BEGIN\n" + prefix + ": failed (CMD-001)\n", 0, True)
+                self.assertEqual(record["scriptErrors"], 1)
+                self.assertEqual(record["messageCodes"], ["CMD-001"])
+                self.assertFalse(record["flowSucceeded"])
+                self.assertFalse(record["cleanAcceptance"])
 
     def test_startup_expiration_is_separate(self):
         record = log_result("This script has expired\nE2_SCRIPT_BEGIN\ncomplete\n", 0, True)

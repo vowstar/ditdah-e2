@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 # SPDX-License-Identifier: MIT
-"""Place a proven mapped checkpoint and construct its clock tree."""
+"""Place a proven mapping and insert its clock tree."""
 
 import argparse
 import base64
@@ -33,11 +33,14 @@ def run_name(receipt, tool):
     return value
 
 
-def validate_limits(period, threads, timeout, power_net, ground_net):
+def validate_limits(period, threads, timeout, power_net, ground_net, hold_margin=0.0):
     if (type(threads) is not int or not 1 <= threads <= 16
             or type(period) not in (int, float) or not math.isfinite(period) or period <= 0
             or type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 86400):
         raise ValueError("Invalid physical run budget")
+    if (type(hold_margin) not in (int, float) or not math.isfinite(hold_margin)
+            or hold_margin < 0 or hold_margin >= period):
+        raise ValueError("Invalid hold margin")
     if power_net == ground_net or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
                                       for name in (power_net, ground_net)):
         raise ValueError("Invalid supply net names")
@@ -50,8 +53,8 @@ def check_files(root, manifest):
             raise ValueError("Frozen source changed")
 
 
-def freeze_physical(source, proof, run, period, threads, timeout, power_net, ground_net):
-    validate_limits(period, threads, timeout, power_net, ground_net)
+def freeze_physical(source, proof, run, period, threads, timeout, power_net, ground_net, hold_margin=0.0):
+    validate_limits(period, threads, timeout, power_net, ground_net, hold_margin)
     synthesis = json.loads((source / "summary.json").read_text())
     verification = json.loads((proof / "summary.json").read_text())
     points = verification.get("proof", {})
@@ -69,7 +72,9 @@ def freeze_physical(source, proof, run, period, threads, timeout, power_net, gro
     check_files(proof, json.loads((proof / "inputs.json").read_text()))
     check_files(proof, json.loads((proof / "output-manifest.json").read_text()))
     if (verification.get("mappedNetlistHash") != digest(source / "outputs/mapped.v")
+            or verification.get("constraintsHash") != digest(source / "outputs/mapped.sdc")
             or digest(proof / "evidence/synthesis-inputs.json") != digest(source / "inputs.json")
+            or digest(proof / "evidence/synthesis-outputs.json") != digest(source / "output-manifest.json")
             or (proof / "outputs/result.txt").read_text().strip() != "1"):
         raise ValueError("Proof does not bind this mapping")
     libraries = json.loads((source / "library-inputs.json").read_text())
@@ -77,22 +82,43 @@ def freeze_physical(source, proof, run, period, threads, timeout, power_net, gro
         raise ValueError("Selected library inputs changed")
     checkpoint_files = {name: value for name, value in source_outputs.items()
                         if name.startswith("outputs/design.ndm/")}
-    if not checkpoint_files:
+    actual_checkpoint = {str(path.relative_to(source))
+                         for path in (source / "outputs/design.ndm").rglob("*")
+                         if path.is_file()}
+    if not checkpoint_files or actual_checkpoint != set(checkpoint_files):
         raise ValueError("A saved mapped checkpoint is required")
+    config = json.loads((source / "configuration.json").read_text())
+    input_label = (source / "outputs/complete").read_text().strip()
+    if input_label != "logic_opto":
+        raise ValueError("Clock optimization requires a mapping checkpoint and cannot be repeated")
+    if hold_margin and re.search(r"(?m)^\s*set_path_margin\s", (source / "outputs/mapped.sdc").read_text()):
+        raise ValueError("Existing path margins require an explicit preservation plan")
+    guidance = config.get("guidance_outputs", ["mapping.svf"])
+    if (not isinstance(guidance, list) or not guidance
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*\.svf", name) for name in guidance)
+            or len(guidance) != len(set(guidance))):
+        raise ValueError("Invalid guidance sequence")
+    if verification.get("guidanceHashes") != [digest(source / "outputs" / name) for name in guidance]:
+        raise ValueError("Proof guidance does not bind this checkpoint")
+    guidance_name = "physical"
+    if guidance_name + ".svf" in guidance:
+        raise ValueError("Guidance output already exists")
+    output_label = "clock_opt"
     for directory in ("rtl", "evidence"):
         shutil.copytree(source / directory, run / directory)
     shutil.copytree(source / "outputs/design.ndm", run / "checkpoint/design.ndm")
-    shutil.copyfile(source / "outputs/mapping.svf", run / "checkpoint/mapping.svf")
+    for name in guidance:
+        shutil.copyfile(source / "outputs" / name, run / "checkpoint" / name)
     for parent, name, target in ((source, "summary.json", "mapping-result.json"),
                                  (source, "inputs.json", "mapping-inputs.json"),
                                  (source, "output-manifest.json", "mapping-outputs.json"),
                                  (proof, "summary.json", "mapping-equivalence.json")):
         shutil.copyfile(parent / name, run / "evidence" / target)
     shutil.copyfile(source / "flow/synthesis_constraints.tcl", run / "flow/synthesis_constraints.tcl")
-    config = json.loads((source / "configuration.json").read_text())
     config.update(period_ns=period, threads=threads, timeout_seconds=timeout,
                   power_net=power_net, ground_net=ground_net,
-                  guidance_outputs=["mapping.svf", "physical.svf"])
+                  hold_margin_ns=hold_margin, input_label=input_label, output_label=output_label,
+                  guidance_name=guidance_name, guidance_outputs=guidance + [guidance_name + ".svf"])
     write_json(run / "configuration.json", config)
     write_json(run / "source-binding.json", {
         "mappedNetlistHash": verification["mappedNetlistHash"],
@@ -105,8 +131,8 @@ def freeze_physical(source, proof, run, period, threads, timeout, power_net, gro
 
 
 def submit(source_receipt, proof_receipt, name, output, period, threads, timeout,
-           power_net, ground_net):
-    validate_limits(period, threads, timeout, power_net, ground_net)
+           power_net, ground_net, hold_margin=0.0):
+    validate_limits(period, threads, timeout, power_net, ground_net, hold_margin)
     source = run_name(source_receipt, "fc")
     proof = run_name(proof_receipt, "fm")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", name):
@@ -130,7 +156,7 @@ def submit(source_receipt, proof_receipt, name, output, period, threads, timeout
     body += "sys.path.insert(0, str(run))\nfrom run_physical import freeze_physical\n"
     body += "freeze_physical(Path(os.environ['EDA_WORK_ROOT']) / " + repr(source)
     body += ", Path(os.environ['EDA_WORK_ROOT']) / " + repr(proof)
-    body += ", run, " + ", ".join(repr(value) for value in (period, threads, timeout, power_net, ground_net)) + ")\n"
+    body += ", run, " + ", ".join(repr(value) for value in (period, threads, timeout, power_net, ground_net, hold_margin)) + ")\n"
     body += "log = (run / 'supervisor.log').open('w')\n"
     body += "process = subprocess.Popen(['python3', 'run_physical.py', 'worker'], cwd=str(run), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)\n"
     body += "print('E2_RESULT ' + json.dumps({'relativeRun': relative, 'supervisorPid': process.pid}))\nE2_PYTHON\n"
@@ -146,7 +172,7 @@ def submit(source_receipt, proof_receipt, name, output, period, threads, timeout
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
     launch = commands.add_parser("submit")
     launch.add_argument("--source", type=Path, required=True)
     launch.add_argument("--proof", type=Path, required=True)
@@ -157,10 +183,13 @@ def main():
     launch.add_argument("--timeout-seconds", type=float, default=3600.0)
     launch.add_argument("--power-net", default="VDD")
     launch.add_argument("--ground-net", default="VSS")
+    launch.add_argument("--hold-margin-ns", type=float, default=0.0)
     query = commands.add_parser("status")
     query.add_argument("--receipt", type=Path, required=True)
     commands.add_parser("worker")
     args = parser.parse_args()
+    if args.command is None:
+        parser.error("A command is required")
     if args.command == "worker":
         worker(lambda: execute_worker("flow/physical.tcl"))
         return
@@ -168,7 +197,7 @@ def main():
         result = status(args.receipt)
     else:
         result = submit(args.source, args.proof, args.name, args.output, args.period_ns,
-                        args.threads, args.timeout_seconds, args.power_net, args.ground_net)
+                        args.threads, args.timeout_seconds, args.power_net, args.ground_net, args.hold_margin_ns)
     print(json.dumps(result, indent=2))
 
 

@@ -8,7 +8,13 @@ proc run_synthesis {} {
     puts E2_SCRIPT_BEGIN
     set_host_options -max_cores $threads
     set references [split $::env(E2_NDM_LIBS) "\n"]
-    create_lib -ref_libs $references -use_technology_lib [lindex $references 0] outputs/design.ndm
+    if {![info exists technology_library_index]} {
+        set technology_library_index 0
+    }
+    if {$technology_library_index < 0 || $technology_library_index >= [llength $references]} {
+        error "Technology library index is outside the reference list"
+    }
+    create_lib -ref_libs $references -use_technology_lib [lindex $references $technology_library_index] outputs/design.ndm
     set_svf outputs/mapping.svf
     set sources {}
     foreach name $rtl_files {
@@ -29,6 +35,9 @@ proc run_synthesis {} {
     read_parasitic_tech -name estimated_rc -tlup $::env(E2_RC_FILE) -sanity_check advanced
     set_parasitic_parameters -corners [get_corners typical] -early_spec estimated_rc -late_spec estimated_rc
     source flow/synthesis_constraints.tcl
+    # IO delays reference the clock input boundary.
+    set_latency_adjustment_options -exclude_clocks [get_clocks core_clock]
+    set_clock_latency 0.0 [get_clocks core_clock]
     set_dont_retime [all_registers -cells] true
     redirect -file reports/units.txt {report_units}
     redirect -variable unit_text {report_units}
@@ -52,8 +61,12 @@ proc run_synthesis {} {
     redirect -file reports/scenarios.txt {report_scenarios}
     redirect -file reports/pvt.txt {report_pvt}
     write_metrics reports/metrics.tsv $period_ns $output_load_ff
-    save_block -label logic_opto
-    save_lib [current_lib]
+    if {[save_block -label logic_opto] ne "1"} {
+        error "Mapping checkpoint save failed"
+    }
+    if {[save_lib [current_lib]] ne "1"} {
+        error "Mapping library save failed"
+    }
     write_verilog -hierarchy design outputs/mapped.v
     write_sdc -output outputs/mapped.sdc
     set_svf -off
