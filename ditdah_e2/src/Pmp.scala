@@ -18,18 +18,24 @@ object Pmp extends Generator[Parameters, UnitLayers, PmpIO, UnitProbe]:
     val addresses = Seq.fill(16)(RegInit(0.U(30)))
     io.implemented := false.B
     io.readData := 0.U(32)
+    io.writeMask := 0.U(32)
+    io.writtenData := 0.U(32)
     for group <- 0 until 4 do
       when(io.address === (0x3a0 + group).U(12)) {
         io.implemented := true.B
         io.readData := (configs(group * 4 + 3).asBits ## configs(group * 4 + 2).asBits ##
           configs(group * 4 + 1).asBits ## configs(group * 4).asBits).asUInt
-        for lane <- 0 until 4 do
+        val written = (0 until 4).map { lane =>
           val index = group * 4 + lane
           val value = io.writeData.asBits.bits(lane * 8 + 7, lane * 8)
-          when(io.commitWrite & !configs(index).asBits.bit(7)) {
-            configs(index) := (value.bit(7).asBits ## 0.B(2) ## value.bits(4, 2) ##
-              (value.bit(1) & value.bit(0)).asBits ## value.bit(0).asBits).asUInt
-          }
+          val stored = (value.bit(7).asBits ## 0.B(2) ## value.bits(4, 2) ##
+            (value.bit(1) & value.bit(0)).asBits ## value.bit(0).asBits).asUInt
+          val enabled = io.commitWrite & !configs(index).asBits.bit(7)
+          when(enabled) { configs(index) := stored }
+          (enabled.?(0x9f.B(8), 0.B(8)), enabled.?(stored, configs(index)).asBits)
+        }
+        io.writeMask := written.reverse.map(_._1).reduce(_ ## _).asUInt
+        io.writtenData := written.reverse.map(_._2).reduce(_ ## _).asUInt
       }
     for index <- 0 until 16 do
       val nextTorLock = if index == 15 then false.B else
@@ -37,8 +43,11 @@ object Pmp extends Generator[Parameters, UnitLayers, PmpIO, UnitProbe]:
       when(io.address === (0x3b0 + index).U(12)) {
         io.implemented := true.B
         io.readData := (0.B(2) ## addresses(index).asBits).asUInt
+        io.writtenData := io.readData
         when(io.commitWrite & !configs(index).asBits.bit(7) & !nextTorLock) {
           addresses(index) := io.writeData.asBits.bits(29, 0).asUInt
+          io.writeMask := 0x3fffffff.U(32)
+          io.writtenData := (0.B(2) ## io.writeData.asBits.bits(29, 0)).asUInt
         }
       }
 

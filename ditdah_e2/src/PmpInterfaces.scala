@@ -19,6 +19,8 @@ class PmpIO(p: Parameters) extends HWBundle(p):
   val reset = Flipped(Reset())
   val address = Flipped(UInt(12))
   val readData = Aligned(UInt(32))
+  val writeMask = Aligned(UInt(32))
+  val writtenData = Aligned(UInt(32))
   val implemented = Aligned(Bool())
   val commitWrite = Flipped(Bool())
   val writeData = Flipped(UInt(32))

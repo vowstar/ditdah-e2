@@ -43,7 +43,29 @@ module debug_core_formal #(parameter TARGET = 0)(input clock);
   wire [1:0] dmi_response_bits_status;
   wire observed_halted, observed_resume, observed_step;
   wire [31:0] observed_dpc;
-  DitDahE2 dut (.*);
+  DitDahE2 dut (
+    .retire_order(), .retire_length(), .retire_insn(),
+    .retire_intr(), .retire_rs1(), .retire_rs1Data(),
+    .retire_rs2(), .retire_rs2Data(), .retire_memoryReadMask(),
+    .retire_memoryReadData(), .retire_memoryOperation(), .retire_memoryResponse(),
+    .retire_memoryFault(), .retire_faultReadMask(), .retire_misa(),
+    .retire_csr_valid(), .retire_csr_address(), .retire_csr_readMask(),
+    .retire_csrCycle_before(), .interrupt_csrMstatus_before(),
+    .retire_memoryAddress(), .retire_memoryWriteMask(), .retire_memoryWriteData(),
+    .retire_memoryOperand(), .retire_faultWriteMask(), .retire_csr_writeMask(),
+    .retire_csr_readData(), .retire_csr_writeData(), .retire_csrMstatus_before(),
+    .retire_csrMstatus_after(), .retire_csrMstatus_writeMask(), .retire_csrMepc_before(),
+    .retire_csrMepc_after(), .retire_csrMepc_writeMask(), .retire_csrMcause_before(),
+    .retire_csrMcause_after(), .retire_csrMcause_writeMask(), .retire_csrMtval_before(),
+    .retire_csrMtval_after(), .retire_csrMtval_writeMask(), .retire_csrCycle_after(),
+    .retire_csrCycle_writeMask(), .retire_csrInstret_before(), .retire_csrInstret_after(),
+    .retire_csrInstret_writeMask(), .retire_csrTime(), .interrupt_userMode(),
+    .interrupt_csrMstatus_after(), .interrupt_csrMstatus_writeMask(), .interrupt_csrMepc_before(),
+    .interrupt_csrMepc_after(), .interrupt_csrMepc_writeMask(), .interrupt_csrMcause_before(),
+    .interrupt_csrMcause_after(), .interrupt_csrMcause_writeMask(), .interrupt_csrMtval_before(),
+    .interrupt_csrMtval_after(), .interrupt_csrMtval_writeMask(),
+    .*
+  );
 
   function [31:0] rom(input [31:0] address);
     case (address)

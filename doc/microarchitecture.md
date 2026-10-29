@@ -29,6 +29,7 @@ Cold reset is synchronous and active high. Apply it only with no offered or outs
 It clears integer registers and protocol state. Core reset does not initialize memory contents.
 
 FENCE.I drains fetch and restarts at its saved next PC.
+Compressed HINTs execute their ordinary expansion and preserve architectural register values.
 
 Permission faults prevent external issue.
 
@@ -75,5 +76,11 @@ Warm reset drains Core and debug transfers before resetting the hart. The debug 
 Already accepted competitor transactions complete across warm reset.
 
 The retirement port reports completed instructions and synchronous exceptions.
+Its order starts at zero after reset and increments for each valid event.
+It includes source values, aligned memory lanes, explicit CSR access and CSR state before and after the instruction.
+Counter after values contain only explicit instruction writes and otherwise equal their before values.
+The handler marker identifies the first instruction after a synchronous trap or interrupt entry.
+AMO write data is the request operand. Check the actual SRAM write at the atomic endpoint.
 Debug EBREAK emits no retirement event.
 A separate interrupt event carries the interrupted PC, target and cause.
+It also carries privilege and trap CSR state before and after entry.

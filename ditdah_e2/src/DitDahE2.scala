@@ -13,6 +13,8 @@ private class PipelineReset extends Bundle:
 @generator
 object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   override def moduleName(p: Parameters): String = "DitDahE2"
+  // Keep retirement observation below the JVM method-size limit.
+  private def observeRetirement(body: () => Unit): Unit = body()
   def architecture(p: Parameters) =
     val io = summon[Interface[CoreIO]]
     given ClockScope = ClockScope.posedge(io.clock)
@@ -78,6 +80,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val architecturalPc = RegInit(BigInt(p.resetVector).U(32))
     val sleeping = RegInit(false.B)
     val registers = Seq.fill(31)(RegInit(0.U(32)))
+    val retirementOrder = RegInit(0.U(64))
+    val handlerPending = RegInit(false.B)
 
     val localWake = csr.io.interruptPending =/= 0.U(12)
     val eligibleInterrupt = localWake & csr.io.interruptsEnabled & !debugStop & !debugStep
@@ -135,10 +139,15 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.io.tval := interrupt.?(0.U(32), finalTval)
     csr.io.mret := returning
     csr.io.retire := complete & !failed & !debugBreakpoint
-    io.interrupt.valid := interrupt
+    io.interrupt.valid := interrupt & !coreReset.asBool
     io.interrupt.pc := architecturalPc
     io.interrupt.target := csr.io.trapTarget
     io.interrupt.cause := interruptCause
+    io.interrupt.userMode := csr.io.userMode
+    io.interrupt.csrMstatus :<= csr.io.statusTrace
+    io.interrupt.csrMepc :<= csr.io.epcTrace
+    io.interrupt.csrMcause :<= csr.io.causeTrace
+    io.interrupt.csrMtval :<= csr.io.valueTrace
     io.sleeping := sleeping
     val loaded = (programData.response.bits.data >> shift).asBits
     val loadValue = Wire(UInt(32))
@@ -150,17 +159,64 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       loadValue := ((loaded.bit(15) & !m.unsignedLoad).?(0xffff.B(16), 0.B(16)) ## loaded.bits(15, 0)).asUInt
     }
     val writeback = m.csr.?(csr.io.readData, m.load.?(loadValue, m.value))
-    io.retire.valid := complete & !debugBreakpoint
+    io.retire.valid := complete & !debugBreakpoint & !coreReset.asBool
     io.retire.userMode := m.userMode
     io.retire.pc := m.instruction.pc
     io.retire.word := m.instruction.word
     io.retire.nextPc := failed.?(csr.io.trapTarget, m.mret.?(csr.io.returnPc, m.nextPc))
-    io.retire.rd := m.rd
-    io.retire.writes := complete & !failed & m.writes & (m.rd =/= 0.U(5))
+    io.retire.rd := io.retire.writes.?(m.rd, 0.U(5))
+    io.retire.writes := io.retire.valid & !failed & m.writes & (m.rd =/= 0.U(5))
     io.retire.value := io.retire.writes.?(writeback, 0.U(32))
     io.retire.trap := trap
     io.retire.cause := finalCause
     io.retire.tval := finalTval
+    observeRetirement(() => {
+      io.retire.order := retirementOrder
+      io.retire.length := m.instruction.length
+      io.retire.insn := m.instruction.fault.?(0.U(32),
+        (m.instruction.length === 2.U(3)).?((0.B(16) ## m.instruction.word.asBits.bits(15, 0)).asUInt, m.instruction.word))
+      io.retire.intr := handlerPending
+      io.retire.rs1 := m.rs1
+      io.retire.rs1Data := m.rs1Data
+      io.retire.rs2 := m.rs2
+      io.retire.rs2Data := m.rs2Data
+      val accessFault = trap & ((finalCause === 1.U(32)) | (finalCause === 5.U(32)) | (finalCause === 7.U(32)))
+      val fetchFault = trap & (finalCause === 1.U(32))
+      val accessMask = (mask << lane).asBits.bits(3, 0).asUInt
+      val conditionalStore = m.atomicOperation === 2.U(4)
+      val atomicModify = m.atomicOperation >= 3.U(4)
+      val successfulStore = m.store & !failed & (!conditionalStore | (programData.response.bits.data === 0.U(32)))
+      io.retire.memoryAddress := (memory & !m.instruction.fault).?((m.address.asBits.bits(31, 2) ## 0.B(2)).asUInt, 0.U(32))
+      io.retire.memoryReadMask := (memory & m.load & !conditionalStore & !failed).?(accessMask, 0.U(4))
+      io.retire.memoryWriteMask := (successfulStore & !atomicModify).?(accessMask, 0.U(4))
+      io.retire.memoryReadData := (io.retire.memoryReadMask =/= 0.U(4)).?(programData.response.bits.data, 0.U(32))
+      io.retire.memoryWriteData := (memory & m.store & !failed).?(programData.request.bits.data, 0.U(32))
+      io.retire.memoryOperation := (memory & !m.instruction.fault).?(m.atomicOperation, 0.U(4))
+      io.retire.memoryResponse := response.?(programData.response.bits.data, 0.U(32))
+      io.retire.memoryOperand := (memory & !m.instruction.fault & (m.atomicOperation =/= 0.U(4))).?(m.storeData, 0.U(32))
+      io.retire.memoryFault := accessFault
+      io.retire.faultReadMask := (accessFault & !fetchFault & m.load & !conditionalStore).?(accessMask, 0.U(4))
+      io.retire.faultWriteMask := (accessFault & !fetchFault & m.store).?(accessMask, 0.U(4))
+      io.retire.misa := csr.io.misa
+      io.retire.csr.valid := m.csr & !failed
+      io.retire.csr.address := m.csrAddress
+      io.retire.csr.readMask := (m.csr & m.csrRead & !failed).?(0xffffffffL.U(32), 0.U(32))
+      io.retire.csr.writeMask := (m.csr & !failed).?(csr.io.writeMask, 0.U(32))
+      io.retire.csr.readData := csr.io.readData
+      io.retire.csr.writeData := csr.io.writtenData
+      io.retire.csrMstatus :<= csr.io.statusTrace
+      io.retire.csrMepc :<= csr.io.epcTrace
+      io.retire.csrMcause :<= csr.io.causeTrace
+      io.retire.csrMtval :<= csr.io.valueTrace
+      io.retire.csrCycle :<= csr.io.cycleTrace
+      io.retire.csrInstret :<= csr.io.instretTrace
+      io.retire.csrTime := io.timeValue
+      when(io.retire.valid) {
+        retirementOrder := (retirementOrder + 1.U(64)).asBits.bits(63, 0).asUInt
+        handlerPending := false.B
+      }
+      when(trap | interrupt) { handlerPending := true.B }
+    })
     when(complete & !debugBreakpoint) { architecturalPc := io.retire.nextPc }
     when(debugResume) { architecturalPc := debugResumePc }
     when(interrupt) { architecturalPc := csr.io.trapTarget }
@@ -355,6 +411,10 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       mValid := true.B
       sent := false.B
       m.instruction :<= x
+      m.rs1 := (use1 & legal & !x.fault).?(rs1, 0.U(5))
+      m.rs1Data := (use1 & legal & !x.fault).?(a, 0.U(32))
+      m.rs2 := (use2 & legal & !x.fault).?(rs2, 0.U(5))
+      m.rs2Data := (use2 & legal & !x.fault).?(b, 0.U(32))
       m.userMode := xUser
       m.debugBreak := isDebugBreak
       m.nextPc := jump.?(target, sequential)
@@ -373,6 +433,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.csrOperation := funct3.bits(1, 0).asUInt
       m.csrOperand := funct3.bit(2).?((0.B(27) ## bits.bits(19, 15)).asUInt, a)
       m.csrWrite := (funct3.bits(1, 0) === 1.B(2)) | (rs1 =/= 0.U(5))
+      m.csrRead := isCsr & ((funct3.bits(1, 0) =/= 1.B(2)) | (bits.bits(11, 7) =/= 0.B(5)))
       m.mret := isMret
       m.wfi := isWfi
       m.fenceI := isFenceI

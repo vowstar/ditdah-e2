@@ -64,10 +64,21 @@ class BitCoreTests(unittest.TestCase):
 
     def test_forwarding_mutation_uses_the_actual_register_array(self):
         for name in ("_GEN", "_GEN_0", "register_values"):
-            source = f"wire [31:0] b = match2 & ~m_load ? m_value : {name}[bits[24:20]];\n.b(b), .valid(_bit_valid)"
-            changed = mutate(source, "forwarding")
-            self.assertIn(f".b({name}[bits[24:20]]), .valid(_bit_valid)", changed)
-            self.assertIn("match2 & ~m_load ? m_value", changed)
+            for instruction in ("bits", "x_word"):
+                source = f"wire [31:0] b = match2 & ~m_load ? m_value : {name}[{instruction}[24:20]];\n.b(b), .valid(_bit_valid)"
+                changed = mutate(source, "forwarding")
+                self.assertIn(f".b({name}[{instruction}[24:20]]), .valid(_bit_valid)", changed)
+                self.assertIn("match2 & ~m_load ? m_value", changed)
+
+    def test_interlock_mutation_follows_the_actual_dependency(self):
+        direct = "wire match2 = producer & _bit_usesRs2 & match;"
+        indirect = "wire use2_0 = ordinary | _bit_usesRs2;\nwire match2 = producer & use2_0 & match;"
+        for source in (direct, indirect):
+            changed = mutate(source, "load_interlock")
+            self.assertNotIn("_bit_usesRs2", changed)
+            self.assertIn("1'b0", changed)
+        with self.assertRaisesRegex(AssertionError, "detached"):
+            mutate("wire unused = _bit_usesRs2;\nwire match2 = producer & other;", "load_interlock")
 
     def test_bit_options_and_misa(self):
         for subset in range(8):

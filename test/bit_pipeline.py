@@ -10,15 +10,18 @@ import subprocess
 
 def mutate(text, kind):
     if kind == "forwarding":
-        source = re.findall(r'wire\s+\[31:0\]\s+b\s*=\s*match2\s*&\s*~m_load\s*\?\s*m_value\s*:\s*(\w+\[bits\[24:20\]\]);', text)
+        source = re.findall(r'wire\s+\[31:0\]\s+b\s*=\s*match2\s*&\s*~m_load\s*\?\s*m_value\s*:\s*(\w+\[(?:bits|x_word)\[24:20\]\]);', text)
         assert len(source) == 1, "Changed bit operand register selection"
         pattern = r'(\.b\s*\()b(\),\s*\.valid\s*\(_bit_valid\))'
         changed, count = re.subn(pattern, lambda match: match[1] + source[0] + match[2], text)
     elif kind == "load_interlock":
-        pattern = r'(wire\s+match2\s*=.*?)(?=;)'
-        matches = list(re.finditer(pattern, text, re.S))
-        assert len(matches) == 1 and matches[0].group().count('_bit_usesRs2') == 1, "Changed bit dependency structure"
-        matched = matches[0]
+        matches = list(re.finditer(r'wire\s+match2\s*=\s*([^;]+);', text))
+        assert len(matches) == 1, "Changed bit dependency structure"
+        dependencies = list(re.finditer(r'wire\s+(\w+)\s*=\s*([^;]*\b_bit_usesRs2\b[^;]*);', text))
+        assert len(dependencies) == 1, "Changed bit dependency structure"
+        matched = dependencies[0]
+        assert matched[1] == 'match2' or re.search(rf'\b{matched[1]}\b', matches[0][1]), "Bit dependency is detached"
+        assert matched.group().count('_bit_usesRs2') == 1, "Changed bit dependency structure"
         changed = text[:matched.start()] + matched.group().replace('_bit_usesRs2', "1'b0") + text[matched.end():]
         count = 1
     else:
