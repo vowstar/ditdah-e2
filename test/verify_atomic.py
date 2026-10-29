@@ -6,6 +6,7 @@ import argparse
 from collections import Counter, deque
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -456,9 +457,10 @@ def check_competitors(case, history):
 
 
 def inputs():
-    names = ("test/model.py", "test/atomic_programs.py", "test/test_atomic_core.py", "test/verify_atomic.py", "test/atomic_sim.cpp",
+    names = ("test/model.py", "test/atomic_programs.py", "test/test_atomic_core.py", "test/verify_atomic.py", "test/atomic_sim.cpp", "test/rvfi_trace.hpp",
              "test/atomic_memory.py", "test/programs.py", "test/pmp.py", "test/compressed_model.py", "test/compressed_unit.py", "scripts/build_rtl.py")
     names += ("test/verify_debug.py", "test/debug_programs.py", "test/bit_model.py", "test/bit_operations.py", "test/console.py")
+    names += ("test/retirement.py", "test/atomic_retirement.py")
     return {name: digest(ROOT / name) for name in names}
 
 
@@ -591,6 +593,7 @@ def main():
     parser.add_argument("--design", type=Path, default=Path("result/atomic-platform-connected"))
     parser.add_argument("--output", type=Path, default=Path("result/atomic-verification"))
     parser.add_argument("--case", action="append")
+    parser.add_argument("--rvfi", action="store_true", help="check packets against actual SRAM effects")
     parser.add_argument("--frozen-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not args.frozen_worker:
@@ -602,6 +605,8 @@ def main():
                    "--design", str(args.design.resolve()), "--output", str(args.output.resolve())]
         for name in args.case or []:
             command.extend(("--case", name))
+        if args.rvfi:
+            command.append("--rvfi")
         result = subprocess.run(command)
         raise SystemExit(result.returncode)
     assert ROOT == (args.output / "execution").resolve() and not (args.output / "summary.json").exists(), "Invalid frozen checker execution"
@@ -622,6 +627,9 @@ def main():
     wrapper = args.output / "AtomicBench.sv"
     wrapper.write_text(observer(args.output / "rtl", regions["sram"]["size"]))
     selected = selected_cases(parameters, args.case)
+    if args.rvfi:
+        assert all(not (case.debug or case.interrupts or case.boundary or case.expected_resets) for case in selected), \
+            "Atomic retirement checking requires cases without external control boundaries"
     compile_flags = "-std=c++17 -DDITDAH_E2_ENABLE_DEBUG=" + str(int(parameters["enableDebug"]))
     report = {"scope": "Atomic instruction execution on a real shared SRAM with competing transactions",
               "parameters": parameters, "regions": regions, "checkerHashes": initial, "tools": tools,
@@ -664,11 +672,26 @@ def main():
                     stimulus += str(case.boundary[2]) + "\n"
                 events.write_text(stimulus)
                 command = [str(binary.resolve()), str(image.resolve()), str(events.resolve()), str(seed), str(delay), str(case.completion_pc)]
-                run = subprocess.run(command, capture_output=True, text=True)
+                environment = os.environ.copy()
+                if args.rvfi:
+                    trace_path, irq_path = output / "rvfi.jsonl", output / "irq.jsonl"
+                    environment.update(DITDAH_E2_RVFI_TRACE=str(trace_path.resolve()),
+                                       DITDAH_E2_RVFI_INTERRUPTS=str(irq_path.resolve()))
+                run = subprocess.run(command, capture_output=True, text=True, env=environment)
                 (output / "trace.txt").write_text(run.stdout)
                 (output / "stderr.txt").write_text(run.stderr)
                 assert run.returncode == 0, run.stderr
                 metrics = check(case, parameters, regions, run.stdout)
+                if args.rvfi:
+                    from atomic_retirement import join_atomic_witnesses
+                    from retirement import bind_native_trace, check_trace, read_interrupts, read_trace
+                    packets, interrupts = read_trace(trace_path), read_interrupts(irq_path)
+                    binding = bind_native_trace(packets, run.stdout, interrupts=interrupts)
+                    witnesses = join_atomic_witnesses(packets, run.stdout, metrics["sharedHistory"],
+                        sram_base=regions["sram"]["base"], sram_size=regions["sram"]["size"])
+                    metrics["retirement"] = {**check_trace(packets, reset_vector=0,
+                        interrupts=interrupts, atomic_witnesses=witnesses), "nativeBinding": binding,
+                        "traceHash": digest(trace_path), "interruptHash": digest(irq_path)}
                 history = metrics.pop("sharedHistory")
                 (output / "history.json").write_text(json.dumps(history, indent=2) + "\n")
                 report["runs"].append({"case": case.name, "seed": seed, "delay": delay, "exitStatus": run.returncode,

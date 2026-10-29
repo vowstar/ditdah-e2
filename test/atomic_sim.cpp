@@ -12,6 +12,8 @@
 #endif
 
 #include "verilated.h"
+#include "rvfi_trace.hpp"
+#include <cstdlib>
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -37,6 +39,15 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VAtomicBench dut{&context};
+        std::ofstream rvfi, rvfiInterrupts;
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_TRACE")) {
+            rvfi.open(path);
+            if (!rvfi) throw std::runtime_error("Cannot open retirement trace");
+        }
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_INTERRUPTS")) {
+            rvfiInterrupts.open(path);
+            if (!rvfiInterrupts) throw std::runtime_error("Cannot open interrupt trace");
+        }
         std::ifstream image(argv[1]), events(argv[2]);
         std::map<uint32_t, uint32_t> rom;
         uint32_t address, value;
@@ -283,6 +294,8 @@ int main(int argc, char **argv) {
                 atomicInterruptSent = true;
             }
             bool debugAdvance = false;
+            if (rvfi.is_open()) writeRvfi(rvfi, dut, cycle);
+            if (rvfiInterrupts.is_open()) writeRvfiInterrupt(rvfiInterrupts, dut, cycle);
             if (dut.retire_valid) {
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' ' << dut.retire_nextPc
                           << ' ' << unsigned(dut.retire_rd) << ' ' << unsigned(dut.retire_writes) << ' ' << dut.retire_value
