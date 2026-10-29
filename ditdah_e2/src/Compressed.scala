@@ -134,7 +134,6 @@ object Compressed extends Generator[Parameters, UnitLayers, CompressedIO, UnitPr
           stackStore.bits(4, 0) ## 0x23.B(7)).asUInt
       }
     }
-    when(io.hint) { io.instruction := 0x00000013.U(32) }
     when(!io.legal) {
       io.instruction := 0.U(32)
       io.hint := false.B

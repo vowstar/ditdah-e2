@@ -97,8 +97,8 @@ def decode(raw):
     def normal(name, word):
         return 1, 0, word & 0xFFFFFFFF, name
 
-    def hint(name):
-        return 1, 1, 0x13, "hint." + name
+    def hint(name, word):
+        return 1, 1, word & 0xFFFFFFFF, "hint." + name
 
     def illegal(name):
         return 0, 0, 0, "illegal." + name
@@ -117,7 +117,7 @@ def decode(raw):
         if family == 0:
             if raw == 1:
                 return normal("nop", 0x13)
-            return hint("nop" if rd == 0 else "addi") if rd == 0 or imm == 0 else \
+            return hint("nop" if rd == 0 else "addi", immediate(rd, rd, imm)) if rd == 0 or imm == 0 else \
                 normal("addi", immediate(rd, rd, imm))
         if family in (1, 5):
             offset = ((raw >> 12) & 1) * 2048 + ((raw >> 8) & 1) * 1024 + \
@@ -125,7 +125,7 @@ def decode(raw):
                 ((raw >> 2) & 1) * 32 + ((raw >> 11) & 1) * 16 + ((raw >> 3) & 7) * 2
             return normal("jal" if family == 1 else "j", jump(int(family == 1), signed(offset, 12)))
         if family == 2:
-            return hint("li") if rd == 0 else normal("li", immediate(rd, 0, imm))
+            return hint("li", immediate(rd, 0, imm)) if rd == 0 else normal("li", immediate(rd, 0, imm))
         if family == 3:
             if imm == 0:
                 return illegal("addi16sp_zero" if rd == 2 else "lui_zero")
@@ -133,14 +133,14 @@ def decode(raw):
                 offset = ((raw >> 12) & 1) * 512 + ((raw >> 3) & 3) * 128 + \
                     ((raw >> 5) & 1) * 64 + ((raw >> 2) & 1) * 32 + ((raw >> 6) & 1) * 16
                 return normal("addi16sp", immediate(2, 2, signed(offset, 10)))
-            return hint("lui") if rd == 0 else normal("lui", ((imm & 0xFFFFF) << 12) | (rd << 7) | 0x37)
+            return hint("lui", ((imm & 0xFFFFF) << 12) | 0x37) if rd == 0 else normal("lui", ((imm & 0xFFFFF) << 12) | (rd << 7) | 0x37)
         if family == 4:
             selector = (raw >> 10) & 3
             if selector < 2:
                 name = "srai" if selector else "srli"
                 if imm6 >= 32:
                     return illegal("custom_" + name)
-                return hint(name) if imm6 == 0 else normal(name, immediate(left, left, imm6 + 1024 * selector, 5))
+                return hint(name, immediate(left, left, imm6 + 1024 * selector, 5)) if imm6 == 0 else normal(name, immediate(left, left, imm6 + 1024 * selector, 5))
             if selector == 2:
                 return normal("andi", immediate(left, left, imm, 7))
             if raw & 0x1000:
@@ -154,7 +154,7 @@ def decode(raw):
         if family == 0:
             if imm6 >= 32:
                 return illegal("custom_slli")
-            return hint("slli") if rd == 0 or imm6 == 0 else normal("slli", immediate(rd, rd, imm6, 1))
+            return hint("slli", immediate(rd, rd, imm6, 1)) if rd == 0 or imm6 == 0 else normal("slli", immediate(rd, rd, imm6, 1))
         if family == 2:
             if rd == 0:
                 return illegal("lwsp_zero")
@@ -166,7 +166,7 @@ def decode(raw):
                     return normal("jalr", immediate(1, rd, 0, 0, 0x67)) if rd else normal("ebreak", 0x00100073)
                 return normal("jr", immediate(0, rd, 0, 0, 0x67)) if rd else illegal("jr_zero")
             name = "add" if raw & 0x1000 else "mv"
-            return hint(name) if rd == 0 else normal(name, register(rd, rd if raw & 0x1000 else 0, rs2))
+            return hint(name, register(rd, rd if raw & 0x1000 else 0, rs2)) if rd == 0 else normal(name, register(rd, rd if raw & 0x1000 else 0, rs2))
         if family == 6:
             offset = ((raw >> 7) & 3) * 64 + ((raw >> 9) & 15) * 4
             return normal("swsp", store(rs2, 2, offset))
@@ -175,19 +175,19 @@ def decode(raw):
 
 
 def check_oracle():
-    cases = ((0x0000, 0, 0, 0), (0x0001, 1, 0, 0x13), (0x0081, 1, 1, 0x13),
-             (0x0005, 1, 1, 0x13), (0x0085, 1, 0, 0x00108093), (0x10FD, 1, 0, 0xFFF08093),
+    cases = ((0x0000, 0, 0, 0), (0x0001, 1, 0, 0x13), (0x0081, 1, 1, 0x8093),
+             (0x0005, 1, 1, 0x100013), (0x0085, 1, 0, 0x00108093), (0x10FD, 1, 0, 0xFFF08093),
              (0x2001, 1, 0, 0xEF), (0xA001, 1, 0, 0x6F), (0x4001, 1, 1, 0x13),
-             (0x4085, 1, 0, 0x00100093), (0x6001, 0, 0, 0), (0x6005, 1, 1, 0x13),
+             (0x4085, 1, 0, 0x00100093), (0x6001, 0, 0, 0), (0x6005, 1, 1, 0x1037),
              (0x6081, 0, 0, 0), (0x6085, 1, 0, 0x10B7), (0x6101, 0, 0, 0),
-             (0x6141, 1, 0, 0x01010113), (0x8001, 1, 1, 0x13), (0x8005, 1, 0, 0x00145413),
-             (0x9001, 0, 0, 0), (0x8401, 1, 1, 0x13), (0x8405, 1, 0, 0x40145413),
+             (0x6141, 1, 0, 0x01010113), (0x8001, 1, 1, 0x45413), (0x8005, 1, 0, 0x00145413),
+             (0x9001, 0, 0, 0), (0x8401, 1, 1, 0x40045413), (0x8405, 1, 0, 0x40145413),
              (0x9401, 0, 0, 0), (0x8801, 1, 0, 0x00047413), (0x8C01, 1, 0, 0x40840433),
-             (0x9C01, 0, 0, 0), (0x0002, 1, 1, 0x13), (0x0006, 1, 1, 0x13),
-             (0x0082, 1, 1, 0x13), (0x0086, 1, 0, 0x00109093), (0x1002, 0, 0, 0),
+             (0x9C01, 0, 0, 0), (0x0002, 1, 1, 0x1013), (0x0006, 1, 1, 0x101013),
+             (0x0082, 1, 1, 0x9093), (0x0086, 1, 0, 0x00109093), (0x1002, 0, 0, 0),
              (0x4002, 0, 0, 0), (0x4082, 1, 0, 0x00012083), (0x8002, 0, 0, 0),
-             (0x8082, 1, 0, 0x00008067), (0x8006, 1, 1, 0x13), (0x8086, 1, 0, 0x001000B3),
-             (0x9002, 1, 0, 0x00100073), (0x9082, 1, 0, 0x000080E7), (0x9006, 1, 1, 0x13),
+             (0x8082, 1, 0, 0x00008067), (0x8006, 1, 1, 0x100033), (0x8086, 1, 0, 0x001000B3),
+             (0x9002, 1, 0, 0x00100073), (0x9082, 1, 0, 0x000080E7), (0x9006, 1, 1, 0x100033),
              (0x9086, 1, 0, 0x001080B3), (0x2000, 0, 0, 0), (0x2002, 0, 0, 0), (0x0003, 0, 0, 0))
     for raw, legal, hint, instruction in cases:
         assert decode(raw)[:3] == (legal, hint, instruction), f"Oracle mismatch for {raw:04x}"

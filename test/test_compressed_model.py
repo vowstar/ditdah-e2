@@ -49,9 +49,11 @@ class CompressedDecodeTests(unittest.TestCase):
         self.assertFalse(decode(0x0001).hint)
 
     def test_hints_and_reserved_encodings(self):
-        for raw in (0x0005, 0x0081, 0x4001, 0x6005, 0x8001, 0x8401, 0x0002, 0x8006, 0x9006):
+        for raw, word in ((0x0005, 0x100013), (0x0081, 0x8093), (0x4001, 0x13),
+                          (0x6005, 0x1037), (0x8001, 0x45413), (0x8401, 0x40045413),
+                          (0x0002, 0x1013), (0x8006, 0x100033), (0x9006, 0x100033)):
             decoded = decode(raw)
-            self.assertEqual((decoded.legal, decoded.hint, decoded.expanded, decoded.length), (True, True, 0x13, 2))
+            self.assertEqual((decoded.legal, decoded.hint, decoded.expanded, decoded.length), (True, True, word, 2))
         for raw in (0, 0x6001, 0x6101, 0x8002, 0x4002, 0x1002, 0x9001, 0x9401, 0x9C01, 0x2000):
             decoded = decode(raw)
             self.assertEqual((decoded.raw, decoded.legal, decoded.hint, decoded.expanded), (raw, False, False, 0))
@@ -108,7 +110,8 @@ class CompressedExecutionTests(unittest.TestCase):
             before = model.registers.copy()
             event = model.step()
             self.assertEqual(model.registers, before)
-            self.assertEqual((event.rd, event.value, event.next_pc, event.memory), (0, 0, 2, None))
+            self.assertEqual((event.rd, event.value, event.next_pc, event.memory),
+                             (1, 1, 2, None) if raw == 0x0081 else (0, 0, 2, None))
             self.assertTrue(event.instruction.startswith("c.hint."))
 
     def test_illegal_raw_encoding_and_base_decoder(self):
