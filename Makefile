@@ -131,9 +131,13 @@ verify-pmp-data:
 	python3 test/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
 verify-signoff: rtl
-	python3 test/verify.py
+	python3 test/verify.py --rvfi
 	python3 test/formal.py
 	python3 test/core_formal.py
+
+.PHONY: verify-retirement
+verify-retirement: rtl
+	python3 test/verify.py --rvfi
 
 verify-formal: rtl
 	python3 test/formal.py

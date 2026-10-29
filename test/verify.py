@@ -21,7 +21,7 @@ from build_rtl import digest, sources
 
 def checker_inputs():
     paths = ("test/model.py", "test/bit_model.py", "test/bit_programs.py", "test/bit_pipeline.py", "test/bit_operations.py", "test/programs.py", "test/compressed_model.py", "test/compressed_programs.py",
-             "test/compressed_unit.py", "test/sim.cpp", "test/inactive_debug.hpp", "test/verify.py", "scripts/build_rtl.py")
+             "test/compressed_unit.py", "test/pmp.py", "test/sim.cpp", "test/inactive_debug.hpp", "test/rvfi_trace.hpp", "test/retirement.py", "test/verify.py", "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in paths}
 
 
@@ -479,11 +479,22 @@ def fence_negative_control(case, rtl, manifest, command, work, output):
             "traceHash": hashlib.sha256(run.stdout.encode()).hexdigest()}
 
 
+def retirement_check(case, stdout, trace, interrupts):
+    from retirement import bind_native_trace, check_trace, read_interrupts, read_trace
+    records = read_trace(trace)
+    side = read_interrupts(interrupts)
+    binding = bind_native_trace(records, stdout, interrupts=side)
+    result = check_trace(records, reset_vector=case.reset, interrupts=side)
+    return {**result, "nativeBinding": binding,
+            "traceHash": digest(trace), "interruptHash": digest(interrupts)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rtl", type=Path, default=Path("result/rtl"))
     parser.add_argument("--output", type=Path, default=Path("result/verification"))
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--rvfi", action="store_true", help="check complete retirement records and IRQ side events")
     args = parser.parse_args()
     manifest_data = (args.rtl / "manifest.json").read_bytes()
     manifest_hash = hashlib.sha256(manifest_data).hexdigest()
@@ -491,7 +502,8 @@ def main():
     if manifest["parameters"].get("protectedMode", False):
         subprocess.run([sys.executable, str(Path(__file__).with_name("verify_protected.py")),
                         "--rtl", str(args.rtl), "--output", str(args.output),
-                        *[value for name in args.case for value in ("--case", name)]], check=True)
+                        *[value for name in args.case for value in ("--case", name)],
+                        *(["--rvfi"] if args.rvfi else [])], check=True)
         return
     assert manifest["sourceHashes"] == sources(), "Stale RTL source inputs"
     for name, value in manifest["rtlHashes"].items():
@@ -533,12 +545,19 @@ def main():
                     schedule_path = work / "interrupts.txt"
                     schedule_path.write_text("".join(" ".join(map(str, entry)) + "\n" for entry in case.interrupt_schedule))
                     args_run.append(str(schedule_path))
-                run = subprocess.run(args_run, capture_output=True, text=True)
                 name = f"{case.name}-s{seed}-d{delay}"
+                environment = dict(os.environ)
+                if args.rvfi:
+                    rvfi = (args.output / f"{name}.rvfi.jsonl").resolve()
+                    irq = (args.output / f"{name}.irq.jsonl").resolve()
+                    environment.update(DITDAH_E2_RVFI_TRACE=str(rvfi), DITDAH_E2_RVFI_INTERRUPTS=str(irq))
+                run = subprocess.run(args_run, capture_output=True, text=True, env=environment)
                 (args.output / f"{name}.trace").write_text(run.stdout)
                 assert run.returncode == 0, f"{name}: {run.stderr}"
                 try:
                     metrics = check(case, run.stdout)
+                    if args.rvfi:
+                        metrics["retirement"] = retirement_check(case, run.stdout, rvfi, irq)
                     if case.name.startswith("bit_") and case.name.endswith("_no_false_load"):
                         assert metrics["loadUseCycles"] == 0, "False bit operand interlock"
                 except AssertionError as error:

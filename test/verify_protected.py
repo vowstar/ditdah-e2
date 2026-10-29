@@ -5,6 +5,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +13,7 @@ import subprocess
 import tempfile
 
 from protected_programs import cases
-from verify import check, checker_inputs, digest, sources
+from verify import check, checker_inputs, digest, sources, retirement_check
 
 
 def inputs():
@@ -102,6 +103,7 @@ def main():
     parser.add_argument("--rtl", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--rvfi", action="store_true", help="check complete retirement records and IRQ side events")
     args = parser.parse_args()
     assert not args.output.exists(), "Output already exists"
     manifest_path = args.rtl / "manifest.json"
@@ -151,13 +153,20 @@ def main():
                     schedule = work / "interrupts.txt"
                     schedule.write_text("".join(" ".join(map(str, entry)) + "\n" for entry in case.interrupt_schedule))
                     invocation.append(str(schedule))
-                run = subprocess.run(invocation, capture_output=True, text=True)
                 name = f"{case.name}-s{seed}-d{delay}"
+                environment = dict(os.environ)
+                if args.rvfi:
+                    rvfi = (args.output / f"{name}.rvfi.jsonl").resolve()
+                    irq = (args.output / f"{name}.irq.jsonl").resolve()
+                    environment.update(DITDAH_E2_RVFI_TRACE=str(rvfi), DITDAH_E2_RVFI_INTERRUPTS=str(irq))
+                run = subprocess.run(invocation, capture_output=True, text=True, env=environment)
                 (args.output / f"{name}.trace").write_text(run.stdout)
                 (args.output / f"{name}.log").write_text(normalize(run.stderr))
                 assert run.returncode == 0, f"{name}: simulation did not complete"
                 try:
                     metrics = check(case, run.stdout)
+                    if args.rvfi:
+                        metrics["retirement"] = retirement_check(case, run.stdout, rvfi, irq)
                 except AssertionError as error:
                     raise AssertionError(f"{name}: {error}") from error
                 if seed == 0:

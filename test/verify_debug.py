@@ -538,7 +538,7 @@ def mutate_orphan_resume(text):
 
 
 def checker_inputs():
-    names = ("test/debug_programs.py", "test/debug_sim.cpp", "test/verify_debug.py", "test/test_debug.py",
+    names = ("test/debug_programs.py", "test/debug_sim.cpp", "test/rvfi_trace.hpp", "test/verify_debug.py", "test/test_debug.py",
              "test/model.py", "test/bit_model.py", "test/programs.py", "test/compressed_model.py", "test/compressed_unit.py", "test/pmp.py",
              "scripts/build_rtl.py")
     return {name: digest(Path(name)) for name in names}

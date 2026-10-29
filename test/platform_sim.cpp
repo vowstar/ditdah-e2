@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 #include "VPlatformBench.h"
 #include "verilated.h"
+#include "rvfi_trace.hpp"
+#include <cstdlib>
 #include "inactive_debug.hpp"
 #include <array>
 #include <cstdint>
@@ -22,6 +24,15 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VPlatformBench dut{&context};
+        std::ofstream rvfi, rvfiInterrupts;
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_TRACE")) {
+            rvfi.open(path);
+            if (!rvfi) throw std::runtime_error("Cannot open retirement trace");
+        }
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_INTERRUPTS")) {
+            rvfiInterrupts.open(path);
+            if (!rvfiInterrupts) throw std::runtime_error("Cannot open interrupt trace");
+        }
         inactiveDebug(dut);
         std::ifstream file(argv[1]);
         uint64_t rom, romSize, ram, ramSize;
@@ -164,6 +175,8 @@ int main(int argc, char **argv) {
             }
             if (dut.transmit_valid && dut.transmit_ready)
                 std::cout << "X " << cycle << ' ' << unsigned(dut.transmit_bits) << '\n';
+            if (rvfi.is_open()) writeRvfi(rvfi, dut, cycle);
+            if (rvfiInterrupts.is_open()) writeRvfiInterrupt(rvfiInterrupts, dut, cycle);
             if (dut.retire_valid) {
                 if (dut.interrupt_valid) throw std::runtime_error("Two architectural events in one cycle");
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '

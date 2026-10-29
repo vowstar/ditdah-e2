@@ -50,7 +50,7 @@ def freeze(args):
             value = (root / name).read_bytes()
             assert hashlib.sha256(value).hexdigest() == expected, "Changed throughput input"
             contents[prefix + "/" + name] = value
-    for name in ("sim.cpp", "inactive_debug.hpp", "model.py", "bit_model.py", "bit_programs.py", "bit_pipeline.py",
+    for name in ("sim.cpp", "inactive_debug.hpp", "rvfi_trace.hpp", "model.py", "bit_model.py", "bit_programs.py", "bit_pipeline.py",
                  "bit_operations.py", "pmp.py", "programs.py", "compressed_model.py", "compressed_programs.py", "compressed_unit.py", "verify.py"):
         contents["test/" + name] = (args.source_root / "test" / name).read_bytes()
     for name in ("fetch_throughput.py", "test_fetch_throughput.py", "core_formal.py"):

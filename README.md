@@ -42,6 +42,7 @@ Use this configuration for its complete program collection:
 Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
 Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`.
 Selected checks do not establish complete ISA conformance or physical signoff.
+`make verify-signoff` also checks retirement packets and interrupt events against the native simulation trace.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.
 

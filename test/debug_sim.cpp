@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 #include "VDitDahE2.h"
 #include "verilated.h"
+#include "rvfi_trace.hpp"
+#include <cstdlib>
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -26,6 +28,15 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
+        std::ofstream rvfi, rvfiInterrupts;
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_TRACE")) {
+            rvfi.open(path);
+            if (!rvfi) throw std::runtime_error("Cannot open retirement trace");
+        }
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_INTERRUPTS")) {
+            rvfiInterrupts.open(path);
+            if (!rvfiInterrupts) throw std::runtime_error("Cannot open interrupt trace");
+        }
         std::map<uint32_t, uint32_t> memory;
         std::ifstream image(argv[1]), script(argv[2]);
         if (!image || !script) throw std::runtime_error("Cannot open debug inputs");
@@ -162,6 +173,8 @@ int main(int argc, char **argv) {
             OBSERVE(data, 'D');
 #undef OBSERVE
             bool advance = false;
+            if (rvfi.is_open()) writeRvfi(rvfi, dut, cycle);
+            if (rvfiInterrupts.is_open()) writeRvfiInterrupt(rvfiInterrupts, dut, cycle);
             if (dut.retire_valid) {
                 if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '

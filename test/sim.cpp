@@ -3,6 +3,8 @@
 #include "VDitDahE2.h"
 #include "verilated.h"
 #include "inactive_debug.hpp"
+#include "rvfi_trace.hpp"
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -47,6 +49,16 @@ int main(int argc, char **argv) {
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VDitDahE2 dut{&context};
+        std::ofstream rvfi;
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_TRACE")) {
+            rvfi.open(path);
+            if (!rvfi) throw std::runtime_error("Cannot open retirement trace");
+        }
+        std::ofstream rvfiInterrupts;
+        if (const char *path = std::getenv("DITDAH_E2_RVFI_INTERRUPTS")) {
+            rvfiInterrupts.open(path);
+            if (!rvfiInterrupts) throw std::runtime_error("Cannot open interrupt trace");
+        }
         inactiveDebug(dut);
         std::map<uint32_t, uint32_t> memory;
         std::ifstream file(argv[1]);
@@ -198,6 +210,7 @@ int main(int argc, char **argv) {
                      dut.data_request_bits_mask, dut.data_request_bits_size, bool(dut.data_request_bits_write), bool(dut.data_request_bits_machine)},
                     dut.data_response_valid, dut.data_response_ready, dataFault);
             if (dut.retire_valid) {
+                if (rvfi.is_open()) writeRvfi(rvfi, dut, cycle);
                 if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
                 retired += !dut.retire_trap; traps += dut.retire_trap;
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '
@@ -213,6 +226,7 @@ int main(int argc, char **argv) {
                 }
             }
             if (dut.interrupt_valid) {
+                if (rvfiInterrupts.is_open()) writeRvfiInterrupt(rvfiInterrupts, dut, cycle);
                 ++interrupts;
                 std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target << ' '
                           << dut.interrupt_cause << '\n';

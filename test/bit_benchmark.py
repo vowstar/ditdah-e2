@@ -181,9 +181,8 @@ def main():
     preserve(args.output / "inputs/checker", ROOT, initial)
     preserve(args.output / "inputs/design", args.source_root, manifests[0]["sourceHashes"])
     harness = {"test/sim.cpp": digest(args.source_root / "test/sim.cpp")}
-    header = args.source_root / "test/inactive_debug.hpp"
-    if header.exists():
-        harness["test/inactive_debug.hpp"] = digest(header)
+    for header in sorted((args.source_root / "test").glob("*.hpp")):
+        harness["test/" + header.name] = digest(header)
     preserve(args.output / "inputs/harness", args.source_root, harness)
     tools, executables = {}, {}
     for name in ("riscv32-none-elf-gcc", "riscv32-none-elf-objdump", "riscv32-none-elf-as", "riscv32-none-elf-ld", "verilator", "g++", "make", "python3"):

@@ -386,7 +386,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     shutil.copytree(args.platform, args.output / "platform", dirs_exist_ok=True)
     copied_inputs = verify_platform_inputs(args.output / "platform", manifest)
-    source_names = ("test/verify_platform.py", "test/test_platform.py", "test/platform_sim.cpp", "test/inactive_debug.hpp", "test/model.py", "test/bit_model.py", "test/compressed_model.py",
+    source_names = ("test/verify_platform.py", "test/test_platform.py", "test/platform_sim.cpp", "test/rvfi_trace.hpp", "test/inactive_debug.hpp", "test/model.py", "test/bit_model.py", "test/compressed_model.py",
                     "test/compressed_unit.py", "test/console.py", "test/timer.py", "test/pmp.py", "test/elf.py",
                     "scripts/build_software.py", "scripts/build_rtl.py", "software/start.S", "software/link.ld",
                     "software/timer.c", "software/protected.S")

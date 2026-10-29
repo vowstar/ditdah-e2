@@ -119,7 +119,7 @@ class SimulatorReuseTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.previous = self.root / 'old/profile'
-        for name in ('test/sim.cpp', 'test/inactive_debug.hpp'):
+        for name in ('test/sim.cpp', 'test/inactive_debug.hpp', 'test/rvfi_trace.hpp'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('source')
@@ -139,7 +139,7 @@ class SimulatorReuseTest(unittest.TestCase):
         (self.root / 'old/summary.json').write_text(json.dumps({
             'exitStatus': 0, 'tools': self.tools,
             'sourceHashes': {name: digest(self.root / name)
-                             for name in ('test/sim.cpp', 'test/inactive_debug.hpp')}}))
+                             for name in ('test/sim.cpp', 'test/inactive_debug.hpp', 'test/rvfi_trace.hpp')}}))
         (self.previous / 'summary.json').write_text(json.dumps({
             'exitStatus': 0, 'rtlManifestHash': digest(self.previous / 'rtl/manifest.json'),
             'simulatorHash': digest(self.previous / 'obj/VDitDahE2')}))

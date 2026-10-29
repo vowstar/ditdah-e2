@@ -134,7 +134,7 @@ def reuse_simulator(previous, destination, rtl_hashes, tools, control=False):
     assert prior['exitStatus'] == accepted['exitStatus'] == 0
     for role in ('verilator', 'cxx', 'make'):
         assert tools[role] == prior['tools'][role], 'Simulator build tool differs'
-    for name in ('test/sim.cpp', 'test/inactive_debug.hpp'):
+    for name in ('test/sim.cpp', 'test/inactive_debug.hpp', 'test/rvfi_trace.hpp'):
         assert digest(ROOT / name) == prior['sourceHashes'][name], 'Simulator source differs'
         assert digest(previous.parent / 'inputs' / name) == prior['sourceHashes'][name]
     original = previous / 'rejected-csr-control' if control else previous
