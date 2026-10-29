@@ -27,43 +27,42 @@ def user_program(word, *, status=0, permission=0x1F, enable_c=False, target=0x10
 
 class PrivilegeTests(unittest.TestCase):
     def test_menvcfg_fixed_zero_and_access_privilege(self):
-        for operation in (1, 2, 3, 5, 6, 7):
-            for source in (0, 1, 31):
-                word = 0x30A00000 | source << 15 | operation << 12 | 10 << 7 | 0x73
-                model = Model({0: word, 4: 0x30A025F3}, protected_mode=True)
-                model.registers[1], model.registers[31], model.registers[10] = 0xFFFFFFFF, 0x55AA55AA, 55
-                event = model.step()
-                self.assertEqual((event.trap, event.rd, event.value, event.next_pc), (False, 10, 0, 4))
-                self.assertEqual(model.read_csr(0x30A), 0)
-                self.assertEqual(model.step().value, 0)
-                for restricted in (Model({0: word}), user_program(word)):
-                    pc, user = restricted.pc, restricted.user_mode
-                    restricted.registers[10] = 55
-                    event = restricted.step()
-                    self.assertEqual((event.pc, event.user_mode, event.trap, event.cause, event.tval, event.rd),
-                                     (pc, user, True, 2, word, 0))
-                    self.assertEqual(restricted.registers[10], 55)
-                    self.assertEqual(restricted.read_csr(0x341), pc)
-        for protected in (False, True):
-            event = Model({0: 0x31A02573}, protected_mode=protected).step()
-            self.assertEqual((event.trap, event.cause, event.tval), (True, 2, 0x31A02573))
+        for address in (0x30A, 0x31A):
+            for operation in (1, 2, 3, 5, 6, 7):
+                for source in (0, 1, 31):
+                    word = (address << 20) | source << 15 | operation << 12 | 10 << 7 | 0x73
+                    model = Model({0: word, 4: (address << 20) | 0x25F3}, protected_mode=True)
+                    model.registers[1], model.registers[31], model.registers[10] = 0xFFFFFFFF, 0x55AA55AA, 55
+                    event = model.step()
+                    self.assertEqual((event.trap, event.rd, event.value, event.next_pc), (False, 10, 0, 4))
+                    self.assertEqual(model.read_csr(address), 0)
+                    self.assertEqual(model.step().value, 0)
+                    for restricted in (Model({0: word}), user_program(word)):
+                        pc, user = restricted.pc, restricted.user_mode
+                        restricted.registers[10] = 55
+                        event = restricted.step()
+                        self.assertEqual((event.pc, event.user_mode, event.trap, event.cause, event.tval, event.rd),
+                                         (pc, user, True, 2, word, 0))
+                        self.assertEqual(restricted.registers[10], 55)
+                        self.assertEqual(restricted.read_csr(0x341), pc)
 
     def test_menvcfg_zero_source_suppresses_only_set_and_clear_writes(self):
-        for operation in (1, 2, 3, 5, 6, 7):
-            for source in (0, 1):
-                word = 0x30A00000 | source << 15 | operation << 12 | 0x73
-                model = Model({0: word}, protected_mode=True)
-                writes = []
-                original = model.write_csr
-                def record(address, value):
-                    writes.append((address, value))
-                    original(address, value)
-                model.write_csr = record
-                event = model.step()
-                self.assertFalse(event.trap)
-                self.assertEqual(event.rd, 0)
-                self.assertEqual(len(writes), int(operation in (1, 5) or source != 0))
-                self.assertEqual(model.read_csr(0x30A), 0)
+        for address in (0x30A, 0x31A):
+            for operation in (1, 2, 3, 5, 6, 7):
+                for source in (0, 1):
+                    word = (address << 20) | source << 15 | operation << 12 | 0x73
+                    model = Model({0: word}, protected_mode=True)
+                    writes = []
+                    original = model.write_csr
+                    def record(address, value):
+                        writes.append((address, value))
+                        original(address, value)
+                    model.write_csr = record
+                    event = model.step()
+                    self.assertFalse(event.trap)
+                    self.assertEqual(event.rd, 0)
+                    self.assertEqual(len(writes), int(operation in (1, 5) or source != 0))
+                    self.assertEqual(model.read_csr(address), 0)
 
     def test_default_profile_is_unchanged(self):
         model = Model({0: ECALL})

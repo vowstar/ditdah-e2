@@ -45,37 +45,40 @@ def negative_controls(case, trace):
     return controls
 
 
-def without_menvcfg(text):
-    changed, count = re.subn(r"12'h30[aA]\b", "12'h30B", text)
+def without_menvcfg(text, address=0x30A):
+    if address not in (0x30A, 0x31A):
+        raise ValueError("Unknown environment CSR")
+    changed, count = re.subn(rf"12'h{address:03x}\b", f"12'h{address + 1:03X}", text, flags=re.IGNORECASE)
     if count != 1:
-        raise ValueError("Expected one menvcfg address comparison")
+        raise ValueError("Expected one environment CSR address comparison")
     return changed
 
 
-def menvcfg_negative_control(case, rtl, manifest, command, work, output):
-    directory = output / "menvcfg-negative"
+def menvcfg_negative_control(case, rtl, manifest, command, work, output, address):
+    directory = output / f"menvcfg-negative-{address:03x}"
     mutant = directory / "rtl"
     mutant.mkdir(parents=True)
     for name in manifest["rtlHashes"]:
         text = (rtl / name).read_text()
-        (mutant / name).write_text(without_menvcfg(text) if name == "DitDahE2Csr.sv" else text)
+        (mutant / name).write_text(without_menvcfg(text, address) if name == "DitDahE2Csr.sv" else text)
     build_command = [str((mutant / Path(item).name).resolve()) if item.endswith(".sv") else item
                      for item in command]
-    build_command[build_command.index("--Mdir") + 1] = str(work / "menvcfg-obj")
+    build_directory = work / f"menvcfg-{address:03x}-obj"
+    build_command[build_command.index("--Mdir") + 1] = str(build_directory)
     normalize = lambda text: text.replace(str(work), "$WORK").replace(str(Path.cwd()), "$SOURCE")
     build = subprocess.run(build_command, capture_output=True, text=True)
     (directory / "compile.log").write_text(normalize(build.stdout + build.stderr))
     assert build.returncode == 0, "menvcfg mutant build failed"
     image = directory / "image.hex"
     image.write_text("".join(f"{address:08x} {word:08x}\n" for address, word in sorted(case.words().items())))
-    invocation = [str(work / "menvcfg-obj/VDitDahE2"), str(image.resolve()), "1", "24",
+    invocation = [str(build_directory / "VDitDahE2"), str(image.resolve()), "1", "24",
                   str(1 << 32), str(1 << 32), "50000", str(case.completion_pc)]
     run = subprocess.run(invocation, capture_output=True, text=True)
     (directory / "execution.trace").write_text(run.stdout)
     (directory / "execution.log").write_text(normalize(run.stderr))
     assert run.returncode == 0, "menvcfg mutant did not complete"
     observed = [list(map(int, line.split()[1:])) for line in run.stdout.splitlines() if line.startswith("R ")]
-    assert any(row[2] >> 20 == 0x30A and row[7:10] == [1, 2, row[2]] for row in observed), \
+    assert any(row[2] >> 20 == address and row[7:10] == [1, 2, row[2]] for row in observed), \
         "menvcfg mutant did not produce the intended illegal instruction"
     try:
         check(case, run.stdout)
@@ -84,7 +87,7 @@ def menvcfg_negative_control(case, rtl, manifest, command, work, output):
         reason = str(error)
     else:
         raise AssertionError("Checker accepted a rejected menvcfg access")
-    result = {"mutation": "reject menvcfg", "case": case.name, "compileExitStatus": build.returncode,
+    result = {"mutation": "reject environment CSR", "address": address, "case": case.name, "compileExitStatus": build.returncode,
               "exitStatus": run.returncode, "failure": reason,
               "compileCommand": [normalize(item) for item in build_command],
               "command": [normalize(item) for item in invocation],
@@ -162,10 +165,11 @@ def main():
                 results.append({"case": case.name, "seed": seed, "delay": delay, "exitStatus": 0,
                                 "command": [normalize(item) for item in invocation], **metrics,
                                 "imageHash": digest(image), "traceHash": hashlib.sha256(run.stdout.encode()).hexdigest()})
-        environment_case = next((case for case in selected if case.name == "protected_menvcfg_zero"), None)
-        if environment_case is not None:
-            rtl_controls.append(menvcfg_negative_control(environment_case, args.rtl, manifest, command,
-                                                        work, args.output))
+        for name, address in (("menvcfg", 0x30A), ("menvcfgh", 0x31A)):
+            environment_case = next((case for case in selected if case.name == f"protected_{name}_zero"), None)
+            if environment_case is not None:
+                rtl_controls.append(menvcfg_negative_control(environment_case, args.rtl, manifest, command,
+                                                            work, args.output, address))
         assert manifest["sourceHashes"] == sources(), "Source inputs changed"
         assert hashes == inputs(), "Checker inputs changed"
         assert manifest_hash == digest(manifest_path), "Manifest changed"

@@ -56,24 +56,27 @@ def execute(case):
 class ProtectedProgramTests(unittest.TestCase):
     def test_menvcfg_rtl_control_requires_one_address(self):
         self.assertEqual(without_menvcfg("address == 12'h30A"), "address == 12'h30B")
+        self.assertEqual(without_menvcfg("12'h30a | 12'h31a", 0x31A), "12'h30a | 12'h31B")
+        with self.assertRaisesRegex(ValueError, "Unknown environment CSR"):
+            without_menvcfg("12'h306", 0x306)
         for text in ("address == 12'h306", "12'h30A | 12'h30a"):
-            with self.assertRaisesRegex(ValueError, "Expected one menvcfg"):
+            with self.assertRaisesRegex(ValueError, "Expected one environment CSR"):
                 without_menvcfg(text)
 
     def test_menvcfg_machine_values_and_user_faults(self):
         selected = {case.name: case for case in cases()}
-        model, events, _ = execute(selected["protected_menvcfg_zero"])
-        accesses = [event for event in events if event.word >> 20 == 0x30A and event.word & 0x7F == 0x73]
-        self.assertEqual({event.instruction for event in accesses},
-                         {"csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"})
-        self.assertTrue(all(not event.trap and not event.user_mode and event.value == 0 for event in accesses))
-        self.assertEqual(model.read_csr(0x30A), 0)
-        for operation in (1, 2, 3, 5, 6, 7):
-            _, events, _ = execute(selected[f"protected_user_menvcfg_{operation}"])
-            denied = [event for event in events if event.cause == 2]
-            self.assertEqual(len(denied), 2)
-            self.assertTrue(all(event.user_mode and event.tval == event.word and event.rd == 0 for event in denied))
-        execute(selected["protected_menvcfgh_absent"])
+        for name, address in (("menvcfg", 0x30A), ("menvcfgh", 0x31A)):
+            model, events, _ = execute(selected[f"protected_{name}_zero"])
+            accesses = [event for event in events if event.word >> 20 == address and event.word & 0x7F == 0x73]
+            self.assertEqual({event.instruction for event in accesses},
+                             {"csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"})
+            self.assertTrue(all(not event.trap and not event.user_mode and event.value == 0 for event in accesses))
+            self.assertEqual(model.read_csr(address), 0)
+            for operation in (1, 2, 3, 5, 6, 7):
+                _, events, _ = execute(selected[f"protected_user_{name}_{operation}"])
+                denied = [event for event in events if event.cause == 2]
+                self.assertEqual(len(denied), 2)
+                self.assertTrue(all(event.user_mode and event.tval == event.word and event.rd == 0 for event in denied))
 
     def test_fixed_program_signatures(self):
         for enable_m in (False, True):

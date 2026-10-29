@@ -32,6 +32,26 @@ class ExternalComparisonTest(unittest.TestCase):
         self.assertEqual(result['csrAccessesCompared'], 2)
         self.assertEqual(result['successfulCsrResultsCompared'], 1)
 
+    def test_high_half_events_are_compared(self):
+        expected = [(user, pc, word + (0x10 << 20), write, trap, cause,
+                     tval + (0x10 << 20) if trap else tval, next_pc)
+                    for user, pc, word, write, trap, cause, tval, next_pc in self.expected]
+        lines = []
+        for line in self.lines:
+            fields = line.split()
+            fields[3] = str(int(fields[3]) + (0x10 << 20))
+            if fields[8] == '1':
+                fields[10] = fields[3]
+            lines.append(' '.join(fields))
+        result = compare_external('\n'.join(lines), expected, 0x80000004)
+        self.assertEqual(result['csrAccessesCompared'], 2)
+        self.assertEqual(result['successfulCsrResultsCompared'], 1)
+        fields = lines[0].split()
+        fields[7] = '1'
+        lines[0] = ' '.join(fields)
+        with self.assertRaisesRegex(AssertionError, '^External architectural event mismatch$'):
+            compare_external('\n'.join(lines), expected, 0x80000004)
+
     def test_wrong_csr_value_fails(self):
         self.check_changed_field(0, 7, 1)
 

@@ -76,34 +76,36 @@ class DebugTests(unittest.TestCase):
         self.assertEqual(reference.pending["request"][5], 1)
 
     def test_menvcfg_abstract_access_preserves_halted_state(self):
-        for user in (False, True):
-            with self.subTest(user=user):
-                model = Model({}, protected_mode=True)
-                model.user_mode, model.pc = user, RESTART
-                for number, value in ((0x341, 0x234), (0x342, 7), (0x343, 0xABCDEF)):
-                    model.write_csr(number, value)
-                debug = DebugReference(model)
-                debug.active = debug.halted = True
-                debug.dpc, debug.control = RESTART, 0 if user else 3
-                before = (model.pc, model.user_mode, dict(model.csrs), debug.dpc, debug.control)
-                for value in (None, 0xFFFFFFFF, None):
-                    if value is not None:
-                        debug.request(4, 2, value, 0)
-                    command = (2 << 20) | (1 << 17) | (int(value is not None) << 16) | 0x30A
-                    debug.request(0x17, 2, command, 0)
-                    debug.response(0x16, 1, 0, 0, 2, {})
-                    if value is None:
-                        debug.response(4, 1, 0, 0, 0, {})
-                    self.assertEqual((model.pc, model.user_mode, model.csrs, debug.dpc, debug.control), before)
+        for address in (0x30A, 0x31A):
+            for user in (False, True):
+                with self.subTest(user=user):
+                    model = Model({}, protected_mode=True)
+                    model.user_mode, model.pc = user, RESTART
+                    for number, value in ((0x341, 0x234), (0x342, 7), (0x343, 0xABCDEF)):
+                        model.write_csr(number, value)
+                    debug = DebugReference(model)
+                    debug.active = debug.halted = True
+                    debug.dpc, debug.control = RESTART, 0 if user else 3
+                    before = (model.pc, model.user_mode, dict(model.csrs), debug.dpc, debug.control)
+                    for value in (None, 0xFFFFFFFF, None):
+                        if value is not None:
+                            debug.request(4, 2, value, 0)
+                        command = (2 << 20) | (1 << 17) | (int(value is not None) << 16) | address
+                        debug.request(0x17, 2, command, 0)
+                        debug.response(0x16, 1, 0, 0, 2, {})
+                        if value is None:
+                            debug.response(4, 1, 0, 0, 0, {})
+                        self.assertEqual((model.pc, model.user_mode, model.csrs, debug.dpc, debug.control), before)
 
     def test_menvcfg_abstract_access_rejects_wrong_result_or_error(self):
-        for data, status in ((1, 2), (0, 0x202)):
-            debug = DebugReference(Model({}, protected_mode=True))
-            debug.active = debug.halted = True
-            debug.request(0x17, 2, 0x22030A, 0)
-            with self.assertRaisesRegex(AssertionError, "Abstract (register result mismatch|command error differs)"):
-                debug.response(0x16, 1, 0, 0, status, {})
-                debug.response(4, 1, 0, 0, data, {})
+        for address in (0x30A, 0x31A):
+            for data, status in ((1, 2), (0, 0x202)):
+                debug = DebugReference(Model({}, protected_mode=True))
+                debug.active = debug.halted = True
+                debug.request(0x17, 2, 0x220000 | address, 0)
+                with self.assertRaisesRegex(AssertionError, "Abstract (register result mismatch|command error differs)"):
+                    debug.response(0x16, 1, 0, 0, status, {})
+                    debug.response(4, 1, 0, 0, data, {})
 
     def test_cycle_samples_require_stability(self):
         self.debug.halted = True

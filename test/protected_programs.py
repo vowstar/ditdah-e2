@@ -513,36 +513,32 @@ def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba
     common = dict(reset=reset, enable_m=enable_m, enable_c=enable_c, enable_a=enable_a,
                   enable_zba=enable_zba, enable_zbb=enable_zbb, enable_zbs=enable_zbs)
     result = []
-    program = Program()
-    program.load(1, MASK)
-    for index, operation in enumerate((1, 2, 3, 5, 6, 7)):
-        program.emit(csr(10, 0x30A, 31 if operation & 4 else 1, operation))
-        program.save(10, index * 8)
-        program.emit(csr(10, 0x30A))
-        program.save(10, index * 8 + 4)
-    for index, operation in enumerate((2, 3, 6, 7)):
-        program.emit(csr(10, 0x30A, 0, operation))
-        program.save(10, 48 + index * 4)
-    program.emit(csr(0, 0x30A, 1, 1), csr(0, 0x30A, 31, 5), csr(10, 0x30A))
-    program.save(10, 64)
-    program.trap(0x73, 11, status=0x1800)
-    result.append(_case("protected_menvcfg_zero", program, dict.fromkeys(range(0, 68, 4), 0),
-                        enter_user=False, **common))
-    for operation in (1, 2, 3, 5, 6, 7):
+    for name, address in (("menvcfg", 0x30A), ("menvcfgh", 0x31A)):
         program = Program()
         program.load(1, MASK)
-        program.emit(immediate(10, 0, 55))
-        for source in (1, 0):
-            word = csr(10, 0x30A, source, operation)
-            program.trap(word, 2, word)
-        program.save(10)
-        program.trap(0x73, 8)
-        result.append(_case(f"protected_user_menvcfg_{operation}", program, {0: 55}, **common))
-    program = Program()
-    word = csr(10, 0x31A)
-    program.trap(word, 2, word, 0x1800)
-    program.trap(0x73, 11, status=0x1800)
-    result.append(_case("protected_menvcfgh_absent", program, {}, enter_user=False, **common))
+        for index, operation in enumerate((1, 2, 3, 5, 6, 7)):
+            program.emit(csr(10, address, 31 if operation & 4 else 1, operation))
+            program.save(10, index * 8)
+            program.emit(csr(10, address))
+            program.save(10, index * 8 + 4)
+        for index, operation in enumerate((2, 3, 6, 7)):
+            program.emit(csr(10, address, 0, operation))
+            program.save(10, 48 + index * 4)
+        program.emit(csr(0, address, 1, 1), csr(0, address, 31, 5), csr(10, address))
+        program.save(10, 64)
+        program.trap(0x73, 11, status=0x1800)
+        result.append(_case(f"protected_{name}_zero", program, dict.fromkeys(range(0, 68, 4), 0),
+                            enter_user=False, **common))
+        for operation in (1, 2, 3, 5, 6, 7):
+            program = Program()
+            program.load(1, MASK)
+            program.emit(immediate(10, 0, 55))
+            for source in (1, 0):
+                word = csr(10, address, source, operation)
+                program.trap(word, 2, word)
+            program.save(10)
+            program.trap(0x73, 8)
+            result.append(_case(f"protected_user_{name}_{operation}", program, {0: 55}, **common))
     program = Program()
     for index, value in enumerate((0, 0x800, 0x1000, 0x1800, 0xFFFFFFFF)):
         program.write_csr(0x300, value)

@@ -1,5 +1,8 @@
 /* SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com> */
 /* SPDX-License-Identifier: MIT */
+#ifndef ENV_CSR
+#define ENV_CSR 0x30a
+#endif
 .option norvc
 .option norelax
 .section .text.start,"ax",@progbits
@@ -14,25 +17,25 @@ _start:
     li t2, -1
     li a0, 55
 csr_op0:
-    csrrw a0, 0x30a, t2
+    csrrw a0, ENV_CSR, t2
     sw a0, 0(s0)
 csr_op1:
-    csrrs a0, 0x30a, t2
+    csrrs a0, ENV_CSR, t2
     sw a0, 4(s0)
 csr_op2:
-    csrrc a0, 0x30a, t2
+    csrrc a0, ENV_CSR, t2
     sw a0, 8(s0)
 csr_op3:
-    csrrwi a0, 0x30a, 31
+    csrrwi a0, ENV_CSR, 31
     sw a0, 12(s0)
 csr_op4:
-    csrrsi a0, 0x30a, 31
+    csrrsi a0, ENV_CSR, 31
     sw a0, 16(s0)
 csr_op5:
-    csrrci a0, 0x30a, 31
+    csrrci a0, ENV_CSR, 31
     sw a0, 20(s0)
 #if USER_PROFILE
-    csrr a0, 0x30a
+    csrr a0, ENV_CSR
     sw a0, 24(s0)
     li t0, -1
     csrw pmpaddr0, t0
@@ -45,22 +48,22 @@ csr_op5:
     mret
 user_start:
 user_op0:
-    csrrw a0, 0x30a, t2
+    csrrw a0, ENV_CSR, t2
     sw a0, 32(s0)
 user_op1:
-    csrrs a0, 0x30a, zero
+    csrrs a0, ENV_CSR, zero
     sw a0, 36(s0)
 user_op2:
-    csrrc a0, 0x30a, t2
+    csrrc a0, ENV_CSR, t2
     sw a0, 40(s0)
 user_op3:
-    csrrwi a0, 0x30a, 31
+    csrrwi a0, ENV_CSR, 31
     sw a0, 44(s0)
 user_op4:
-    csrrsi a0, 0x30a, 0
+    csrrsi a0, ENV_CSR, 0
     sw a0, 48(s0)
 user_op5:
-    csrrci a0, 0x30a, 31
+    csrrci a0, ENV_CSR, 31
     sw a0, 52(s0)
 user_ecall:
     ecall

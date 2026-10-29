@@ -134,9 +134,10 @@ def cases(enable_m=True, enable_c=True, protected_mode=True, *, enable_a=False,
             state = (0x7B1, 0x7B0, 0x300, 0x341, 0x342, 0x343)
             for number in state:
                 register(actions, number)
-            register(actions, 0x30A)
-            register(actions, 0x30A, 0xFFFFFFFF)
-            register(actions, 0x30A)
+            for number in (0x30A, 0x31A):
+                register(actions, number)
+                register(actions, number, 0xFFFFFFFF)
+                register(actions, number)
             for number in state:
                 register(actions, number)
             actions.extend(base.actions[insertion:])

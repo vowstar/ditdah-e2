@@ -111,7 +111,8 @@ verify-isa-menvcfg:
 	printf '%s\n' '{"resetVector":2147483648,"enableM":true,"enableC":true}' > "$(ISA_MENVCFG_OUTPUT)/machine.json"
 	python3 scripts/build_rtl.py --config "$(ISA_MENVCFG_OUTPUT)/minimal.json" --output "$(ISA_MENVCFG_OUTPUT)/minimal-rtl"
 	python3 scripts/build_rtl.py --config "$(ISA_MENVCFG_OUTPUT)/machine.json" --output "$(ISA_MENVCFG_OUTPUT)/machine-rtl"
-	bash test/isa/menvcfg.sh --profile "minimal=$(ISA_MENVCFG_OUTPUT)/minimal-rtl" --profile "machine=$(ISA_MENVCFG_OUTPUT)/machine-rtl" --output "$(ISA_MENVCFG_OUTPUT)/verification"
+	bash test/isa/menvcfg.sh --profile "minimal=$(ISA_MENVCFG_OUTPUT)/minimal-rtl" --profile "machine=$(ISA_MENVCFG_OUTPUT)/machine-rtl" --output "$(ISA_MENVCFG_OUTPUT)/low"
+	bash test/isa/menvcfg.sh --profile "minimal=$(ISA_MENVCFG_OUTPUT)/minimal-rtl" --profile "machine=$(ISA_MENVCFG_OUTPUT)/machine-rtl" --csr-address 0x31a --output "$(ISA_MENVCFG_OUTPUT)/high"
 
 verify-protection:
 	python3 test/protection_port.py

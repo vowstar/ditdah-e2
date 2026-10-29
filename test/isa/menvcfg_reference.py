@@ -120,7 +120,7 @@ def compare_external(trace, expected, completion):
     assert len(actual) == len(expected), 'External architectural event count differs'
     assert actual == expected, 'External architectural event mismatch'
     accesses = [row for row in actual if row[2] & 0x7f == 0x73
-                and (row[2] >> 12) & 7 in (1, 2, 3, 5, 6, 7) and row[2] >> 20 == 0x30a]
+                and (row[2] >> 12) & 7 in (1, 2, 3, 5, 6, 7) and row[2] >> 20 in (0x30a, 0x31a)]
     return {'events': len(actual), 'csrAccessesCompared': len(accesses),
             'successfulCsrResultsCompared': sum(not row[4] and row[3] is not None for row in accesses),
             'trapsCompared': sum(row[4] for row in actual), 'nextPcsCompared': len(actual)}
@@ -173,9 +173,10 @@ def rtl_control(case, expected, manifest, build_command, program, output, tools,
     directory = output / 'rejected-csr-control'
     rtl = directory / 'rtl'
     rtl.mkdir(parents=True)
+    address = case.words()[case.image.symbols['csr_op0']] >> 20
     for name in manifest['rtlHashes']:
         text = (output / 'rtl' / name).read_text()
-        (rtl / name).write_text(without_menvcfg(text) if name == 'DitDahE2Csr.sv' else text)
+        (rtl / name).write_text(without_menvcfg(text, address) if name == 'DitDahE2Csr.sv' else text)
     command = [str(rtl / Path(item).name) if item.endswith('.sv') else item for item in build_command]
     command[command.index('--Mdir') + 1] = str(directory / 'obj')
     rtl_hashes = {name: digest(rtl / name) for name in manifest['rtlHashes']}
@@ -199,7 +200,7 @@ def rtl_control(case, expected, manifest, build_command, program, output, tools,
         raise AssertionError('External checker accepted rejected menvcfg')
     assert digest(directory / 'obj/VDitDahE2') == simulator_hash
     assert all(digest(rtl / name) == value for name, value in rtl_hashes.items())
-    report = {'build': build, 'exitStatus': result.returncode, 'externalRejection': reason,
+    report = {'build': build, 'address': address, 'exitStatus': result.returncode, 'externalRejection': reason,
               'localModelCalledBeforeExternalComparison': False,
               'command': run_command, 'rtlHashes': rtl_hashes,
               'traceHash': hashlib.sha256(result.stdout.encode()).hexdigest(),
@@ -208,7 +209,7 @@ def rtl_control(case, expected, manifest, build_command, program, output, tools,
     return report
 
 
-def run_profile(name, rtl, output, linker, tools, previous=None):
+def run_profile(name, rtl, output, linker, tools, previous=None, csr_address=0x30a):
     output.mkdir()
     manifest_path = rtl / 'manifest.json'
     manifest = json.loads(manifest_path.read_text())
@@ -224,6 +225,7 @@ def run_profile(name, rtl, output, linker, tools, previous=None):
     compile_command = [tools['compiler']['path'], '-march=rv32i_zicsr', '-mabi=ilp32', '-mno-relax',
                        '-nostdlib', '-nostartfiles', '-static', '-Wl,--no-relax', '-T', str(linker),
                        '-DUSER_PROFILE=' + str(int(parameters['protectedMode'])),
+                       '-DENV_CSR=' + hex(csr_address),
                        str(ROOT / 'software/menvcfg_reference.S'), '-o', str(elf)]
     execute(compile_command, output / 'software-build')
     image = load_elf(elf, reset_vector=parameters['resetVector'], enable_c=parameters['enableC'],
@@ -293,14 +295,14 @@ def run_profile(name, rtl, output, linker, tools, previous=None):
     else:
         raise AssertionError('Changed signature was accepted')
     control = rtl_control(case, events, manifest, build_command, program, output, tools, previous) if parameters['protectedMode'] else None
-    report = {'name': name, 'parameters': parameters, 'isa': isa, 'rtlManifestHash': digest(manifest_path),
+    report = {'name': name, 'csrAddress': csr_address, 'parameters': parameters, 'isa': isa, 'rtlManifestHash': digest(manifest_path),
               'elfHash': digest(elf), 'simulatorHash': digest(simulator), 'compileCommand': compile_command,
               'programHash': program_hash, 'linkerHash': digest(linker),
               'build': build, 'spikeCommand': spike_command, 'runs': runs,
               'successfulInstructions': len(sequence), 'trapCauses': causes, 'expectedTraps': case.expected_traps,
               'expectedSignature': case.signature, 'signatureControlRejected': True,
               'rtlControl': control, 'exitStatus': 0,
-              'fiomReadOnlyZeroInBothSelectedImplementations': parameters['protectedMode']}
+              'fixedZeroEnvironmentCsrInBothSelectedImplementations': parameters['protectedMode']}
     assert digest(manifest_path) == report['rtlManifestHash']
     assert all(digest(rtl / key) == value for key, value in manifest['rtlHashes'].items())
     assert all(digest(frozen / key) == value for key, value in manifest['rtlHashes'].items())
@@ -315,6 +317,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--linker', type=Path, default=ROOT / 'software/menvcfg_reference.ld')
     parser.add_argument('--reuse-build', action='append', default=[], metavar='PROFILE=DIRECTORY')
+    parser.add_argument('--csr-address', type=lambda text: int(text, 0), choices=(0x30a, 0x31a), default=0x30a)
     args = parser.parse_args()
     assert not args.output.exists()
     output = args.output.resolve()
@@ -345,17 +348,18 @@ def main():
         assert name not in names, 'Duplicate profile'
         names.add(name)
         previous = Path(reusable.pop(name)).resolve() if name in reusable else None
-        results.append(run_profile(name, Path(rtl).resolve(), output / name, frozen_linker, tools, previous))
+        results.append(run_profile(name, Path(rtl).resolve(), output / name, frozen_linker, tools,
+                                   previous, args.csr_address))
     assert not reusable, 'Unknown build reuse profile'
     assert initial == input_hashes(), 'Frozen input changed'
     assert all(digest(output / 'inputs' / name) == value for name, value in initial.items()), 'Input copy changed'
     assert digest(args.linker) == digest(frozen_linker) == linker_hash, 'Linker changed'
     assert all(digest(record['path']) == record['sha256'] for record in tools.values()), 'Tool changed'
     summary = {'scope': 'Fixed menvcfg programs with full successful retirement comparison and exact signatures',
-               'exitStatus': 0, 'sourceHashes': initial, 'tools': tools, 'results': results,
+               'exitStatus': 0, 'csrAddress': args.csr_address, 'sourceHashes': initial, 'tools': tools, 'results': results,
                'command': sys.argv, 'linkerHash': linker_hash,
                'referenceRevision': 'de5094a1a901d77ff44f89b38e00fefa15d4018e',
-               'fiomIsWarl': True, 'fiomScope': 'Both frozen implementations choose read-only zero. Other legal WARL choices require a distinct profile.'}
+               'fixedZeroScope': 'The selected CSR reads zero and ignores writes when U-mode is enabled.'}
     (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print('PASS: menvcfg reference check')
 
