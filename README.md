@@ -40,7 +40,7 @@ Use this configuration for its complete program collection:
 `DitDahE2Platform` requires A disabled. `DitDahE2AtomicPlatform` requires A enabled.
 
 Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
-Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`.
+Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT` and `SAIL_OUTPUT`.
 Selected checks do not establish complete ISA conformance or physical signoff.
 `make verify-signoff` also checks retirement packets and interrupt events against the native simulation trace.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
@@ -64,3 +64,4 @@ Project-authored files use the MIT license. `REUSE.toml` records file declaratio
 DitDah-E1 and DitDah-A1 provided project organization and development conventions.
 The Nix toolchain shares code with DitDah-E1.
 [Zaozi](https://github.com/xinpian-tech/zaozi) provides hardware description and pinned tools.
+[Sail RISC-V](https://github.com/riscv/sail-riscv) supplies the independent instruction model.

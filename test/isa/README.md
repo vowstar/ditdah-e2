@@ -64,3 +64,21 @@ bash test/isa/protected.sh --verification result/protected-reference-platform --
 Keep the platform verification output with the reference report.
 
 Use `make verify-isa-menvcfg` for environment CSR checks and a new `ISA_MENVCFG_OUTPUT` directory for each run.
+
+## Sail comparison
+
+For core profiles, generate RTL at `0x80000000`, with A and debug disabled.
+The runner checks native Sail instruction events and the final memory signature from the same ELF.
+
+```sh
+bash test/isa/sail.sh --profile imc=result/isa-rtl --output result/sail
+```
+
+Use profile `i` with M and C disabled, `imc` with both enabled, or `mu` with both and protected mode enabled.
+Profile `b` also requires protected mode and all three bit options. Repeat `--profile` to check multiple configurations.
+Use `zba`, `zbb` or `zbs` with only that bit option enabled in the protected configuration.
+For atomics, pass `--profile a=DESIGN` with an atomic platform built at `0x80000000` and the default shared SRAM map.
+The atomic comparison uses actual SRAM writes and competitor reads for the final signature.
+Use a new output directory. [sail-tools.nix](../../nix/sail-tools.nix) pins the model and build tools.
+The fixtures compare live retirement counts within a fixed instruction interval.
+External interrupts, debugger intervention and external time require separate checks.

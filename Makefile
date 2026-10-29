@@ -11,6 +11,8 @@ PMP_DATA_OUTPUT ?= result/pmp-data
 INTERRUPT_OUTPUT ?= result/interrupt-stress
 FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
 FETCH_PERFORMANCE_ARGS ?=
+SAIL_PROFILES ?= imc=result/isa-rtl
+SAIL_OUTPUT ?= result/sail
 
 .PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
@@ -135,9 +137,12 @@ verify-signoff: rtl
 	python3 test/formal.py
 	python3 test/core_formal.py
 
-.PHONY: verify-retirement
+.PHONY: verify-retirement verify-sail
 verify-retirement: rtl
 	python3 test/verify.py --rvfi
+
+verify-sail:
+	bash test/isa/sail.sh $(foreach profile,$(SAIL_PROFILES),--profile "$(profile)") --output "$(SAIL_OUTPUT)"
 
 verify-formal: rtl
 	python3 test/formal.py
