@@ -11,6 +11,9 @@ PMP_DATA_OUTPUT ?= result/pmp-data
 INTERRUPT_OUTPUT ?= result/interrupt-stress
 FETCH_PERFORMANCE_OUTPUT ?= result/fetch-performance
 FETCH_PERFORMANCE_ARGS ?=
+RVFI_RTL ?= result/rtl
+RVFI_OUTPUT ?= result/rvfi
+RVFI_ARGS ?=
 SAIL_PROFILES ?= imc=result/isa-rtl
 SAIL_OUTPUT ?= result/sail
 
@@ -137,9 +140,12 @@ verify-signoff: rtl
 	python3 test/formal.py
 	python3 test/core_formal.py
 
-.PHONY: verify-retirement verify-sail
+.PHONY: verify-retirement verify-rvfi verify-sail
 verify-retirement: rtl
 	python3 test/verify.py --rvfi
+
+verify-rvfi:
+	bash test/rvfi.sh --rtl "$(RVFI_RTL)" --output "$(RVFI_OUTPUT)" $(RVFI_ARGS)
 
 verify-sail:
 	bash test/isa/sail.sh $(foreach profile,$(SAIL_PROFILES),--profile "$(profile)") --output "$(SAIL_OUTPUT)"
