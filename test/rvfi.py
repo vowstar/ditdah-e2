@@ -28,6 +28,10 @@ CSR_NAMES = ("misa", "mstatus", "mepc", "mcause", "mtval", "mcycle", "minstret",
 M_INSTRUCTIONS = ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")
 CSRC_ANY_HASH = "62b196ab5a14f8d532d3a26666fcec9a082b708061aabab2f9dea0cc87243373"
 BUS_IMEM_HASH = "a623f3f85979c656264b814727320130b8818cde80a56b88aebc4e7cec714ec0"
+SIGNED_MODEL_HASHES = {
+    "div": "db96a881dfc4ed7be8fb1f4cfcd093436d797a17c6f6b9b53e90e405c53c99c6",
+    "rem": "eb3e58ca9f31aa0503b3f05c8e2fb86c0cdf1220ae3e96e6f92c14c2a519c00c",
+}
 DISABLED_COVER_SOURCES = {
     "bus_imem_fault_ch0": ("rvfi_bus_imem_fault_check.sv", 55, 1),
     "bus_dmem_fault_ch0": ("rvfi_bus_dmem_fault_check.sv", 72, 0),
@@ -216,6 +220,38 @@ def imem_fault_compatibility(suite):
             "reason": "Local PMP rejection can retire insn=0 without an external failed fetch",
             "genericTrapExcluded": False, "environmentConstraintsAdded": False,
             "companion": "rvfi_fault_check and rvfi_fault_guard"}
+
+
+def signed_model_compatibility(suite):
+    """Keep signed arithmetic inside the pinned unsigned result conditional."""
+    prepared = []
+    for name, operator in (("div", "/"), ("rem", "%")):
+        path = suite / "insns" / ("insn_" + name + ".v")
+        if digest(path) != SIGNED_MODEL_HASHES[name]:
+            raise ValueError("The signed arithmetic correction requires the pinned original model")
+        original = path.read_text()
+        expression = f"$signed(rvfi_rs1_rdata) {operator} $signed(rvfi_rs2_rdata)"
+        old, new = expression + ";", "$signed(" + expression + ");"
+        if original.count(old) != 1 or new in original:
+            raise ValueError("The pinned signed arithmetic expression no longer matches")
+        prepared.append((path, original, original.replace(old, new, 1)))
+    evidence = suite / "compatibility"
+    evidence.mkdir(exist_ok=True)
+    changes = []
+    for path, original, adjusted in prepared:
+        (evidence / (path.name + ".original")).write_text(original)
+        diff = "".join(difflib.unified_diff(
+            original.splitlines(keepends=True), adjusted.splitlines(keepends=True),
+            fromfile=path.name + ".original", tofile=path.name))
+        (evidence / (path.name + ".diff")).write_text(diff)
+        path.chmod(path.stat().st_mode | 0o200)
+        path.write_text(adjusted)
+        changes.append({"file": "insns/" + path.name,
+                        "originalSha256": hashlib.sha256(original.encode()).hexdigest(),
+                        "adjustedSha256": digest(path),
+                        "change": "retain signed division or remainder in the unsigned conditional",
+                        "environmentConstraintsAdded": False})
+    return changes
 
 
 def fault_guard_wrapper(text, control=None):
@@ -791,11 +827,14 @@ def main():
     suite = args.output / "inputs/riscv-formal"
     for folder in ("checks", "insns"):
         shutil.copytree(source / folder, suite / folder)
+    shutil.copyfile(source / "COPYING", suite / "COPYING")
     compatibility = []
     if manifest["parameters"]["protectedMode"] and "csr" in families:
         compatibility.append(csrc_identity_compatibility(suite))
     if "bus" in families:
         compatibility.append(imem_fault_compatibility(suite))
+    if manifest["parameters"]["enableM"] and "insn" in families:
+        compatibility.extend(signed_model_compatibility(suite))
     core = suite / "cores/ditdah_e2"
     core.mkdir(parents=True)
     files = []

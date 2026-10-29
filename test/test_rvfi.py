@@ -3,14 +3,92 @@
 """Check RVFI task acceptance and explicit profile boundaries."""
 
 from pathlib import Path
+import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import rvfi
 from rvfi import ACTIVE_PROCESSES, check_task_set, configuration, configure_replay, counterexample_witness, csrc_identity_compatibility, csr_guard_wrapper, disabled_typed_cover_model, execute, fault_guard_wrapper, imem_fault_compatibility, m_operand_wrapper, mutation, reachability_failure, reachability_wrapper, select_isa, select_tasks, task_status, validate_cover_removal
 
 
 class RvfiTests(unittest.TestCase):
+    def signed_models(self, suite):
+        models = suite / "insns"
+        models.mkdir()
+        hashes = {}
+        for name, operator in (("div", "/"), ("rem", "%")):
+            zero = "32'hffffffff" if name == "div" else "rvfi_rs1_rdata"
+            overflow = "32'h80000000" if name == "div" else "32'd0"
+            source = f"""module model_{name}(
+input [31:0] rvfi_rs1_rdata, rvfi_rs2_rdata, output [31:0] result);
+assign result = rvfi_rs2_rdata == 0 ? {zero} :
+    rvfi_rs1_rdata == 32'h80000000 && rvfi_rs2_rdata == 32'hffffffff ? {overflow} :
+    $signed(rvfi_rs1_rdata) {operator} $signed(rvfi_rs2_rdata);
+endmodule
+"""
+            path = models / ("insn_" + name + ".v")
+            path.write_text(source)
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashes
+
+    def test_signed_model_correction_preserves_arithmetic_context(self):
+        with tempfile.TemporaryDirectory() as name:
+            suite = Path(name)
+            hashes = self.signed_models(suite)
+            with patch.dict(rvfi.SIGNED_MODEL_HASHES, hashes):
+                changes = rvfi.signed_model_compatibility(suite)
+                self.assertEqual(len(changes), 2)
+                with self.assertRaisesRegex(ValueError, "pinned original"):
+                    rvfi.signed_model_compatibility(suite)
+            edges = (0, 1, 2, 0xffffffff, 0xfffffffe, 0x80000000, 0x7fffffff)
+            statements = []
+            for left in edges:
+                for right in edges:
+                    a = left if left < 1 << 31 else left - (1 << 32)
+                    b = right if right < 1 << 31 else right - (1 << 32)
+                    quotient = (abs(a) // abs(b)) * (-1 if (a < 0) != (b < 0) else 1) if b else -1
+                    remainder = a - quotient * b if b else a
+                    statements.append(
+                        f"left=32'h{left:08x};right=32'h{right:08x};#1;"
+                        f"if(q!==32'h{quotient & 0xffffffff:08x} || "
+                        f"r!==32'h{remainder & 0xffffffff:08x}) "
+                        "$fatal(1,\"signed arithmetic mismatch\");")
+            bench = suite / "bench.sv"
+            bench.write_text("module bench;reg[31:0]left,right;wire[31:0]q,r;\n"
+                             "model_div d(left,right,q);model_rem m(left,right,r);\n"
+                             "initial begin\n" + "\n".join(statements) + "\n$finish;end endmodule\n")
+            for original in (False, True):
+                paths = [suite / ("compatibility/insn_" + op + ".v.original" if original else
+                                  "insns/insn_" + op + ".v") for op in ("div", "rem")]
+                executable = suite / ("original.vvp" if original else "corrected.vvp")
+                compiled = subprocess.run(["iverilog", "-g2012", "-s", "bench", "-o",
+                                           str(executable), *map(str, paths), str(bench)],
+                                          capture_output=True, text=True)
+                self.assertEqual(compiled.returncode, 0, compiled.stderr)
+                checked = subprocess.run(["vvp", str(executable)], capture_output=True, text=True)
+                if original:
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn("signed arithmetic mismatch", checked.stdout)
+                else:
+                    self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_signed_model_correction_validates_both_inputs_before_writing(self):
+        with tempfile.TemporaryDirectory() as name:
+            suite = Path(name)
+            hashes = self.signed_models(suite)
+            first = suite / "insns/insn_div.v"
+            before = first.read_bytes()
+            second = suite / "insns/insn_rem.v"
+            second.write_bytes(second.read_bytes() + b"\n")
+            with patch.dict(rvfi.SIGNED_MODEL_HASHES, hashes):
+                with self.assertRaisesRegex(ValueError, "pinned original"):
+                    rvfi.signed_model_compatibility(suite)
+            self.assertEqual(first.read_bytes(), before)
+            self.assertFalse((suite / "compatibility").exists())
+
     def parameters(self, **changes):
         return dict(enableM=False, enableC=False, enableA=False, enableDebug=False,
                     enableZba=False, enableZbb=False, enableZbs=False) | changes
