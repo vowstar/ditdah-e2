@@ -31,10 +31,11 @@
         '';
         maven = pkgs.mkMavenRepository { lockFile = "${zaozi}/mtf.lock.json"; };
         crossCompiler = pkgs.pkgsCross.riscv32-embedded.stdenv.cc;
-        softwareTools = [ crossCompiler crossCompiler.bintools pkgs.python3 ];
+        python = pkgs.python3.withPackages (ps: [ ps.z3-solver ]);
+        softwareTools = [ crossCompiler crossCompiler.bintools python ];
         tools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install
           pkgs.verilator pkgs.iverilog pkgs.yosys pkgs.sby pkgs.z3 pkgs.reuse
-          pkgs.python3 pkgs.tcl pkgs.gnumake maven ] ++ softwareTools;
+          python pkgs.tcl pkgs.gnumake maven ] ++ softwareTools;
       in {
         packages.default = pkgs.runCommand "ditdah-e2-rtl" {
           nativeBuildInputs = tools;
