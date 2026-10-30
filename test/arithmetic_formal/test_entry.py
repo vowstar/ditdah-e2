@@ -72,13 +72,13 @@ class ArithmeticEntryTests(unittest.TestCase):
             multiply_contracts.bind(0, text, helper_text=changed)
 
     def test_all_operations_keep_full_request_domain(self):
-        for operation in range(4):
+        for operation in range(8):
             text = source.bench(operation)
             self.assertEqual(text.count(": assume"), 5)
             self.assertIn("input logic [2:0] request_bits_operation", text)
             self.assertIn("input logic [31:0] request_bits_left", text)
             self.assertIn("input logic [31:0] request_bits_right", text)
-            self.assertEqual(len(facts.goals(operation)), 65)
+            self.assertEqual(len(facts.goals(operation)), 65 if operation < 4 else 70)
             self.assertNotIn("derived_actual_total_update", text)
 
     def test_operation_parameter_cannot_be_relabelled(self):

@@ -31,9 +31,9 @@ def reference(text):
 
 
 def bench(operation, negative=False):
-    if not 0 <= operation < 4:
+    if not 0 <= operation < 8:
         raise ValueError("Unknown arithmetic operation")
-    name = "multiply.sv"
+    name = "multiply.sv" if operation < 4 else "divide.sv"
     value = (HERE / name).read_text()
     marker = '    `include "reference.svh"'
     if value.count(marker) != 1:
@@ -116,5 +116,5 @@ def source_hashes():
 
 def collection_hashes():
     names = ("run.py", "native.py", "facts.py", "source.py", "syntax.py", "collect.tcl", "boolean.py", "induction.sv",
-             "multiply.sv", "reference.svh", "multiply_step.sv")
+             "multiply.sv", "divide.sv", "reference.svh", "multiply_step.sv", "divide_step.sv")
     return {name: digest((HERE / name).read_bytes()) for name in names}

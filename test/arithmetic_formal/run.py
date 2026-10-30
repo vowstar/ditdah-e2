@@ -39,7 +39,7 @@ def operation_list(values):
 
 
 def expected_case(operation, negative, rtl_bytes, time_limit):
-    step = "multiply_step.sv"
+    step = "multiply_step.sv" if operation < 4 else "divide_step.sv"
     plan = {"operation": operation, "top": "md_math_bench",
             "sources": ["DitDahE2MultiplyDivide.sv", "bench.sv", step],
             "goals": [["arithmetic_matches_reference", []]] if negative else
@@ -114,7 +114,7 @@ def validate_inputs(evidence):
         raise ValueError("Native proof time limit is invalid")
     operations = manifest["operations"]
     if (not operations or len(operations) != len(set(operations)) or
-            any(type(op) is not int or not 0 <= op < 4 for op in operations)):
+            any(type(op) is not int or not 0 <= op < 8 for op in operations)):
         raise ValueError("Arithmetic operation set is invalid")
     for operation in operations:
         for kind in ("facts", "result-control"):

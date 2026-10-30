@@ -212,15 +212,25 @@ def replay(evidence, manifest, output, z3_executable):
             "collectedSourceSha256": native.digest(positive / "bench.sv"),
             "collectedDutSha256": native.digest(positive / "DitDahE2MultiplyDivide.sv"),
         }
-        from . import multiply_contracts
+        if operation < 4:
+            from . import multiply_contracts
 
-        contract = multiply_contracts.bind(
-            operation,
-            (positive / "bench.sv").read_text(),
-            (positive / "DitDahE2MultiplyDivide.sv").read_text(),
-            (positive / "multiply_step.sv").read_text(),
-        )
-        report = prove_multiply(operation, contract, native_facts, result)
+            contract = multiply_contracts.bind(
+                operation,
+                (positive / "bench.sv").read_text(),
+                (positive / "DitDahE2MultiplyDivide.sv").read_text(),
+                (positive / "multiply_step.sv").read_text(),
+            )
+            report = prove_multiply(operation, contract, native_facts, result)
+        else:
+            from . import division_contracts, division_rules
+
+            contract = division_contracts.bind_division(
+                (positive / "bench.sv").read_text(),
+                (positive / "DitDahE2MultiplyDivide.sv").read_text(),
+                operation,
+            )
+            report = division_rules.prove_division(contract, native_facts, output_dir=result)
         if report.get("originalArithmeticCompositionalProven") is not True:
             raise ValueError("The complete original arithmetic predicate was not proved")
         write_json(result / "source-contracts.json", contract)

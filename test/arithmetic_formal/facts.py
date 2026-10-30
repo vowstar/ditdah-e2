@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Native facts used by the independent arithmetic proof."""
 
-INSTRUCTIONS = ("mul", "mulh", "mulhsu", "mulhu")
+INSTRUCTIONS = ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")
 ASSUMPTIONS = ("initial_synchronous_reset", "producer_keeps_valid", "producer_keeps_operation", "producer_keeps_left", "producer_keeps_right")
 
 MULTIPLY = (('blocked_result_keeps_value', ()),
@@ -76,11 +76,98 @@ MULTIPLY = (('blocked_result_keeps_value', ()),
  ('response_hold_expected_matches_past', ()),
  ('snapshot_negative_is_actual_past', ()))
 
+DIVIDE = (('owner_has_actual_state', ()),
+ ('owner_operation', ()),
+ ('owner_sign', ()),
+ ('owner_remainder_sign', ()),
+ ('owner_zero_divisor', ()),
+ ('owner_raw_dividend', ()),
+ ('owner_divisor', ()),
+ ('iteration_in_range', ()),
+ ('quotient_tracks_unprocessed_bits', ()),
+ ('division_remainder_iteration_bound', ('owner_operation', 'iteration_in_range')),
+ ('remainder_fits_word',
+  ('division_remainder_iteration_bound', 'iteration_in_range')),
+ ('remainder_below_divisor', ()),
+ ('cancel_suppresses_request', ()),
+ ('cancel_suppresses_response', ()),
+ ('occupied_unit_rejects_new_request', ()),
+ ('idle_unit_accepts_requests', ()),
+ ('only_one_accepted_owner', ()),
+ ('response_has_accepted_owner', ()),
+ ('result_deadline_age', ()),
+ ('result_valid_by_34', ()),
+ ('blocked_result_keeps_valid', ()),
+ ('blocked_result_keeps_value', ()),
+ ('division_no_subtract.exact_polynomial_transition', ()),
+ ('division_subtract.exact_polynomial_transition', ()),
+ ('division_history_for_owner',
+  ('response_has_accepted_owner', 'only_one_accepted_owner')),
+ ('division_owner_words_stable',
+  ('occupied_unit_rejects_new_request', 'only_one_accepted_owner')),
+ ('division_partial_fits_31_bits', ('iteration_in_range',)),
+ ('division_previous_remainder_fits', ('remainder_fits_word',)),
+ ('division_actual_control_step', ('owner_operation', 'iteration_in_range')),
+ ('division_actual_remainder_step', ('owner_operation', 'iteration_in_range')),
+ ('division_actual_quotient_step', ('owner_operation', 'iteration_in_range')),
+ ('division_actual_divisor_stable', ('owner_operation', 'iteration_in_range')),
+ ('division_actual_finish_valid', ('owner_has_actual_state', 'owner_operation')),
+ ('division_epoch_continuity',
+  ('division_history_for_owner', 'owner_has_actual_state')),
+ ('division_previous_partial_fits', ('division_partial_fits_31_bits',)),
+ ('division_next_source_bit',
+  ('quotient_tracks_unprocessed_bits', 'division_owner_words_stable')),
+ ('division_terminal_fields', ('iteration_in_range',)),
+ ('division_actual_finish_value',
+  ('owner_operation',
+   'owner_sign',
+   'owner_remainder_sign',
+   'owner_raw_dividend',
+   'division_owner_words_stable')),
+ ('division_initial_state',
+  ('division_epoch_continuity', 'iteration_in_range', 'owner_divisor')),
+ ('division_mask_step',
+  ('division_actual_quotient_step',
+   'division_actual_control_step',
+   'division_previous_partial_fits')),
+ ('division_prefix_step',
+  ('division_next_source_bit',
+   'division_actual_control_step',
+   'division_owner_words_stable')),
+ ('division_initial_conservation', ('division_initial_state',)),
+ ('division_epoch_active_has_predecessor', ()),
+ ('division_snapshot_remainder', ()),
+ ('division_snapshot_quotient', ()),
+ ('division_snapshot_divisor', ()),
+ ('division_snapshot_owner_left', ()),
+ ('division_snapshot_owner_right', ()),
+ ('division_snapshot_owner_operation', ()),
+ ('division_snapshot_iteration', ()),
+ ('division_snapshot_zero_divisor', ()),
+ ('division_snapshot_step_flag', ()),
+ ('division_snapshot_owner_flag', ()),
+ ('division_snapshot_accepted_flag', ()),
+ ('division_snapshot_finish_flag', ()),
+ ('division_initial_frame_is_idle', ()),
+ ('pending_capture_or_hold_predecessor', ()),
+ ('captured_expected_from_request', ()),
+ ('captured_owner_left_from_request', ()),
+ ('captured_owner_right_from_request', ()),
+ ('expected_without_accept_holds', ()),
+ ('owner_left_without_accept_holds', ()),
+ ('owner_right_without_accept_holds', ()),
+ ('division_response_epoch_has_predecessor', ()),
+ ('division_snapshot_response_hold', ()),
+ ('division_snapshot_previous_response', ()),
+ ('division_snapshot_previous_response_valid', ()),
+ ('division_snapshot_previous_response_ready', ()),
+ ('division_snapshot_previous_cancel', ()),
+ ('division_response_hold_precludes_accept', ()))
 
 def goals(operation):
-    if type(operation) is not int or not 0 <= operation < 4:
+    if type(operation) is not int or not 0 <= operation < 8:
         raise ValueError("Unknown arithmetic operation")
-    values = MULTIPLY
+    values = MULTIPLY if operation < 4 else DIVIDE
     if operation in (1, 2, 3):
         values = tuple((name.replace("finish_low", "finish_high"),
                         tuple(dep.replace("finish_low", "finish_high") for dep in deps))
@@ -94,6 +181,6 @@ def goals(operation):
 
 
 def covers(operation):
-    initial = "initial_frame_reached"
+    initial = "initial_frame_reached" if operation < 4 else "division_initial_frame_reached"
     return (initial, "result_reached", "held_result_completion_reached",
             "high_operand_bits_reached", "mixed_operation_completion")

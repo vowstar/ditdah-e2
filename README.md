@@ -46,8 +46,8 @@ Selected checks do not establish complete ISA conformance or physical signoff.
 `make verify-rvfi` runs bounded external RVFI checks. Set `RVFI_RTL`, `RVFI_OUTPUT` and `RVFI_ARGS` for the selected profile.
 RVFI profiles require a zero reset address, with A and debug disabled. B checks require all three bit options, with M and C disabled.
 `make verify-arithmetic` requires licensed JG as `jg` or `JG_BIN` and generated M-enabled RTL in `ARITHMETIC_RTL`.
-It proves 32-bit unit multiplication results after initial reset from native properties and independent Z3 rules.
-`ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=4` and `fullUnitMProven=false` for a multiplication run.
+It proves 32-bit unit results after initial reset from native properties and independent Z3 rules.
+`ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=8` and `fullUnitMProven=true` for a complete run.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.
 
