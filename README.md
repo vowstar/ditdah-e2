@@ -40,11 +40,14 @@ Use this configuration for its complete program collection:
 `DitDahE2Platform` requires A disabled. `DitDahE2AtomicPlatform` requires A enabled.
 
 Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput`.
-Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`, `RVFI_OUTPUT` and `SAIL_OUTPUT`.
+Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`, `RVFI_OUTPUT`, `SAIL_OUTPUT` and `ARITHMETIC_OUTPUT`.
 Selected checks do not establish complete ISA conformance or physical signoff.
 `make verify-signoff` also checks retirement packets and interrupt events against the native simulation trace.
 `make verify-rvfi` runs bounded external RVFI checks. Set `RVFI_RTL`, `RVFI_OUTPUT` and `RVFI_ARGS` for the selected profile.
 RVFI profiles require a zero reset address, with A and debug disabled. B checks require all three bit options, with M and C disabled.
+`make verify-arithmetic` requires licensed JG as `jg` or `JG_BIN` and generated M-enabled RTL in `ARITHMETIC_RTL`.
+It proves 32-bit unit multiplication results after initial reset from native properties and independent Z3 rules.
+`ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=4` and `fullUnitMProven=false` for a multiplication run.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
 [Architectural tests](test/isa/README.md) lists the test commands and configurations.
 

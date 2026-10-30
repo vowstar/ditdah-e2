@@ -16,6 +16,9 @@ RVFI_OUTPUT ?= result/rvfi
 RVFI_ARGS ?=
 SAIL_PROFILES ?= imc=result/isa-rtl
 SAIL_OUTPUT ?= result/sail
+ARITHMETIC_RTL ?= result/rtl
+ARITHMETIC_OUTPUT ?= result/arithmetic
+ARITHMETIC_ARGS ?=
 
 .PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
@@ -45,6 +48,12 @@ verify-axi:
 
 verify-multiply:
 	python3 test/multiply_divide_formal.py
+
+.PHONY: verify-arithmetic
+verify-arithmetic:
+	python3 test/arithmetic_formal/run.py prepare --rtl "$(ARITHMETIC_RTL)" --output "$(ARITHMETIC_OUTPUT)/evidence" $(ARITHMETIC_ARGS)
+	python3 test/arithmetic_formal/run.py collect --evidence "$(ARITHMETIC_OUTPUT)/evidence" --private-output "$(ARITHMETIC_OUTPUT)/native-private"
+	python3 test/arithmetic_formal/run.py replay --evidence "$(ARITHMETIC_OUTPUT)/evidence" --output "$(ARITHMETIC_OUTPUT)/replay"
 
 verify-bit:
 	python3 test/bit_operations.py
