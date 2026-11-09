@@ -15,8 +15,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "test"))
-from elf import load_elf
+sys.path.insert(0, str(ROOT))
+from test.common.elf import load_elf
 
 
 def digest(path):
@@ -25,7 +25,7 @@ def digest(path):
 
 def sources():
     paths = sorted((ROOT / "software").glob("*"))
-    paths += [ROOT / name for name in ("scripts/build_software.py", "test/elf.py", "flake.lock")]
+    paths += [ROOT / name for name in ("scripts/build_software.py", "test/common/elf.py", "flake.lock")]
     return {str(path.relative_to(ROOT)): digest(path) for path in paths if path.is_file()}
 
 

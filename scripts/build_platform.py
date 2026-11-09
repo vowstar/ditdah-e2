@@ -82,7 +82,7 @@ def build(output, platform_path=ROOT / "platform.json", core=None, *, atomic=Fal
     top = "DitDahE2AtomicPlatformTop" if atomic else TOP
     paths = sorted((ROOT / "ditdah_e2/src").glob("*.scala")) + sorted((ROOT / "nix").glob("*.nix"))
     paths += [ROOT / name for name in ("flake.nix", "flake.lock", "scripts/build_rtl.py",
-                                      "scripts/build_platform.py", "scripts/platform_map.py", "test/test_platform_map.py")]
+                                      "scripts/build_platform.py", "scripts/platform_map.py", "test/test_scripts/test_platform_map.py")]
     if atomic:
         paths += [ROOT / "ditdah_e2/src/AtomicSram.sv", ROOT / "scripts/build_atomic_platform.py"]
     originals = {str(path.relative_to(ROOT)): path.read_bytes() for path in paths}

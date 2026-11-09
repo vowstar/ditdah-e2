@@ -49,7 +49,7 @@ RVFI profiles require a zero reset address, with A and debug disabled. B checks 
 It proves 32-bit unit results after initial reset from native properties and independent Z3 rules.
 `ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=8` and `fullUnitMProven=true` for a complete run.
 [Integration](doc/microarchitecture.md) defines the memory and reset contracts.
-[Architectural tests](test/isa/README.md) lists the test commands and configurations.
+[Architectural tests](test/test_isa/README.md) lists the test commands and configurations.
 
 ## GDS utilities
 

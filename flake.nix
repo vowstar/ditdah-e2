@@ -53,9 +53,11 @@
           nativeBuildInputs = softwareTools;
         } ''
           cp -R ${./software} software
-          mkdir scripts test
+          mkdir -p scripts test/common
           cp ${./scripts/build_software.py} scripts/build_software.py
-          cp ${./test/elf.py} test/elf.py
+          cp ${./test/__init__.py} test/__init__.py
+          cp ${./test/common/__init__.py} test/common/__init__.py
+          cp ${./test/common/elf.py} test/common/elf.py
           cp ${./flake.lock} flake.lock
           python3 scripts/build_software.py --output "$out"
         '';
