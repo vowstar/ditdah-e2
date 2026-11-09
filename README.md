@@ -2,8 +2,8 @@
 
 DitDah-E2 is a three-stage RV32 processor for embedded control.
 It issues at most one instruction per cycle and preserves program order.
-The default configuration implements RV32IMC, Zicsr, Zicntr and Zifencei in machine mode.
-It includes precise traps, software, timer and external interrupts, counters, MRET and WFI.
+The full configuration enables RV32IMC, Zicsr, Zicntr, Zifencei, A, Zba, Zbb, Zbs, protectedMode and debug.
+It includes precise traps, software, timer and external interrupts, counters, MRET and WFI; each option can be disabled independently.
 
 | Option | Default | Effect |
 | --- | --- | --- |
