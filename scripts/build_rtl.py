@@ -18,7 +18,7 @@ INSTRUCTIONS = ["lui", "auipc", "jal", "jalr", "beq", "bne", "blt", "bge", "bltu
                 "sltu", "xor", "srl", "sra", "or", "and", "fence", "ecall", "ebreak",
                 "csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "mret", "wfi", "fence.i"]
 A_INSTRUCTIONS = ["lr.w", "sc.w", "amoswap.w", "amoadd.w", "amoxor.w", "amoand.w", "amoor.w",
-                  "amomin.w", "amomax.w", "amominu.w", "amomaxu.w"]
+                  "amomin", "amomax.w", "amominu", "amomaxu.w"]
 M_INSTRUCTIONS = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 C_INSTRUCTIONS = ["c.addi4spn", "c.lw", "c.sw", "c.addi", "c.jal", "c.li", "c.lui", "c.addi16sp",
                   "c.srli", "c.srai", "c.andi", "c.sub", "c.xor", "c.or", "c.and", "c.j", "c.beqz",
@@ -29,10 +29,13 @@ BIT_INSTRUCTIONS = {
             "sext.b", "sext.h", "zext.h", "rol", "ror", "rori", "orc.b", "rev8"],
     "Zbs": ["bclr", "bclri", "bext", "bexti", "binv", "binvi", "bset", "bseti"],
 }
+TOPS = ["DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge"]
 
 
 def configuration(value):
-    if not isinstance(value, dict) or value.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs"}:
+    fields = {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA",
+              "enableZba", "enableZbb", "enableZbs", "enableJtag", "jtagIdcode"}
+    if not isinstance(value, dict) or value.keys() - fields:
         raise ValueError("Unknown core configuration field")
     enable_c = value.get("enableC", True)
     if type(enable_c) is not bool:
@@ -55,7 +58,21 @@ def configuration(value):
     bits = {"enable" + name: value.get("enable" + name, False) for name in BIT_INSTRUCTIONS}
     if any(type(enabled) is not bool for enabled in bits.values()):
         raise ValueError("Bit extension options must be Boolean")
-    return {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected, "enableDebug": debug, "enableA": atomic, **bits}
+    jtag = value.get("enableJtag", False)
+    if type(jtag) is not bool:
+        raise ValueError("enableJtag must be a Boolean")
+    idcode = value.get("jtagIdcode")
+    if idcode is not None and (type(idcode) is not int or not 0 < idcode <= 0xFFFFFFFF or not idcode & 1):
+        raise ValueError("jtagIdcode must be an odd unsigned 32-bit integer")
+    if jtag and not debug:
+        raise ValueError("enableJtag requires enableDebug")
+    if jtag and idcode is None:
+        raise ValueError("enableJtag requires an explicit jtagIdcode")
+    result = {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected,
+              "enableDebug": debug, "enableA": atomic, **bits}
+    if jtag or idcode is not None:
+        result |= {"enableJtag": jtag, "jtagIdcode": idcode}
+    return result
 
 
 def digest(path):
@@ -74,6 +91,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, default=Path("result/rtl"))
+    parser.add_argument("--top", choices=TOPS, default="DitDahE2")
     args = parser.parse_args()
     params = configuration(json.loads(args.config.read_text()) if args.config else {})
     bit_extensions = [name for name in BIT_INSTRUCTIONS if params["enable" + name]]
@@ -82,11 +100,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ditdah-e2-", dir=scratch) as directory:
         work = Path(directory)
         (work / "parameters.json").write_text(json.dumps(params) + "\n")
-        environment = dict(os.environ, DITDAH_E2_SOURCE=str(Path("ditdah_e2/src").resolve()))
+        environment = dict(os.environ, DITDAH_E2_SOURCE=str(Path("ditdah_e2/src").resolve()),
+                           DITDAH_E2_GENERATOR=args.top)
         subprocess.run(["elaborate-ditdah-e2", "design", "parameters.json"],
                        cwd=work, env=environment, check=True)
         subprocess.run(["firld", *map(str, sorted(work.glob("*.mlirbc"))),
-                        "--base-circuit", "DitDahE2", "--no-mangle", "--emit-bytecode",
+                        "--base-circuit", args.top, "--no-mangle", "--emit-bytecode",
                         "-o", str(work / "linked.mlirbc")], check=True)
         subprocess.run(["firtool", str(work / "linked.mlirbc"), "--split-verilog",
                         "-disable-all-randomization",
@@ -95,28 +114,30 @@ def main():
         if sources() != inputs:
             raise RuntimeError("Sources changed during generation")
         rtl = sorted((work / "rtl").glob("*.sv"))
-        if not rtl or not (work / "rtl/DitDahE2.sv").exists():
-            raise RuntimeError("Missing generated processor RTL")
+        if not rtl or not (work / "rtl" / f"{args.top}.sv").exists():
+            raise RuntimeError("Missing generated RTL")
+        core = args.top == "DitDahE2"
+        instructions = INSTRUCTIONS + (A_INSTRUCTIONS if params["enableA"] else []) + (M_INSTRUCTIONS if params["enableM"] else []) + (C_INSTRUCTIONS if params["enableC"] else []) + [name for extension in bit_extensions for name in BIT_INSTRUCTIONS[extension]]
+        extensions = ["I", "Zicsr", "Zicntr", "Zifencei"] + (["A"] if params["enableA"] else []) + (["M"] if params["enableM"] else []) + (["C"] if params["enableC"] else []) + bit_extensions
         manifest = {
-            "parameters": params, "top": "DitDahE2", "isaComplete": False,
-            "instructions": INSTRUCTIONS + (A_INSTRUCTIONS if params["enableA"] else []) + (M_INSTRUCTIONS if params["enableM"] else []) + (C_INSTRUCTIONS if params["enableC"] else []) +
-                            [name for extension in bit_extensions for name in BIT_INSTRUCTIONS[extension]], "privilegedArchitecture": False,
-            "machineTrapHandling": True, "extensions": ["I", "Zicsr", "Zicntr", "Zifencei"] + (["A"] if params["enableA"] else []) + (["M"] if params["enableM"] else []) + (["C"] if params["enableC"] else []) + bit_extensions,
-            "machineInterrupts": ["software", "timer", "external"],
-            "privilegeModes": ["M", "U"] if params["protectedMode"] else ["M"],
-            "pmpEntries": 16 if params["protectedMode"] else 0,
-            "debug": "synchronous DMI" if params["enableDebug"] else None,
+            "parameters": params, "top": args.top, "isaComplete": False,
+            "instructions": instructions if core else [], "privilegedArchitecture": False,
+            "machineTrapHandling": core, "extensions": extensions if core else [],
+            "machineInterrupts": ["software", "timer", "external"] if core else [],
+            "privilegeModes": (["M", "U"] if params["protectedMode"] else ["M"]) if core else [],
+            "pmpEntries": (16 if params["protectedMode"] else 0) if core else 0,
+            "debug": (("JTAG DMI" if params.get("enableJtag", False) else "synchronous DMI") if params["enableDebug"] else None) if core else "transport",
             "pipeline": ["F", "X", "M"], "sourceHashes": inputs,
             "rtlHashes": {p.name: digest(p) for p in rtl},
             "firtool": subprocess.check_output(["firtool", "--version"], text=True).strip(),
-            "command": "python3 scripts/build_rtl.py", "exitStatus": 0,
+            "command": "python3 scripts/build_rtl.py" + (f" --top {args.top}" if not core else ""), "exitStatus": 0,
         }
         args.output.mkdir(parents=True, exist_ok=True)
         for path in rtl:
             shutil.copyfile(path, args.output / path.name)
         (args.output / "filelist.f").write_text("\n".join(p.name for p in rtl) + "\n")
         (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print("Generated DitDahE2 RTL")
+    print(f"Generated {args.top} RTL")
 
 
 if __name__ == "__main__":

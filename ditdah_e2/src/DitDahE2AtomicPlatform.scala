@@ -10,7 +10,8 @@ import me.jiuyang.zaozi.valuetpe.*
 class AtomicPlatformIO(p: PlatformParameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
-  val dmi = Option.when(p.core.enableDebug)(Flipped(new DmiPort))
+  val dmi = Option.when(p.core.enableDebug && !p.core.enableJtag)(Flipped(new DmiPort))
+  val jtag = Option.when(p.core.enableJtag)(Aligned(new JtagPort))
   val tick = Flipped(Bool())
   val externalInterrupt = Flipped(Bool())
   val transmit = Aligned(new Channel(UInt(8)))
@@ -47,7 +48,14 @@ object DitDahE2AtomicPlatform extends Generator[PlatformParameters, PlatformLaye
     val platformReset = Wire(Reset())
     platformReset := io.reset
     if p.core.enableDebug then
-      core.io.dmi.get :<>= io.dmi.get
+      if p.core.enableJtag then
+        core.io.jtag.get.tck := io.jtag.get.tck
+        core.io.jtag.get.trstN := io.jtag.get.trstN
+        core.io.jtag.get.tms := io.jtag.get.tms
+        core.io.jtag.get.tdi := io.jtag.get.tdi
+        io.jtag.get.tdo := core.io.jtag.get.tdo
+        io.jtag.get.tdoEnable := core.io.jtag.get.tdoEnable
+      else core.io.dmi.get :<>= io.dmi.get
       platformReset := (io.reset.asBool | core.io.systemReset.get).asReset
     router.io.clock := io.clock
     router.io.reset := platformReset

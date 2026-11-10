@@ -19,8 +19,14 @@ SAIL_OUTPUT ?= result/sail
 ARITHMETIC_RTL ?= result/rtl
 ARITHMETIC_OUTPUT ?= result/arithmetic
 ARITHMETIC_ARGS ?=
+JTAG_OUTPUT ?= result/jtag-transport-verification
+JTAG_CORE_OUTPUT ?= result/jtag-core
+DEBUG_HOST_OUTPUT ?= result/jtag-host
+JTAG_IDCODE ?= 3791650817
+DEBUG_TRANSPORT_OUTPUT ?= result/debug-transport-commercial
+DEBUG_TRANSPORT_JG_ARGS ?=
 
-.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
+.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-jtag verify-debug-host verify-debug-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -60,6 +66,24 @@ verify-bit:
 
 verify-debug: rtl
 	python3 test/test_debug/verify_debug.py --rtl result/rtl --output result/debug-verification
+
+verify-jtag:
+	python3 test/test_jtag/verify_jtag.py --output "$(JTAG_OUTPUT)"
+
+verify-debug-host:
+	mkdir -p "$(JTAG_CORE_OUTPUT)"
+	printf '%s\n' '{"enableDebug":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE)}' > "$(JTAG_CORE_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --config "$(JTAG_CORE_OUTPUT)/input.json" --output "$(JTAG_CORE_OUTPUT)/design"
+	python3 test/test_debug_host/verify_host.py --rtl "$(JTAG_CORE_OUTPUT)/design" --output "$(DEBUG_HOST_OUTPUT)"
+
+verify-debug-commercial:
+	mkdir -p "$(DEBUG_TRANSPORT_OUTPUT)"
+	printf '%s\n' '{"enableDebug":false,"enableJtag":false}' > "$(DEBUG_TRANSPORT_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --top DitDahE2DmiBridge --config "$(DEBUG_TRANSPORT_OUTPUT)/input.json" --output "$(DEBUG_TRANSPORT_OUTPUT)/bridge"
+	hash=$$(python3 -c 'import hashlib; print(hashlib.sha256(open("$(DEBUG_TRANSPORT_OUTPUT)/bridge/DitDahE2DmiBridge.sv","rb").read()).hexdigest())'); \
+	python3 -m formal.debug_transport.run prepare --rtl "$(DEBUG_TRANSPORT_OUTPUT)/bridge" --source-root . --expected-rtl-sha256 "$$hash" --output "$(DEBUG_TRANSPORT_OUTPUT)/evidence"
+	python3 -m formal.debug_transport.run collect --evidence "$(DEBUG_TRANSPORT_OUTPUT)/evidence" --private-output "$(DEBUG_TRANSPORT_OUTPUT)/native-private" $(DEBUG_TRANSPORT_JG_ARGS)
+	python3 -m formal.debug_transport.run validate --evidence "$(DEBUG_TRANSPORT_OUTPUT)/evidence"
 
 verify-debug-formal:
 	mkdir -p result
@@ -144,7 +168,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl
+verify-signoff: rtl verify-jtag verify-debug-host
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py

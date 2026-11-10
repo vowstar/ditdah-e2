@@ -102,6 +102,9 @@ class PlatformMapTests(unittest.TestCase):
         self.assertIn("CoreImplementation.instantiate(p.core)", result["DitDahE2Platform.scala"])
         self.assertEqual(result["Other.scala"], contents["Other.scala"])
         self.assertIn("object DitDahE2 extends Generator[PlatformParameters", result["PlatformEntry.scala"])
+        self.assertIn("platform.io.jtag.get.tck := io.jtag.get.tck", result["PlatformEntry.scala"])
+        self.assertIn("io.jtag.get.tdo := platform.io.jtag.get.tdo", result["PlatformEntry.scala"])
+        self.assertIn("else platform.io.dmi.get :<>= io.dmi.get", result["PlatformEntry.scala"])
         self.assertIn("object DitDahE2 extends", contents["DitDahE2.scala"])
         for name in ("DitDahE2.scala", "DitDahE2Platform.scala"):
             for text in ("missing", contents[name] * 2):

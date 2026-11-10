@@ -177,7 +177,8 @@ class FetchIO(p: Parameters) extends HWBundle(p):
 class CoreIO(p: Parameters) extends HWBundle(p):
   val clock = Flipped(Clock())
   val reset = Flipped(Reset())
-  val dmi = Option.when(p.enableDebug)(Flipped(new DmiPort))
+  val dmi = Option.when(p.enableDebug && !p.enableJtag)(Flipped(new DmiPort))
+  val jtag = Option.when(p.enableJtag)(Aligned(new JtagPort))
   val systemReset = Option.when(p.enableDebug)(Aligned(Bool()))
   val reservationClear = Option.when(p.enableA)(Aligned(Bool()))
   val dataDebug = Option.when(p.enableA)(Aligned(Bool()))

@@ -41,6 +41,20 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 configuration({"enableDebug": value})
 
+    def test_jtag_configuration(self):
+        selected = configuration({"enableDebug": True, "enableJtag": True, "jtagIdcode": 0xE2000001})
+        self.assertEqual((selected["enableJtag"], selected["jtagIdcode"]), (True, 0xE2000001))
+        self.assertFalse(configuration({"enableDebug": True}).get("enableJtag", False))
+        for value in ({"enableJtag": True, "jtagIdcode": 1},
+                      {"enableDebug": True, "enableJtag": True},
+                      {"enableDebug": True, "enableJtag": True, "jtagIdcode": 0},
+                      {"enableDebug": True, "enableJtag": True, "jtagIdcode": 2},
+                      {"enableDebug": True, "enableJtag": True, "jtagIdcode": 1 << 32},
+                      {"enableDebug": True, "enableJtag": True, "jtagIdcode": True},
+                      {"enableDebug": True, "enableJtag": 1, "jtagIdcode": 1}):
+            with self.assertRaises(ValueError):
+                configuration(value)
+
     def test_atomic_configuration(self):
         for value in (False, True):
             self.assertEqual(configuration({"enableA": value})["enableA"], value)

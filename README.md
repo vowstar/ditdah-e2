@@ -2,7 +2,7 @@
 
 DitDah-E2 is a three-stage RV32 processor for embedded control.
 It issues at most one instruction per cycle and preserves program order.
-The full configuration enables RV32IMC, Zicsr, Zicntr, Zifencei, A, Zba, Zbb, Zbs, protectedMode and debug.
+The full configuration enables RV32IMC, Zicsr, Zicntr, Zifencei, A, Zba, Zbb, Zbs, protectedMode and debug with an explicit JTAG IDCODE.
 It includes precise traps, software, timer and external interrupts, counters, MRET and WFI; each option can be disabled independently.
 
 | Option | Default | Effect |
@@ -10,6 +10,7 @@ It includes precise traps, software, timer and external interrupts, counters, MR
 | `enableM`, `enableC` | True | Integer multiplication and division, compressed instructions |
 | `protectedMode` | False | M/U privilege modes, counter permissions and 16 PMP entries |
 | `enableDebug` | False | Synchronous DMI, halt, resume, single step and abstract register and memory access |
+| `enableJtag` | False | JTAG DTM/CDC instead of external DMI; requires `enableDebug` and `jtagIdcode` |
 | `enableZba`, `enableZbb`, `enableZbs` | False | Standard address, basic and single-bit operations |
 | `enableA` | False | Word atomics through an atomic memory interface |
 
@@ -62,7 +63,7 @@ Sail checks instruction events and memory signatures from the same ELF; external
 ### Platforms and commercial arithmetic
 
 `make PLATFORM_OUTPUT=result/platform-check verify-platform` executes a timer program through the AXI4-Lite adapter and console.
-`make CONFIG=input.json verify-debug` requires debug enabled and a zero reset address.
+`make CONFIG=input.json verify-debug` requires direct DMI debug enabled and a zero reset address. `make verify-jtag` checks asynchronous transport; `make DEBUG_HOST_OUTPUT=result/jtag-host verify-debug-host` runs OpenOCD/GDB with abstract memory access.
 `make CONFIG=input.json PLATFORM_OUTPUT=result/atomic-check verify-atomic` uses the shared SRAM platform with the default map and a zero reset address.
 Use this configuration for its complete program collection:
 
@@ -76,10 +77,11 @@ Use this configuration for its complete program collection:
 It proves 32-bit unit results after initial reset from native properties and independent Z3 rules.
 `ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=8` and `fullUnitMProven=true` for a complete run.
 This is a full-unit arithmetic proof, not a full-core proof or complete RVFI coverage.
+`make DEBUG_TRANSPORT_OUTPUT=result/debug-commercial verify-debug-commercial` requires licensed JG and proves transport safety with covers and negative controls under the documented reset and digital-CDC assumptions.
 
 ### Outputs and reports
 
-Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`, `FETCH_PERFORMANCE_OUTPUT`, `ISA_MENVCFG_OUTPUT`, `RVFI_OUTPUT`, `SAIL_OUTPUT` and `ARITHMETIC_OUTPUT`.
+Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`, `FETCH_PERFORMANCE_OUTPUT`, `ISA_MENVCFG_OUTPUT`, `RVFI_OUTPUT`, `SAIL_OUTPUT`, `ARITHMETIC_OUTPUT`, `JTAG_OUTPUT`, `JTAG_CORE_OUTPUT`, `DEBUG_HOST_OUTPUT` and `DEBUG_TRANSPORT_OUTPUT`.
 Set `SAIL_PROFILES`, `RVFI_RTL` and `ARITHMETIC_RTL` when selecting generated inputs.
 Reports are written under `result/`, including `result/verification/summary.json` and `ARITHMETIC_OUTPUT/replay/result.json`.
 RVFI and Sail write `summary.json` under their selected output directories.

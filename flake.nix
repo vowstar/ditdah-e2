@@ -26,15 +26,20 @@
           work=$(mktemp -d "$scratch/ditdah-e2-scala-XXXXXX")
           trap 'rm -rf "$work"' EXIT
           ${pkgs.scala-cli}/bin/scala-cli run --power --offline ${arguments} \
-            --workspace "$work" --main-class ditdah_e2.DitDahE2 \
+            --workspace "$work" --main-class "ditdah_e2.''${DITDAH_E2_GENERATOR:-DitDahE2}" \
             "$DITDAH_E2_SOURCE" -- "$@"
         '';
         maven = pkgs.mkMavenRepository { lockFile = "${zaozi}/mtf.lock.json"; };
         crossCompiler = pkgs.pkgsCross.riscv32-embedded.stdenv.cc;
         python = pkgs.python3.withPackages (ps: [ ps.z3-solver ]);
+        debugPython = pkgs.python313.withPackages (ps: [ ps.cocotb ]);
+        debugHost = pkgs.writeShellScriptBin "e2-debug-python" ''
+          exec ${debugPython}/bin/python3 "$@"
+        '';
         softwareTools = [ crossCompiler crossCompiler.bintools python ];
         tools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install
           pkgs.verilator pkgs.iverilog pkgs.yosys pkgs.sby pkgs.z3 pkgs.reuse
+          pkgs.openocd pkgs.pkgsCross.riscv32-embedded.buildPackages.gdb debugHost
           python pkgs.tcl pkgs.gnumake maven ] ++ softwareTools;
       in {
         packages.default = pkgs.runCommand "ditdah-e2-rtl" {

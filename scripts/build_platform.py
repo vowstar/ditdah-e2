@@ -33,7 +33,15 @@ object DitDahE2 extends Generator[PlatformParameters, PlatformLayers, PlatformIO
     val platform = DitDahE2Platform.instantiate(p)
     platform.io.clock := io.clock
     platform.io.reset := io.reset
-    if p.core.enableDebug then platform.io.dmi.get :<>= io.dmi.get
+    if p.core.enableDebug then
+      if p.core.enableJtag then
+        platform.io.jtag.get.tck := io.jtag.get.tck
+        platform.io.jtag.get.trstN := io.jtag.get.trstN
+        platform.io.jtag.get.tms := io.jtag.get.tms
+        platform.io.jtag.get.tdi := io.jtag.get.tdi
+        io.jtag.get.tdo := platform.io.jtag.get.tdo
+        io.jtag.get.tdoEnable := platform.io.jtag.get.tdoEnable
+      else platform.io.dmi.get :<>= io.dmi.get
     platform.io.tick := io.tick
     platform.io.externalInterrupt := io.externalInterrupt
     io.transmit :<>= platform.io.transmit

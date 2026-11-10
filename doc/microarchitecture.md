@@ -67,9 +67,10 @@ Interrupt inputs are synchronous and require external synchronization.
 Interrupt priority is external, software, then timer. Older synchronous exceptions complete first.
 The platform supplies coherent 64-bit time.
 
-`enableDebug` exposes synchronous DMI. Synchronize it externally.
+`enableDebug` exposes synchronous DMI when JTAG is disabled. Synchronize it externally.
+`enableJtag` requires Debug and an explicit IDCODE, replacing the external DMI pins with a five-bit TAP/DTM and single-outstanding CDC.
 Counters stop while halted, while platform time continues.
-JTAG transport is external. Halt drains older work before register or abstract memory access.
+Halt drains older work before register or abstract memory access.
 Debug memory uses M privilege with MPRV applied. Its faults do not change machine trap CSRs.
 Single step completes one instruction or exception with interrupts masked, then halts.
 Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
