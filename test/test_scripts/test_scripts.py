@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-from build_rtl import configuration
+from build_rtl import GENERATORS, TOPS, configuration
 from test.common.model import Model
 
 
@@ -40,6 +40,12 @@ class ConfigurationTests(unittest.TestCase):
         for value in (1, "true", None, []):
             with self.assertRaises(ValueError):
                 configuration({"enableDebug": value})
+
+    def test_standalone_debug_generator(self):
+        self.assertIn("DitDahE2DebugModule", TOPS)
+        self.assertEqual(GENERATORS.get("DitDahE2DebugModule"), "DebugModule")
+        for top in ("DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge"):
+            self.assertEqual(GENERATORS.get(top, top), top)
 
     def test_jtag_configuration(self):
         selected = configuration({"enableDebug": True, "enableJtag": True, "jtagIdcode": 0xE2000001})

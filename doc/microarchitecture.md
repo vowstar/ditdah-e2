@@ -72,6 +72,8 @@ The platform supplies coherent 64-bit time.
 Counters stop while halted, while platform time continues.
 Halt drains older work before register or abstract memory access.
 Debug memory uses M privilege with MPRV applied. Its faults do not change machine trap CSRs.
+AAM postincrement updates data1 once after each successful access by its encoded byte size; faults do not increment it.
+`abstractauto` implements data0 and data1 only. Each accepted automatic access resamples current operands; a data0 read snapshots its old result before starting, and response backpressure cannot repeat execution.
 Single step completes one instruction or exception with interrupts masked, then halts.
 Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
 Already accepted competitor transactions complete across warm reset.

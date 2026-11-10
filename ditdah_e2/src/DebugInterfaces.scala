@@ -7,6 +7,18 @@ import me.jiuyang.zaozi.default.{*, given}
 import me.jiuyang.zaozi.reftpe.*
 import me.jiuyang.zaozi.valuetpe.*
 
+class DebugAbstractCommand extends Bundle:
+  val memory = Aligned(Bool())
+  val write = Aligned(Bool())
+  val size = Aligned(UInt(2))
+  val register = Aligned(UInt(16))
+  val transfer = Aligned(Bool())
+  val postIncrement = Aligned(Bool())
+
+class DebugHartOperands extends Bundle:
+  val address = Aligned(UInt(32))
+  val data = Aligned(UInt(32))
+
 class DebugHartRequest extends Bundle:
   val memory = Aligned(Bool())
   val write = Aligned(Bool())

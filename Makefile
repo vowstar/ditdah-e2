@@ -22,11 +22,15 @@ ARITHMETIC_ARGS ?=
 JTAG_OUTPUT ?= result/jtag-transport-verification
 JTAG_CORE_OUTPUT ?= result/jtag-core
 DEBUG_HOST_OUTPUT ?= result/jtag-host
+DEBUG_HOST_BASELINE ?=
 JTAG_IDCODE ?= 3791650817
 DEBUG_TRANSPORT_OUTPUT ?= result/debug-transport-commercial
 DEBUG_TRANSPORT_JG_ARGS ?=
+DEBUG_MODULE_OUTPUT ?= result/debug-module
+DEBUG_ABSTRACT_OUTPUT ?= result/debug-abstract-commercial
+DEBUG_ABSTRACT_JG_ARGS ?=
 
-.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-jtag verify-debug-host verify-debug-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
+.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-module verify-jtag verify-debug-host verify-debug-commercial verify-debug-abstract-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -58,7 +62,7 @@ verify-multiply:
 .PHONY: verify-arithmetic
 verify-arithmetic:
 	python3 formal/arithmetic/run.py prepare --rtl "$(ARITHMETIC_RTL)" --output "$(ARITHMETIC_OUTPUT)/evidence" $(ARITHMETIC_ARGS)
-	python3 formal/arithmetic/run.py collect --evidence "$(ARITHMETIC_OUTPUT)/evidence" --private-output "$(ARITHMETIC_OUTPUT)/native-private"
+	python3 formal/arithmetic/run.py collect --evidence "$(ARITHMETIC_OUTPUT)/evidence" --private-output "$(ARITHMETIC_OUTPUT)/native-private" $(ARITHMETIC_ARGS)
 	python3 formal/arithmetic/run.py replay --evidence "$(ARITHMETIC_OUTPUT)/evidence" --output "$(ARITHMETIC_OUTPUT)/replay"
 
 verify-bit:
@@ -67,6 +71,9 @@ verify-bit:
 verify-debug: rtl
 	python3 test/test_debug/verify_debug.py --rtl result/rtl --output result/debug-verification
 
+verify-debug-module:
+	python3 test/test_debug/debug_module.py --output "$(DEBUG_MODULE_OUTPUT)"
+
 verify-jtag:
 	python3 test/test_jtag/verify_jtag.py --output "$(JTAG_OUTPUT)"
 
@@ -74,7 +81,7 @@ verify-debug-host:
 	mkdir -p "$(JTAG_CORE_OUTPUT)"
 	printf '%s\n' '{"enableDebug":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE)}' > "$(JTAG_CORE_OUTPUT)/input.json"
 	python3 scripts/build_rtl.py --config "$(JTAG_CORE_OUTPUT)/input.json" --output "$(JTAG_CORE_OUTPUT)/design"
-	python3 test/test_debug_host/verify_host.py --rtl "$(JTAG_CORE_OUTPUT)/design" --output "$(DEBUG_HOST_OUTPUT)"
+	python3 test/test_debug_host/verify_host.py --rtl "$(JTAG_CORE_OUTPUT)/design" --output "$(DEBUG_HOST_OUTPUT)" $(if $(DEBUG_HOST_BASELINE),--baseline "$(DEBUG_HOST_BASELINE)")
 
 verify-debug-commercial:
 	mkdir -p "$(DEBUG_TRANSPORT_OUTPUT)"
@@ -84,6 +91,15 @@ verify-debug-commercial:
 	python3 -m formal.debug_transport.run prepare --rtl "$(DEBUG_TRANSPORT_OUTPUT)/bridge" --source-root . --expected-rtl-sha256 "$$hash" --output "$(DEBUG_TRANSPORT_OUTPUT)/evidence"
 	python3 -m formal.debug_transport.run collect --evidence "$(DEBUG_TRANSPORT_OUTPUT)/evidence" --private-output "$(DEBUG_TRANSPORT_OUTPUT)/native-private" $(DEBUG_TRANSPORT_JG_ARGS)
 	python3 -m formal.debug_transport.run validate --evidence "$(DEBUG_TRANSPORT_OUTPUT)/evidence"
+
+verify-debug-abstract-commercial:
+	mkdir -p "$(DEBUG_ABSTRACT_OUTPUT)"
+	printf '%s\n' '{"enableDebug":true,"enableJtag":false}' > "$(DEBUG_ABSTRACT_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --top DitDahE2DebugModule --config "$(DEBUG_ABSTRACT_OUTPUT)/input.json" --output "$(DEBUG_ABSTRACT_OUTPUT)/rtl"
+	hash=$$(python3 -c 'import hashlib; print(hashlib.sha256(open("$(DEBUG_ABSTRACT_OUTPUT)/rtl/DitDahE2DebugModule.sv","rb").read()).hexdigest())'); \
+	python3 -m formal.debug_abstract.run prepare --rtl "$(DEBUG_ABSTRACT_OUTPUT)/rtl" --source-root . --expected-rtl-sha256 "$$hash" --output "$(DEBUG_ABSTRACT_OUTPUT)/evidence"
+	python3 -m formal.debug_abstract.run collect --evidence "$(DEBUG_ABSTRACT_OUTPUT)/evidence" --private-output "$(DEBUG_ABSTRACT_OUTPUT)/native-private" $(DEBUG_ABSTRACT_JG_ARGS)
+	python3 -m formal.debug_abstract.run validate --evidence "$(DEBUG_ABSTRACT_OUTPUT)/evidence"
 
 verify-debug-formal:
 	mkdir -p result
@@ -168,7 +184,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl verify-jtag verify-debug-host
+verify-signoff: rtl verify-jtag verify-debug-host verify-debug-module
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py

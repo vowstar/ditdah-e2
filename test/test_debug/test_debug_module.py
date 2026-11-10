@@ -4,7 +4,8 @@
 
 import unittest
 
-from test.test_debug.debug_module import Driver, HEX_OUTPUT, Reference, busy_mutant, check, command_error, expected, row, vectors
+from test.test_debug.debug_module import (Driver, HEX_OUTPUT, Reference, auto_mutant, auto_vectors, busy_mutant,
+                                          check, command_error, expected, row, vectors)
 
 
 def render(samples):
@@ -14,10 +15,10 @@ def render(samples):
 
 class DebugModuleTests(unittest.TestCase):
     def test_command_fields_and_absent_features(self):
-        for word in (0x221001, 0x23101F, 0x02000000, 0x02110000, 0x02200000, 0x710FFF):
+        for word in (0x221001, 0x23101F, 0x02000000, 0x02110000, 0x02200000, 0x02080000, 0x02290000, 0x710FFF):
             self.assertEqual(command_error(word), 0)
-        for word in (0x1221001, 0xA21001, 0x2A1001, 0x261001, 0x121001,
-                     0x02800000, 0x02300000, 0x02080000, 0x02020000, 0x02004000, 0x02000001):
+        for word in (0x1221001, 0xA21001, 0x2A1001, 0x261001, 0x121001, 0x00280000,
+                     0x02800000, 0x02300000, 0x02020000, 0x02004000, 0x02000001):
             self.assertEqual(command_error(word), 2)
 
     def test_dmi_response_survives_deactivation(self):
@@ -137,12 +138,36 @@ class DebugModuleTests(unittest.TestCase):
         self.assertEqual(counts["pending"], 0)
         check(rows, render(samples))
 
+    def test_abstract_auto_driver_covers_fresh_operands_and_exact_completion(self):
+        rows = auto_vectors(1)
+        samples, counts = expected(rows)
+        self.assertEqual(counts["autoCommands"], 9)
+        self.assertEqual(counts["postincrements"], 16)
+        self.assertGreater(counts["responseBackpressure"], 8)
+        self.assertGreater(counts["requestBackpressure"], 8)
+        self.assertEqual(counts["pending"], 0)
+        check(rows, render(samples))
+
     def test_mutation_requires_one_error_assignment(self):
         source = "error <= 3'h1;"
         self.assertEqual(busy_mutant(source), "error <= 3'h5;")
         for invalid in ("", source * 2):
             with self.assertRaises(ValueError):
                 busy_mutant(invalid)
+
+    def test_auto_mutations_require_unique_targets(self):
+        sources = {
+            "stale-operands": "if (autoStart_1) begin\n      operands_address <= data1;\n      operands_data <= data0;",
+            "early-increment": "else if (commandComplete & command_memory & command_postIncrement & postincrement)",
+            "backpressure-repeat": "wire        autoStart = accepted & read | write;",
+        }
+        for name, source in sources.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(auto_mutant(source, name), source)
+                with self.assertRaises(ValueError):
+                    auto_mutant("", name)
+                with self.assertRaises(ValueError):
+                    auto_mutant(source + source, name)
 
 
 if __name__ == "__main__":

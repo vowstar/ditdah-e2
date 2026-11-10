@@ -214,6 +214,86 @@ def check_abstract_evidence(openocd_log, trace):
             "programBufferWrites": 0, "systemBusWrites": 0}
 
 
+def abstract_metrics(trace):
+    automatic = 0
+    metrics = {"dmiRequests": 0, "aamCommands": 0, "postincrementCommands": 0,
+               "data1Writes": 0, "abstractAutoWrites": 0, "automaticDataAccesses": 0}
+    first = last = final = None
+    for line in trace.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if fields[0] == "F" and len(fields) == 4:
+            if final is not None:
+                raise ValueError("Duplicate simulator cycle count")
+            final = int(fields[1])
+        if fields[0] != "J":
+            continue
+        if len(fields) != 5:
+            raise ValueError("Malformed DMI observation")
+        cycle, address, operation, data = map(int, fields[1:])
+        if operation not in (1, 2):
+            continue
+        metrics["dmiRequests"] += 1
+        if operation == 2 and address == 0x18:
+            automatic = data & 3
+            metrics["abstractAutoWrites"] += 1
+        if address in (4, 5) and automatic & (1 << (address - 4)):
+            metrics["automaticDataAccesses"] += 1
+        if operation == 2 and address == 5:
+            metrics["data1Writes"] += 1
+        if operation == 2 and address == 0x17 and data >> 24 == 2:
+            metrics["aamCommands"] += 1
+            metrics["postincrementCommands"] += bool(data & (1 << 19))
+            first = cycle if first is None else first
+            last = cycle
+    if final is None or first is None or last is None:
+        raise ValueError("Trace lacks completion or abstract memory commands")
+    metrics.update({"finalCycles": final, "firstAamCycle": first, "lastAamCycle": last,
+                    "abstractWindowCycles": last - first})
+    return metrics
+
+
+def compare_metrics(baseline, current):
+    if current["postincrementCommands"] == 0:
+        raise ValueError("Host trace did not exercise AAM postincrement")
+    for name in ("finalCycles", "abstractWindowCycles", "dmiRequests", "data1Writes"):
+        if current[name] >= baseline[name]:
+            raise ValueError("No host throughput improvement for " + name)
+    reduction = lambda name: round(100 * (baseline[name] - current[name]) / baseline[name], 6)
+    return {"baseline": baseline, "current": current,
+            "finalCycleReductionPercent": reduction("finalCycles"),
+            "abstractWindowReductionPercent": reduction("abstractWindowCycles"),
+            "dmiRequestReductionPercent": reduction("dmiRequests"),
+            "data1WriteReductionPercent": reduction("data1Writes"),
+            "endToEndSpeedup": round(baseline["finalCycles"] / current["finalCycles"], 6),
+            "abstractWindowSpeedup": round(baseline["abstractWindowCycles"] / current["abstractWindowCycles"], 6)}
+
+
+def compare_baseline(baseline, output, report):
+    summary_path = baseline / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    if summary.get("exitStatus") != 0 or summary.get("parameters") != report["parameters"]:
+        raise ValueError("Baseline acceptance or configuration differs")
+    if summary.get("tools") != report["tools"] or summary.get("workload") != report["workload"]:
+        raise ValueError("Baseline tools or software workload differs")
+    current_trace = output / "openocd-gdb/simulator.trace"
+    baseline_trace = baseline / "openocd-gdb/simulator.trace"
+    comparison = compare_metrics(abstract_metrics(baseline_trace.read_text()),
+                                 abstract_metrics(current_trace.read_text()))
+    for directory in (baseline, output):
+        run = (summary if directory == baseline else report)["runs"][0]
+        if run["programBufferWrites"] or run["systemBusWrites"]:
+            raise ValueError("Comparison contains a forbidden memory transport")
+        log = (directory / "openocd-gdb/gdb.log").read_text().lower()
+        if "matched." not in log or "mis-matched" in log or "load size 210" not in log:
+            raise ValueError("Comparison lacks identical successful section transfers")
+    comparison.update({"baselineSummarySha256": digest(summary_path),
+                       "baselineTraceSha256": digest(baseline_trace), "currentTraceSha256": digest(current_trace),
+                       "loadSizeBytes": 210})
+    return comparison
+
+
 def check_wrong_idcode(log, status, ready, actual, expected):
     if ready or status == 0:
         raise ValueError("Wrong IDCODE reached readiness or exited successfully")
@@ -389,6 +469,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rtl", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--openocd")
     parser.add_argument("--gdb")
     parser.add_argument("--compiler")
@@ -443,6 +524,8 @@ def main():
         negative = run_case(binary, initial, tools, output / "wrong-idcode", idcode, args,
                             wrong_idcode=idcode ^ 1)
         report["negativeControls"].append(negative)
+        if args.baseline:
+            report["baselineComparison"] = compare_baseline(args.baseline, output, report)
         if sources() != manifest["sourceHashes"]:
             raise RuntimeError("Source inputs changed during host acceptance")
         for name, value in manifest["rtlHashes"].items():

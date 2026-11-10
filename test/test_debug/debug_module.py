@@ -113,7 +113,7 @@ def command_error(word):
     if kind == 0:
         return 2 if word & 0x8C0000 or (word & 0x20000 and size != 2) else 0
     if kind == 2:
-        return 2 if word & 0x8EFFFF or size > 2 else 0
+        return 2 if word & 0x86FFFF or size > 2 else 0
     return 2
 
 
@@ -131,6 +131,17 @@ class Reference:
         self.error = 0
         self.command = None
         self.issued = False
+        self.command_valid = False
+        self.descriptor = None
+        self.auto = 0
+
+    def start(self):
+        descriptor = self.descriptor
+        self.command = descriptor | {
+            "payload": (int(descriptor["memory"]), int(descriptor["write"]), descriptor["size"],
+                        descriptor["register"], self.data[1], self.data[0]), "accepted": False}
+        self.issued = False
+        self.counts["commands"] += 1
 
     def read(self, address, state):
         if not self.active:
@@ -147,6 +158,8 @@ class Reference:
                     int(self.ndmreset or state["reset_pending"]) << 24)
         if address == 0x16:
             return 2 | self.error << 8 | int(self.command is not None) << 12
+        if address == 0x18:
+            return self.auto
         return 0
 
     def step(self, values, cycle):
@@ -197,6 +210,9 @@ class Reference:
                     self.error = state["result_error"]
                 if not command["payload"][1] and not state["result_error"]:
                     self.data[0] = state["result_data"]
+                if command["memory"] and command["postincrement"] and not state["result_error"]:
+                    self.data[1] = (command["payload"][4] + (1 << command["payload"][2])) & MASK
+                    self.counts["postincrements"] += 1
                 self.counts["hartResults"] += 1
             else:
                 self.counts["unownedResults"] += 1
@@ -211,6 +227,8 @@ class Reference:
         read, write = accepted and operation == 1, accepted and operation == 2
         control = write and address == 0x10
         conflict = active and busy and ((read or write) and address in (4, 5) or write and address in (0x16, 0x17, 0x18))
+        auto_start = (active and not busy and not error and self.command_valid and operation in (1, 2) and
+                      accepted and address in (4, 5) and bool(self.auto & (1 << (address - 4))))
         if accepted:
             self.response = (read_data if operation == 1 else 0, 2 if operation == 3 else 0)
             self.counts["dmiRequests"] += 1
@@ -240,6 +258,8 @@ class Reference:
                 self.data[address - 4] = data
             elif address == 0x16:
                 self.error &= ~(data >> 8 & 7)
+            elif address == 0x18:
+                self.auto = data & 3
             elif address == 0x17 and not error:
                 failure = command_error(data)
                 if failure:
@@ -250,11 +270,15 @@ class Reference:
                     self.counts["wrongState"] += 1
                 else:
                     memory = data >> 24 == 2
-                    self.command = {"payload": (int(memory), data >> 16 & 1, data >> 20 & 3,
-                                                 data & 65535, self.data[1], self.data[0]),
-                                    "transfer": memory or bool(data & 0x20000), "accepted": False}
-                    self.issued = False
-                    self.counts["commands"] += 1
+                    self.descriptor = {"memory": memory, "write": bool(data & 0x10000), "size": data >> 20 & 3,
+                                       "register": data & 65535, "transfer": memory or bool(data & 0x20000),
+                                       "postincrement": memory and bool(data & 0x80000)}
+                    self.command_valid = True
+                    self.start()
+                    self.counts["manualCommands"] += 1
+        if auto_start:
+            self.start()
+            self.counts["autoCommands"] += 1
         if conflict and not error:
             self.error = 1
             self.counts["busyConflicts"] += 1
@@ -363,6 +387,164 @@ class Driver:
         self.dmi(0x16, 2, 0x700)
 
 
+def auto_vectors(seed=1):
+    driver = Driver(seed)
+
+    def write_word(address, value):
+        for lane in range(4):
+            driver.memory[address + lane] = value >> (8 * lane) & 255
+
+    def read_word(address):
+        return sum(driver.memory.get(address + lane, 0) << (8 * lane) for lane in range(4))
+
+    driver.dmi(0x10, 2, 1)
+    driver.dmi(0x18, 2, MASK)
+    driver.dmi(0x18, expected_data=3)
+    driver.dmi(0x18, 2, 0)
+    driver.dmi(5, 2, 0x300)
+    driver.dmi(0x17, 2, 0x00280000)
+    driver.drain()
+    driver.dmi(0x16, expected_data=0x202)
+    driver.dmi(5, expected_data=0x300)
+    driver.clear_error()
+    for size, address, value in ((0, 0x400, 0x0B), (1, 0x402, 0xD8E9), (2, 0x404, 0xD8E9FA0B)):
+        write_word(address & ~3, 0xD8E9FA0B)
+        driver.dmi(5, 2, address)
+        driver.dmi(0x17, 2, 0x02080000 | size << 20)
+        driver.drain()
+        driver.dmi(4, expected_data=value)
+        driver.dmi(5, expected_data=address + (1 << size))
+    driver.dmi(5, 2, 0xFFFF0000)
+    before = driver.reference.data[0]
+    driver.dmi(0x17, 2, 0x02280000)
+    driver.drain()
+    driver.dmi(0x16, expected_data=0x502)
+    driver.dmi(4, expected_data=before)
+    driver.dmi(5, expected_data=0xFFFF0000)
+    driver.clear_error()
+
+    base = 0x500
+    initial = 0x10203040
+    driver.dmi(5, 2, base)
+    driver.dmi(4, 2, initial)
+    driver.dmi(0x17, 2, 0x02290000)
+    driver.drain()
+    assert read_word(base) == initial
+    driver.dmi(5, expected_data=base + 4)
+    driver.dmi(0x18, 2, 1)
+    automatic = driver.reference.counts["autoCommands"]
+    for index, value in enumerate((0x21314151, 0x61718191, 0xA1B1C1D1)):
+        driver.dmi(4, 2, value, stall=4)
+        driver.drain()
+        assert read_word(base + 4 * (index + 1)) == value
+        driver.dmi(5, expected_data=base + 4 * (index + 2))
+    assert driver.reference.counts["autoCommands"] == automatic + 3
+    driver.dmi(5, 2, 0xFFFF0000)
+    driver.dmi(0x17, 2, 0x02290000)
+    driver.drain()
+    driver.dmi(0x16, expected_data=0x502)
+    driver.dmi(5, expected_data=0xFFFF0000)
+    blocked = driver.reference.counts["commands"]
+    driver.dmi(4, 2, 0x55667788)
+    assert driver.reference.counts["commands"] == blocked
+    driver.clear_error()
+    driver.dmi(5, 2, 0x600)
+    driver.dmi(4, 2, 0x99AABBCC)
+    driver.drain()
+    assert read_word(0x600) == 0x99AABBCC
+    driver.dmi(5, expected_data=0x604)
+
+    driver.dmi(0x18, 2, 2)
+    driver.dmi(4, 2, 0xA0B0C0D0)
+    driver.dmi(5, 2, 0x700)
+    driver.drain()
+    assert read_word(0x700) == 0xA0B0C0D0
+    driver.dmi(5, expected_data=0x704, stall=3)
+    driver.drain()
+    assert read_word(0x704) == 0xA0B0C0D0
+    driver.dmi(0x18, 2, 0)
+    driver.dmi(5, expected_data=0x708)
+
+    for address, value in ((0x800, 0x01234567), (0x804, 0x89ABCDEF), (0x808, 0x0F1E2D3C), (0x80C, 0x4C3B2A19)):
+        write_word(address, value)
+    driver.dmi(5, 2, 0x800)
+    driver.dmi(0x17, 2, 0x02280000)
+    driver.drain()
+    driver.dmi(4, expected_data=0x01234567)
+    driver.dmi(5, expected_data=0x804)
+    driver.dmi(0x18, 2, 1)
+    requests = driver.reference.counts["hartRequests"]
+    driver.dmi(4, expected_data=0x01234567, stall=8)
+    driver.drain()
+    assert driver.reference.counts["hartRequests"] == requests + 1
+    driver.dmi(0x18, 2, 0)
+    driver.dmi(4, expected_data=0x89ABCDEF)
+    driver.dmi(5, expected_data=0x808)
+
+    driver.dmi(0x18, 2, 1)
+    requests = driver.reference.counts["hartRequests"]
+    output = driver.tick(valid=1, address=4, op=1)
+    assert output[1]
+    for _ in range(12):
+        output = driver.tick(valid=1, address=4, op=1, ready=0)
+        assert not output[1]
+    driver.tick(valid=1, address=4, op=1)
+    output = driver.tick(valid=1, address=4, op=1)
+    assert output[1]
+    driver.tick()
+    driver.drain()
+    assert driver.reference.counts["hartRequests"] == requests + 2
+    driver.dmi(0x18, 2, 0)
+    driver.dmi(4, expected_data=0x4C3B2A19)
+    driver.dmi(5, expected_data=0x810)
+
+    driver.delay = 30
+    driver.dmi(5, 2, 0x900)
+    driver.dmi(4, 2, 0x11223344)
+    driver.dmi(0x17, 2, 0x02290000)
+    requests = driver.reference.counts["hartRequests"]
+    driver.dmi(0x18, 2, 1)
+    driver.dmi(4, 2, 0xFFEEDDCC)
+    driver.drain()
+    assert driver.reference.counts["hartRequests"] == requests
+    assert read_word(0x900) == 0x11223344
+    driver.dmi(5, expected_data=0x904)
+    driver.dmi(0x16, expected_data=0x102)
+    driver.clear_error()
+    driver.dmi(0x18, expected_data=0)
+
+    driver.delay = 5
+    driver.next_error = 5
+    driver.dmi(5, 2, 0xFFFF0000)
+    driver.dmi(4, 2, 0x33445566)
+    driver.dmi(0x17, 2, 0x02290000)
+    while len(driver.rows) < driver.pending["due"]:
+        driver.tick()
+    driver.dmi(4, 2, 0x778899AA)
+    driver.drain()
+    driver.dmi(0x16, expected_data=0x102)
+    driver.dmi(4, expected_data=0x33445566)
+    driver.dmi(5, expected_data=0xFFFF0000)
+    driver.clear_error()
+
+    driver.delay = 6
+    driver.dmi(5, 2, 0xA00)
+    write_word(0xA00, 0x13579BDF)
+    driver.dmi(0x17, 2, 0x02280000)
+    while len(driver.rows) < driver.pending["due"]:
+        driver.tick()
+    driver.dmi(0x10, 2, 0, stall=3)
+    driver.dmi(0x10, 2, 1)
+    driver.dmi(4, expected_data=0)
+    driver.dmi(5, expected_data=0)
+    driver.dmi(0x18, expected_data=0)
+    driver.drain()
+    driver.tick()
+    assert driver.reference.counts["autoCommands"] >= 8
+    assert driver.reference.counts["postincrements"] >= 12
+    return driver.rows
+
+
 def vectors(seed=1):
     driver = Driver(seed)
     driver.dmi(0x11, expected_data=0)
@@ -377,7 +559,10 @@ def vectors(seed=1):
     driver.dmi(0x10, 2, 0x07FFFFC1)
     driver.dmi(0x10, expected_data=1)
     driver.dmi(0x16, expected_data=2)
-    for address in sorted(set(range(128)) - {4, 5, 0x10, 0x11, 0x16, 0x17}):
+    driver.dmi(0x18, 2, MASK)
+    driver.dmi(0x18, expected_data=3)
+    driver.dmi(0x18, 2, 0)
+    for address in sorted(set(range(128)) - {4, 5, 0x10, 0x11, 0x16, 0x17, 0x18}):
         driver.dmi(address, 2, MASK)
         driver.dmi(address, expected_data=0)
     driver.dmi(0, 0)
@@ -407,7 +592,7 @@ def vectors(seed=1):
         driver.clear_error()
     for word, failure in ((0x230301, 3), (0x220FFF, 3), (0x220020, 3), (0x221020, 3), (0x22FFFF, 3), (0x01000000, 2),
                           (0x230000 | 1 << 23, 2), (0x280000, 2), (0x260000, 2), (0x320000, 2),
-                          (0x02800000, 2), (0x02300000, 2), (0x02080000, 2), (0x02020000, 2), (0x02000001, 2)):
+                          (0x02800000, 2), (0x02300000, 2), (0x02020000, 2), (0x02000001, 2)):
         driver.dmi(0x17, 2, word)
         driver.drain()
         driver.dmi(0x16, expected_data=2 | failure << 8)
@@ -554,7 +739,8 @@ def digest(path):
 def build(output):
     output = Path(output)
     names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/DebugInterfaces.scala",
-             "ditdah_e2/src/DebugModule.scala", "test/test_debug/debug_module.py", "test/test_debug/test_debug_module.py", "flake.nix", "flake.lock"]
+             "ditdah_e2/src/DebugTransportInterfaces.scala", "ditdah_e2/src/DebugModule.scala",
+             "test/test_debug/debug_module.py", "test/test_debug/test_debug_module.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(ROOT)) for path in sorted((ROOT / "nix").glob("*.nix"))]
     contents = {name: (ROOT / name).read_bytes() for name in names}
     for name, data in contents.items():
@@ -630,6 +816,24 @@ def busy_mutant(rtl):
     return re.sub(pattern, r"\g<1>3'h5\2", rtl)
 
 
+def auto_mutant(rtl, name):
+    if name == "stale-operands":
+        pattern = r"(if \(autoStart_1\) begin\n\s*)operands_address <= [^;]+;\n\s*operands_data <= [^;]+;"
+        replacement = lambda match: match[1] + "operands_address <= operands_address;\n      operands_data <= operands_data;"
+    elif name == "early-increment":
+        pattern = r"else if \(commandComplete & command_memory & command_postIncrement & postincrement\)"
+        replacement = "else if (busyConflict & ~issued & command_memory & command_postIncrement)"
+    elif name == "backpressure-repeat":
+        pattern = r"wire\s+autoStart = accepted & read \| write;"
+        replacement = "wire        autoStart = dmi_request_valid & read | write;"
+    else:
+        raise ValueError("Unknown abstract auto mutation")
+    changed, count = re.subn(pattern, replacement, rtl)
+    if count != 1 or changed == rtl:
+        raise ValueError("Abstract auto mutation target changed: " + name)
+    return changed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("result/debug-module"))
@@ -648,6 +852,14 @@ def main():
             assert counts[field] > 0, f"Missing debug coverage: {field}"
         runs.append({"seed": seed, "cycles": len(rows), **counts, "traceHash": digest(directory / "debug.trace"),
                      "vectorsHash": digest(directory / "vectors.txt")})
+    rows = auto_vectors(1)
+    directory = args.output / "abstract-auto"
+    trace = simulate(directory, rows, args.output / "rtl/DitDahE2DebugModule.sv", commands)
+    counts = check(rows, trace)
+    for field in ("responseBackpressure", "requestBackpressure", "manualCommands", "autoCommands", "postincrements", "busyConflicts"):
+        assert counts[field] > 0, f"Missing abstract auto coverage: {field}"
+    runs.append({"seed": 1, "name": "abstract-auto", "cycles": len(rows), **counts,
+                 "traceHash": digest(directory / "debug.trace"), "vectorsHash": digest(directory / "vectors.txt")})
     mutant = args.output / "busy-mutant.sv"
     mutant.write_text(busy_mutant((args.output / "rtl/DitDahE2DebugModule.sv").read_text()))
     rows = vectors(1)
@@ -662,17 +874,33 @@ def main():
     observed = parse_trace(trace)
     witness = next(index for index, (actual, target) in enumerate(zip(observed, wanted, strict=True))
                    if actual[2] and target[3] == 0x102 and actual[3] == 0x502)
-    control = {"mutation": "busy conflict reports bus error", "exitStatus": 0, "cycle": witness,
-               "rejected": reason, "rtlHash": digest(mutant), "traceHash": digest(args.output / "busy-mutant/debug.trace")}
+    controls = [{"mutation": "busy conflict reports bus error", "exitStatus": 0, "cycle": witness,
+                 "rejected": reason, "rtlHash": digest(mutant), "traceHash": digest(args.output / "busy-mutant/debug.trace")}]
+    rows = auto_vectors(1)
+    wanted, _ = expected(rows)
+    for name in ("stale-operands", "early-increment", "backpressure-repeat"):
+        mutant = args.output / f"{name}-mutant.sv"
+        mutant.write_text(auto_mutant((args.output / "rtl/DitDahE2DebugModule.sv").read_text(), name))
+        trace = simulate(args.output / f"{name}-mutant", rows, mutant, commands)
+        try:
+            check(rows, trace)
+        except AssertionError as error:
+            reason = str(error)
+        else:
+            raise AssertionError("Debug checker accepted abstract mutation: " + name)
+        observed = parse_trace(trace)
+        witness = next(index for index, (actual, target) in enumerate(zip(observed, wanted, strict=True)) if actual != target)
+        controls.append({"mutation": name, "exitStatus": 0, "cycle": witness, "rejected": reason,
+                         "rtlHash": digest(mutant), "traceHash": digest(args.output / f"{name}-mutant/debug.trace")})
     assert all(digest(ROOT / name) == value for name, value in report["inputHashes"].items()), "Debug inputs changed"
     assert all(digest(args.output / "rtl" / name) == value for name, value in report["rtlHashes"].items()), "Debug RTL changed"
     summary = {"scope": "single hart debug module with fake hart", "exitStatus": 0,
                "command": ["python3", "test/test_debug/debug_module.py", "--output", str(args.output)],
                "buildHash": digest(args.output / "build.json"),
-               "commands": commands, "runs": runs, "negativeControls": [control],
+               "commands": commands, "runs": runs, "negativeControls": controls,
                "excluded": ["core integration", "full Debug 1.0 conformance", "physical transport", "formal proof"]}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(f"PASS: {sum(run['cycles'] for run in runs)} debug cycles and one RTL negative control")
+    print(f"PASS: {sum(run['cycles'] for run in runs)} debug cycles and {len(controls)} RTL negative controls")
 
 
 if __name__ == "__main__":

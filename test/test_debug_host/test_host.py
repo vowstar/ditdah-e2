@@ -13,6 +13,8 @@ from test.test_debug_host.verify_host import (
     check_abstract_evidence,
     check_execution,
     check_wrong_idcode,
+    abstract_metrics,
+    compare_metrics,
     gdb_commands,
     openocd_configuration,
     resolve_tool,
@@ -89,6 +91,27 @@ class HostEvidenceTests(unittest.TestCase):
             check_abstract_evidence(log.replace("Succeeded to read memory via abstract access.\n", ""), trace)
         with self.assertRaisesRegex(ValueError, "fallback"):
             check_abstract_evidence(log + "Succeeded to read memory via progbuf\n", trace)
+
+    def test_abstract_throughput_requires_postincrement_and_improvement(self):
+        trace = ("J 10 23 2 36175872\n"
+                 "J 20 24 2 1\n"
+                 "J 30 4 2 42\n"
+                 "J 40 23 2 36175872\n"
+                 "J 40 4 1 0\n"
+                 "F 50 0 2\n")
+        current = abstract_metrics(trace)
+        self.assertEqual(current["automaticDataAccesses"], 2)
+        self.assertEqual(current["postincrementCommands"], 2)
+        self.assertEqual(current["abstractWindowCycles"], 30)
+        baseline = current | {"finalCycles": 100, "abstractWindowCycles": 60,
+                              "dmiRequests": 10, "data1Writes": 5}
+        comparison = compare_metrics(baseline, current)
+        self.assertEqual(comparison["finalCycleReductionPercent"], 50)
+        self.assertEqual(comparison["data1WriteReductionPercent"], 100)
+        with self.assertRaisesRegex(ValueError, "postincrement"):
+            compare_metrics(baseline, current | {"postincrementCommands": 0})
+        with self.assertRaisesRegex(ValueError, "throughput"):
+            compare_metrics(baseline, current | {"finalCycles": 100})
 
     def test_wrong_idcode_must_be_a_tool_rejection(self):
         log = "Error: E2_IDCODE_MISMATCH actual=00000003 expected=0x00000001"

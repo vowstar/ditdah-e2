@@ -29,7 +29,8 @@ BIT_INSTRUCTIONS = {
             "sext.b", "sext.h", "zext.h", "rol", "ror", "rori", "orc.b", "rev8"],
     "Zbs": ["bclr", "bclri", "bext", "bexti", "binv", "binvi", "bset", "bseti"],
 }
-TOPS = ["DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge"]
+TOPS = ["DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge", "DitDahE2DebugModule"]
+GENERATORS = {"DitDahE2DebugModule": "DebugModule"}
 
 
 def configuration(value):
@@ -101,7 +102,7 @@ def main():
         work = Path(directory)
         (work / "parameters.json").write_text(json.dumps(params) + "\n")
         environment = dict(os.environ, DITDAH_E2_SOURCE=str(Path("ditdah_e2/src").resolve()),
-                           DITDAH_E2_GENERATOR=args.top)
+                           DITDAH_E2_GENERATOR=GENERATORS.get(args.top, args.top))
         subprocess.run(["elaborate-ditdah-e2", "design", "parameters.json"],
                        cwd=work, env=environment, check=True)
         subprocess.run(["firld", *map(str, sorted(work.glob("*.mlirbc"))),
