@@ -48,6 +48,7 @@ class CsrIO(p: Parameters) extends HWBundle(p):
   val protectionSelected = Aligned(Bool())
   val instructionProtection = Aligned(new PmpAccess)
   val dataProtection = Aligned(new PmpAccess)
+  val trigger = Option.when(p.triggerCount == 2)(Aligned(new TriggerCorePort))
 
 @generator
 object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
@@ -66,6 +67,29 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     io.userMode := (if p.protectedMode then userMode else false.B)
     io.dataMachine := (if p.protectedMode then (!userMode | io.debugAccess) & !(mprv & mppUser) else true.B)
     io.wfiIllegal := (if p.protectedMode then userMode & tw else false.B)
+    val triggerSelected = Wire(Bool())
+    val triggerRead = Wire(UInt(32))
+    val triggerWriteMask = Wire(UInt(32))
+    val triggerWrittenData = Wire(UInt(32))
+    triggerSelected := false.B
+    triggerRead := 0.U(32)
+    triggerWriteMask := 0.U(32)
+    triggerWrittenData := 0.U(32)
+    if p.triggerCount == 2 then
+      val trigger = DitDahE2Trigger.instantiate(p)
+      trigger.io.clock := io.clock
+      trigger.io.reset := io.reset
+      trigger.io.address := io.address
+      trigger.io.operand := io.operand
+      trigger.io.operation := io.operation
+      trigger.io.writeRequested := io.writeRequested
+      trigger.io.commit := io.commit
+      trigger.io.debugAccess := io.debugAccess
+      io.trigger.get :<>= trigger.io.core
+      triggerSelected := trigger.io.implemented
+      triggerRead := trigger.io.readData
+      triggerWriteMask := trigger.io.writeMask
+      triggerWrittenData := trigger.io.writtenData
     val protectionRead = Wire(UInt(32))
     val protectionWrite = Wire(Bool())
     val protectionWriteData = Wire(UInt(32))
@@ -145,7 +169,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
       ((io.address >= 0xb83.U(12)) & (io.address <= 0xb9f.U(12))) |
       ((io.address >= 0x323.U(12)) & (io.address <= 0x33f.U(12)))
     val counterAccess = if p.protectedMode then io.address === 0x306.U(12) else false.B
-    val implemented = named | zeroCounter | io.protectionSelected | counterAccess
+    val implemented = named | zeroCounter | io.protectionSelected | counterAccess | triggerSelected
     val pending = (io.interrupts.external.asBits ## 0.B(3) ## io.interrupts.timer.asBits ##
       0.B(3) ## io.interrupts.software.asBits ## 0.B(3)).asUInt
     io.interruptPending := (pending.asBits & interruptEnables.asBits).asUInt
@@ -176,6 +200,7 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     when(io.address === 0x344.U(12)) { io.readData := pending }
     when(io.address === 0x320.U(12)) { io.readData := inhibit }
     when(counterAccess) { io.readData := counterEnable }
+    when(triggerSelected) { io.readData := triggerRead }
     when(io.protectionSelected) { io.readData := protectionRead }
     for address <- Seq(0xb00, 0xc00) do
       when(io.address === address.U(12)) { io.readData := counters.io.cycleCount.asBits.bits(31, 0).asUInt }
@@ -292,6 +317,10 @@ object Csr extends Generator[Parameters, UnitLayers, CsrIO, UnitProbe]:
     val epcMask = (if p.enableC then 0xfffffffeL else 0xfffffffcL).U(32)
     val statusMask = (if p.protectedMode then 0x221888L else 0x88L).U(32)
     when(write) {
+      when(triggerSelected) {
+        io.writeMask := triggerWriteMask
+        io.writtenData := triggerWrittenData
+      }
       when(io.address === 0x300.U(12)) {
         io.writeMask := statusMask
         io.writtenData := nextStatus

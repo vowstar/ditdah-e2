@@ -29,8 +29,13 @@ DEBUG_TRANSPORT_JG_ARGS ?=
 DEBUG_MODULE_OUTPUT ?= result/debug-module
 DEBUG_ABSTRACT_OUTPUT ?= result/debug-abstract-commercial
 DEBUG_ABSTRACT_JG_ARGS ?=
+TRIGGER_OUTPUT ?= result/trigger-verification
+TRIGGER_HOST_OUTPUT ?= result/trigger-host
+TRIGGER_COMMERCIAL_OUTPUT ?= result/trigger-commercial
+TRIGGER_PREPARE_ARGS ?=
+TRIGGER_JG_ARGS ?=
 
-.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-module verify-jtag verify-debug-host verify-debug-commercial verify-debug-abstract-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
+.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-module verify-jtag verify-debug-host verify-trigger verify-trigger-host verify-trigger-commercial verify-debug-commercial verify-debug-abstract-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -82,6 +87,29 @@ verify-debug-host:
 	printf '%s\n' '{"enableDebug":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE)}' > "$(JTAG_CORE_OUTPUT)/input.json"
 	python3 scripts/build_rtl.py --config "$(JTAG_CORE_OUTPUT)/input.json" --output "$(JTAG_CORE_OUTPUT)/design"
 	python3 test/test_debug_host/verify_host.py --rtl "$(JTAG_CORE_OUTPUT)/design" --output "$(DEBUG_HOST_OUTPUT)" $(if $(DEBUG_HOST_BASELINE),--baseline "$(DEBUG_HOST_BASELINE)")
+
+verify-trigger:
+	mkdir -p "$(TRIGGER_OUTPUT)/unit" "$(TRIGGER_OUTPUT)/core" "$(TRIGGER_OUTPUT)/user"
+	printf '%s\n' '{"enableDebug":true,"triggerCount":2}' > "$(TRIGGER_OUTPUT)/unit/input.json"
+	printf '%s\n' '{"enableDebug":true,"triggerCount":2,"enableC":false,"enableM":true}' > "$(TRIGGER_OUTPUT)/core/input.json"
+	printf '%s\n' '{"enableDebug":true,"triggerCount":2,"enableC":false,"enableM":true,"protectedMode":true}' > "$(TRIGGER_OUTPUT)/user/input.json"
+	python3 scripts/build_rtl.py --top DitDahE2Trigger --config "$(TRIGGER_OUTPUT)/unit/input.json" --output "$(TRIGGER_OUTPUT)/unit/rtl"
+	python3 test/test_trigger/trigger.py --rtl "$(TRIGGER_OUTPUT)/unit/rtl" --output "$(TRIGGER_OUTPUT)/unit/check"
+	python3 scripts/build_rtl.py --config "$(TRIGGER_OUTPUT)/core/input.json" --output "$(TRIGGER_OUTPUT)/core/rtl"
+	python3 scripts/build_rtl.py --config "$(TRIGGER_OUTPUT)/user/input.json" --output "$(TRIGGER_OUTPUT)/user/rtl"
+	python3 test/test_trigger/verify_trigger.py --rtl "$(TRIGGER_OUTPUT)/core/rtl" --user-rtl "$(TRIGGER_OUTPUT)/user/rtl" --output "$(TRIGGER_OUTPUT)/core/check"
+	python3 -m test.test_trigger.wrapper_progress --rtl "$(TRIGGER_OUTPUT)/core/rtl" --output "$(TRIGGER_OUTPUT)/core/wrapper-check"
+
+verify-trigger-host:
+	mkdir -p "$(TRIGGER_HOST_OUTPUT)"
+	printf '%s\n' '{"enableDebug":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE),"triggerCount":2}' > "$(TRIGGER_HOST_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --config "$(TRIGGER_HOST_OUTPUT)/input.json" --output "$(TRIGGER_HOST_OUTPUT)/design"
+	python3 test/test_debug_host/verify_host.py --rtl "$(TRIGGER_HOST_OUTPUT)/design" --output "$(TRIGGER_HOST_OUTPUT)/acceptance" --hardware-break
+
+verify-trigger-commercial: verify-trigger
+	python3 formal/trigger/run.py prepare --unit-rtl "$(TRIGGER_OUTPUT)/unit/rtl" --core-rtl "$(TRIGGER_OUTPUT)/core/rtl" --output "$(TRIGGER_COMMERCIAL_OUTPUT)/evidence" $(TRIGGER_PREPARE_ARGS)
+	python3 formal/trigger/run.py collect --evidence "$(TRIGGER_COMMERCIAL_OUTPUT)/evidence" --private-output "$(TRIGGER_COMMERCIAL_OUTPUT)/native-private" $(TRIGGER_JG_ARGS)
+	python3 formal/trigger/run.py validate --evidence "$(TRIGGER_COMMERCIAL_OUTPUT)/evidence"
 
 verify-debug-commercial:
 	mkdir -p "$(DEBUG_TRANSPORT_OUTPUT)"

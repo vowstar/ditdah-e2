@@ -1948,7 +1948,7 @@ def _prove_projection(output):
         ]
         for name, facts, goal, expected in comparisons:
             name = "op" + str(operation) + "_" + name
-            solver = z3.SolverFor("QF_UFBV")
+            solver = z3.Solver()
             solver.set(timeout=15000)
             solver.add(
                 *[z3.simplify(fact) for fact in facts], z3.simplify(z3.Not(goal))

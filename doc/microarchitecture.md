@@ -78,6 +78,17 @@ Single step completes one instruction or exception with interrupts masked, then 
 Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
 Already accepted competitor transactions complete across warm reset.
 
+`triggerCount` is zero or two; two requires Debug and zero omits the trigger bank.
+The bank provides `tselect`, `tdata1-3`, `tinfo`, `tcontrol` and zero-valued context registers.
+`tinfo.version` is one and only mcontrol type two is advertised. Exact execute-address matching is supported.
+Debug owns `dmode`; M-mode writes to a Debug-owned trigger are ignored. `dmode=0, action=1` coerces to action zero.
+A match uses an accepted X instruction after older M work completes, never a speculative fetch PC.
+The matching instruction has no memory, CSR, multiply or retirement side effects before the selected action.
+Action zero raises breakpoint cause three with its PC in `mepc` and `mtval`; action one enters Debug with DPC at that PC.
+All simultaneous hit bits are recorded and Debug entry suppresses a coincident native breakpoint.
+Trap entry saves `tcontrol.mte` to `mpte` and clears `mte`; MRET restores it to prevent native-trigger loops.
+Triggers do not fire in Debug Mode. Watchpoints, exception, interrupt, icount and chains are absent.
+
 The retirement port reports completed instructions and synchronous exceptions.
 Its order starts at zero after reset and increments for each valid event.
 It includes source values, aligned memory lanes, explicit CSR access and CSR state before and after the instruction.
@@ -87,3 +98,19 @@ AMO write data is the request operand. Check the actual SRAM write at the atomic
 Debug EBREAK emits no retirement event.
 A separate interrupt event carries the interrupted PC, target and cause.
 It also carries privilege and trap CSR state before and after entry.
+
+## Verification scope
+
+`make verify-signoff` runs the functional gate for the selected RTL configuration.
+The trigger commercial gate separately requires all 17 fixed cases to pass.
+Trigger proofs use four fixed ROM programs, directed DMI setup and one initial reset.
+Memory responses follow the ideal one-cycle model.
+Each trigger core safety case must pass all 21 original goals.
+Each goal needs an unbounded proof or a qualified finite result at its own original bound.
+Goals declared unbounded require native unbounded proof.
+Covers and expected counterexamples retain their recorded acceptance conditions.
+Reuse requires identical complete case plans and native inputs, with original receipts and outputs preserved.
+Tool identities and verifier contracts must also match.
+The selected profile reuses only native unbounded facts from the same task.
+Source diagnostics and helper proofs do not replace original goals.
+These gates do not prove arbitrary programs or establish complete ISA conformance or physical signoff.

@@ -40,7 +40,7 @@ def resolve_tool(value, environment, default):
     return executable, {"version": version, "sha256": digest(executable)}
 
 
-def validate_manifest(manifest):
+def validate_manifest(manifest, require_triggers=False):
     if manifest.get("top") != "DitDahE2":
         raise ValueError("Unexpected generated top-level module")
     parameters = manifest.get("parameters")
@@ -55,10 +55,12 @@ def validate_manifest(manifest):
     idcode = parameters.get("jtagIdcode")
     if type(idcode) is not int or not 0 < idcode < 1 << 32 or not idcode & 1:
         raise ValueError("JTAG IDCODE must be odd, nonzero and unsigned 32-bit")
+    if require_triggers and parameters.get("triggerCount") != 2:
+        raise ValueError("Hardware-breakpoint acceptance requires triggerCount=2")
     return idcode
 
 
-def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False):
+def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False, triggers=False):
     commands = [
         "adapter driver remote_bitbang",
         "transport select jtag",
@@ -78,6 +80,8 @@ def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False):
         "ditdah.cpu configure -event halted {poll off}",
         "init",
     ]
+    if triggers:
+        commands[-1:-1] = ["riscv expose_csrs 1952-1957 833-835"]
     if strict_idcode:
         commands += [
             "poll off",
@@ -89,7 +93,7 @@ def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False):
     return commands
 
 
-def gdb_commands(elf, gdb_port, expected):
+def gdb_commands(elf, gdb_port, expected, hardware=False):
     done = expected["done"]
     lines = [
         "set confirm off",
@@ -138,14 +142,49 @@ def gdb_commands(elf, gdb_port, expected):
     ]
     if expected["stepRd"]:
         lines.append(f"    require(reg({expected['stepRegister']!r}) == {expected['stepValue']:#x}, 'stepi register result differs')")
+    if hardware:
+        lines += [
+            "    gdb.execute('set $tselect = 0')",
+            "    flush()",
+            "    require(reg('tselect') == 0 and reg('tdata1') >> 28 == 2, 'trigger zero is not mcontrol')",
+            "    require(reg('tinfo') == 0x01000004, 'trigger discovery information differs')",
+            "    gdb.execute('set $tselect = 1')",
+            "    flush()",
+            "    require(reg('tselect') == 1 and reg('tdata1') >> 28 == 2, 'trigger one is not mcontrol')",
+            "    gdb.execute('set $tselect = 2')",
+            "    flush()",
+            "    require(reg('tselect') != 2, 'trigger enumeration did not stop at two')",
+            "    gdb.execute('set $tselect = 0')",
+            "    flush()",
+        ]
     lines += [
-        f"    gdb.execute('break *{done:#x}', to_string=True)",
+        f"    gdb.execute('{'hbreak' if hardware else 'break'} *{done:#x}', to_string=True)",
         "    gdb.execute('continue', to_string=True)",
         "    flush()",
         f"    require(reg('pc') == {done:#x}, 'continue did not reach the loaded completion breakpoint')",
         f"    require(word({expected['signatureAddress']:#x}) == {expected['signature']:#x}, 'loaded code signature is not visible')",
         f"    require(word({expected['productAddress']:#x}) == {expected['product']:#x}, 'loaded M-extension result is not visible')",
-        "    gdb.execute('delete breakpoints', to_string=True)",
+    ]
+    if hardware:
+        lines += [
+            "    addresses = []",
+            "    for index in range(2):",
+            "        gdb.execute('set $tselect = %d' % index)",
+            "        flush()",
+            "        addresses.append(reg('tdata2'))",
+            f"    require({done:#x} in addresses, 'hardware-breakpoint address was not retained')",
+            "    require(reg('mepc') == 0 and reg('mcause') == 0 and reg('mtval') == 0, 'Debug trigger changed native trap state')",
+            "    gdb.execute('set $tselect = 0')",
+            "    gdb.execute('delete breakpoints', to_string=True)",
+            "    gdb.execute('stepi', to_string=True)",
+            "    flush()",
+            f"    require(reg('pc') == {done:#x}, 'resumed instruction did not execute at the trigger PC')",
+            f"    require(word({expected['signatureAddress']:#x}) == {expected['signature']:#x}, 'resume changed the signature')",
+            f"    require(word({expected['productAddress']:#x}) == {expected['product']:#x}, 'resume changed the product')",
+        ]
+    else:
+        lines += ["    gdb.execute('delete breakpoints', to_string=True)"]
+    lines += [
         f"    gdb.write('{GDB_ACCEPTED}\\n')",
         "except Exception as error:",
         "    gdb.write('E2_GDB_FAILURE: ' + str(error) + '\\n')",
@@ -294,6 +333,34 @@ def compare_baseline(baseline, output, report):
     return comparison
 
 
+def check_trigger_evidence(trace, done):
+    data0 = 0
+    reads, writes = set(), []
+    for line in trace.splitlines():
+        fields = line.split()
+        if len(fields) != 5 or fields[0] != "J":
+            continue
+        address, operation, data = map(int, fields[2:])
+        if operation != 2:
+            continue
+        if address == 4:
+            data0 = data
+        elif address == 0x17 and data >> 24 == 0 and data & (1 << 17):
+            register = data & 0xFFFF
+            if data & (1 << 16):
+                writes.append((register, data0))
+            else:
+                reads.add(register)
+    if 0x7A4 not in reads or not any(register == 0x7A0 for register, _ in writes):
+        raise ValueError("Debugger did not enumerate the trigger bank")
+    if not any(register == 0x7A2 and value == done for register, value in writes):
+        raise ValueError("Debugger did not write the hardware-breakpoint address")
+    if not any(register == 0x7A1 and value >> 28 == 2 and value & (1 << 27) and
+               value >> 12 & 15 == 1 and value & 4 for register, value in writes):
+        raise ValueError("Debugger did not enable an execute action-1 trigger")
+    return {"triggerReads": sorted(reads), "triggerWrites": len(writes)}
+
+
 def check_wrong_idcode(log, status, ready, actual, expected):
     if ready or status == 0:
         raise ValueError("Wrong IDCODE reached readiness or exited successfully")
@@ -305,7 +372,7 @@ def check_wrong_idcode(log, status, ready, actual, expected):
         raise ValueError("Tool failure was not the requested IDCODE rejection")
 
 
-def check_execution(trace, expected):
+def check_execution(trace, expected, hardware=False):
     retirements, console, words = [], [], {}
     resets = tdo = None
     for line in trace.splitlines():
@@ -347,10 +414,14 @@ def check_execution(trace, expected):
         address = expected[address_key] & ~3
         if words.get(address) != expected[key]:
             raise ValueError(f"Final native memory does not contain the loaded code {key}")
+    completed = sum(item["pc"] == expected["done"] and not item["trap"] for item in retirements)
+    if hardware and completed != 1:
+        raise ValueError(f"Trigger instruction retired {completed} times instead of once after resume")
     return {"externalResetPulses": resets[0], "debugResetPulses": resets[1],
             "tdoSamples": tdo[0], "tdoEnabledSamples": tdo[1],
             "retirements": len(retirements), "console": bytes(console).decode("ascii"),
-            "finalSignature": expected["signature"], "finalProduct": expected["product"]}
+            "finalSignature": expected["signature"], "finalProduct": expected["product"],
+            "triggerInstructionRetirements": completed}
 
 
 def reserve_port():
@@ -395,7 +466,7 @@ def stop_process(process, timeout=5):
         process.wait(timeout)
 
 
-def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong_idcode=None):
+def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong_idcode=None, hardware=False):
     directory.mkdir()
     trace, errors = directory / "simulator.trace", directory / "simulator.stderr"
     openocd_log, gdb_log = directory / "openocd.log", directory / "gdb.log"
@@ -409,7 +480,7 @@ def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong
             bitbang_port = wait_for_simulator(simulator, trace, args.timeout)
             gdb_port = reserve_port()
             configuration = openocd_configuration(bitbang_port, gdb_port, selected_idcode,
-                                                  strict_idcode=wrong_idcode is not None)
+                                                  strict_idcode=wrong_idcode is not None, triggers=hardware)
             (directory / "openocd.cfg").write_text("\n".join(configuration) + "\n")
             openocd = subprocess.Popen([str(tools["openocd"][0]), "-d", "-f", str(directory / "openocd.cfg")],
                                        stdout=openocd_output, stderr=subprocess.STDOUT, text=True)
@@ -420,7 +491,7 @@ def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong
             else:
                 if not ready:
                     raise RuntimeError("OpenOCD did not reach debug readiness: " + openocd_log.read_text()[-4000:])
-                script = gdb_commands(expected["elf"], gdb_port, expected)
+                script = gdb_commands(expected["elf"], gdb_port, expected, hardware=hardware)
                 (directory / "gdb.commands").write_text(script)
                 with gdb_log.open("w") as gdb_output:
                     completed = subprocess.run([str(tools["gdb"][0]), "-q", "-nx", "-batch", "-x",
@@ -448,7 +519,9 @@ def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong
         record.update({"rejectedIdcode": selected_idcode, "actualIdcode": idcode, "rejected": True})
         return record
     record.update(check_abstract_evidence(openocd_log.read_text(), trace_text))
-    record.update(check_execution(trace_text, expected))
+    record.update(check_execution(trace_text, expected, hardware=hardware))
+    if hardware:
+        record.update(check_trigger_evidence(trace_text, expected["done"]))
     record["gdbLogSha256"] = digest(gdb_log)
     return record
 
@@ -479,6 +552,7 @@ def main():
     parser.add_argument("--delay", type=lambda value: int(value, 0), default=3)
     parser.add_argument("--cycle-limit", type=lambda value: int(value, 0), default=50000000)
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--hardware-break", action="store_true")
     args = parser.parse_args()
     if args.seed < 0 or args.seed > 0xFFFFFFFF or args.delay < 0 or args.cycle_limit <= 0 or args.timeout <= 0:
         parser.error("Invalid seed, delay, cycle limit or timeout")
@@ -490,7 +564,7 @@ def main():
     try:
         manifest_data = (rtl / "manifest.json").read_bytes()
         manifest = json.loads(manifest_data)
-        idcode = validate_manifest(manifest)
+        idcode = validate_manifest(manifest, require_triggers=args.hardware_break)
         if manifest["sourceHashes"] != sources():
             raise ValueError("Generated RTL source inputs are stale")
         for name, value in manifest["rtlHashes"].items():
@@ -519,7 +593,8 @@ def main():
         report["workload"] = {"elfSha256": digest(elf), "softwareManifestSha256": digest(output / "software/manifest.json"),
                               "isa": software["isa"], "expectedSignature": expected["signature"],
                               "expectedProduct": expected["product"]}
-        positive = run_case(binary, initial, tools, output / "openocd-gdb", idcode, args, expected=expected)
+        positive = run_case(binary, initial, tools, output / "openocd-gdb", idcode, args, expected=expected,
+                            hardware=args.hardware_break)
         report["runs"].append(positive)
         negative = run_case(binary, initial, tools, output / "wrong-idcode", idcode, args,
                             wrong_idcode=idcode ^ 1)

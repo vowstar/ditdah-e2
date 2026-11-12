@@ -500,6 +500,9 @@ def mutate_reset(text):
 
 def mutate_trap_pc(text):
     pattern = r"(mepc <= )(\{trapPc\[[^\n]+)(;)"
+    if len(re.findall(pattern, text)) == 1:
+        return re.sub(pattern, r"\1(\2) + 32'd4\3", text)
+    pattern = r"(wire\s+\[31:0\]\s+\w+\s*=\s*)(\{trapPc\[[^\n]+)(;)"
     assert len(re.findall(pattern, text)) == 1, "Trap PC mutation target changed"
     return re.sub(pattern, r"\1(\2) + 32'd4\3", text)
 

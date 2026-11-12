@@ -469,25 +469,40 @@ def output_hashes(case):
     }
 
 
-def collect_case(case, executable, private_root, timeout):
+def collect_case(case, executable, private_root, timeout, cpu_count=1):
+    """Run one native attempt on cpu_count CPUs from the inherited affinity."""
     plan = json.loads((case / "plan.json").read_text())
     inputs = {name: digest(case / name) for name in plan["inputs"]}
     if (case / "receipt.json").exists() or (case / "completion.json").exists():
         raise ValueError("Native attempt already exists")
+    if type(cpu_count) is not int or cpu_count < 1:
+        raise ValueError("CPU count must be a positive integer")
+    if not all(hasattr(os, name) for name in ("sched_getaffinity", "sched_setaffinity")):
+        raise ValueError("CPU affinity allocation is unavailable on this platform")
+    try:
+        available_cpus = sorted(os.sched_getaffinity(0))
+    except OSError:
+        raise ValueError("Inherited CPU affinity could not be read") from None
+    if cpu_count > len(available_cpus):
+        raise ValueError(
+            f"CPU allocation requires {cpu_count} CPUs; "
+            f"inherited affinity provides {len(available_cpus)}"
+        )
+    cpus = available_cpus[:cpu_count]
     try:
         executable = Path(shutil.which(executable) or executable).resolve(strict=True)
     except OSError:
         raise ValueError(case.name + ": native executable was not found") from None
     private = Path(tempfile.mkdtemp(prefix="debug-transport-", dir=private_root))
-    cpu = min(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
-    environment = dict(os.environ, OMP_NUM_THREADS="1")
+    environment = dict(os.environ, OMP_NUM_THREADS=str(cpu_count))
     command = [str(executable), "-no_gui", "-fpv", "-tcl", "collect.tcl"]
     started = time.monotonic()
     with (private / "native.log").open("wb") as log:
 
         def affinity():
-            if cpu is not None:
-                os.sched_setaffinity(0, {cpu})
+            os.sched_setaffinity(0, cpus)
+            if os.sched_getaffinity(0) != set(cpus):
+                raise OSError("Native CPU affinity differs from its allocation")
 
         try:
             process = subprocess.Popen(
@@ -500,13 +515,15 @@ def collect_case(case, executable, private_root, timeout):
                 start_new_session=True,
                 preexec_fn=affinity,  # noqa: PLW1509
             )
-        except OSError:
+        except (OSError, subprocess.SubprocessError):
             raise ValueError(case.name + ": native process failed to start") from None
         receipt = {
             "pid": process.pid,
             "launcherSha256": digest(executable),
             "command": ["jg", *command[1:]],
-            "cpu": cpu,
+            "cpu": cpus[0],
+            "cpuCount": cpu_count,
+            "cpuAffinity": cpus,
             "inputHashes": inputs,
             "timeoutSeconds": timeout,
             "startedUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -550,6 +567,26 @@ def collect_case(case, executable, private_root, timeout):
     return check_records(read_records(case / "native.tsv"), plan)
 
 
+def check_cpu_receipt(receipt):
+    # Legacy receipts describe their single CPU using only the cpu field.
+    if "cpuCount" not in receipt and "cpuAffinity" not in receipt:
+        return
+    count = receipt.get("cpuCount")
+    cpus = receipt.get("cpuAffinity")
+    if (
+        type(receipt.get("cpu")) is not int
+        or receipt["cpu"] < 0
+        or type(count) is not int
+        or count < 1
+        or not isinstance(cpus, list)
+        or len(cpus) != count
+        or any(type(cpu) is not int or cpu < 0 for cpu in cpus)
+        or cpus != sorted(set(cpus))
+        or receipt.get("cpu") != cpus[0]
+    ):
+        raise ValueError("Native receipt CPU allocation differs")
+
+
 def validate_commercial(evidence):
     validate_frozen(evidence)
     outcomes = []
@@ -558,6 +595,7 @@ def validate_commercial(evidence):
         plan = json.loads((case / "plan.json").read_text())
         receipt = json.loads((case / "receipt.json").read_text())
         completion = json.loads((case / "completion.json").read_text())
+        check_cpu_receipt(receipt)
         expected_inputs = {
             filename: digest(case / filename) for filename in plan["inputs"]
         }

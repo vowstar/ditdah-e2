@@ -140,6 +140,7 @@ class DebugTests(unittest.TestCase):
 
     def test_boundary_mutations_change_semantics(self):
         self.assertIn("+ 32'd4", mutate_trap_pc("mepc <= {trapPc[31:1], 1'h0};"))
+        self.assertIn("+ 32'd4", mutate_trap_pc("wire [31:0] next = {trapPc[31:1], 1'h0};"))
         self.assertIn("? 1'h0 : userMode_0", mutate_mret_privilege("_GEN_230 ? mppUser : userMode_0"))
         self.assertIn("entryCause == 3'h4", mutate_step_pc(": core_architecturalPc;"))
 

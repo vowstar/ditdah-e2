@@ -6,6 +6,8 @@ import me.jiuyang.zaozi.*
 import me.jiuyang.zaozi.default.{*, given}
 import me.jiuyang.zaozi.reftpe.*
 import me.jiuyang.zaozi.valuetpe.*
+import java.lang.foreign.Arena
+import org.llvm.mlir.scalalib.capi.ir.{Block, Context}
 
 private class PipelineReset extends Bundle:
   val value = Aligned(Reset())
@@ -15,6 +17,56 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   override def moduleName(p: Parameters): String = "DitDahE2"
   // Keep retirement observation below the JVM method-size limit.
   private def observeRetirement(body: () => Unit): Unit = body()
+  private def triggerActions(p: Parameters, csr: Interface[CsrIO], x: Referable[Instruction],
+      xValid: Referable[Bool], xUser: Referable[Bool], debugAccess: Referable[Bool],
+      mValid: Referable[Bool], eligibleInterrupt: Referable[Bool], sleeping: Referable[Bool],
+      debugResume: Referable[Bool], trap: Referable[Bool], interrupt: Referable[Bool],
+      returning: Referable[Bool])(using Arena, Context, Block, InstanceContext): (Wire[Bool], Wire[Bool], Wire[Bool]) =
+    val matched = Wire(Bool())
+    val native = Wire(Bool())
+    val debug = Wire(Bool())
+    matched := false.B
+    native := false.B
+    debug := false.B
+    if p.triggerCount == 2 then
+      csr.trigger.get.pc := x.pc
+      csr.trigger.get.valid := xValid
+      csr.trigger.get.user := xUser
+      csr.trigger.get.debug := debugAccess
+      csr.trigger.get.ready := !mValid & !eligibleInterrupt & !sleeping & !debugResume
+      csr.trigger.get.trap := trap | interrupt
+      csr.trigger.get.mret := returning
+      matched := csr.trigger.get.matched
+      native := csr.trigger.get.nativeAction
+      debug := csr.trigger.get.debugAction
+    (matched, native, debug)
+  private def driveTrap(csr: Interface[CsrIO], io: Interface[CoreIO], m: Referable[Completion],
+      complete: Referable[Bool], failed: Referable[Bool], trap: Referable[Bool],
+      interrupt: Referable[Bool], returning: Referable[Bool], debugBreakpoint: Referable[Bool],
+      architecturalPc: Referable[UInt], interruptCause: Referable[UInt], finalCause: Referable[UInt],
+      finalTval: Referable[UInt], coreReset: Referable[Reset], sleeping: Referable[Bool])
+      (using Arena, Context, Block, InstanceContext): Unit =
+    csr.address := m.csrAddress
+    csr.operand := m.csrOperand
+    csr.operation := m.csrOperation
+    csr.writeRequested := m.csrWrite
+    csr.commit := complete & m.csr & !failed
+    csr.trap := trap | interrupt
+    csr.trapPc := interrupt.?(architecturalPc, m.instruction.pc)
+    csr.cause := interrupt.?(interruptCause, finalCause)
+    csr.tval := interrupt.?(0.U(32), finalTval)
+    csr.mret := returning
+    csr.retire := complete & !failed & !debugBreakpoint
+    io.interrupt.valid := interrupt & !coreReset.asBool
+    io.interrupt.pc := architecturalPc
+    io.interrupt.target := csr.trapTarget
+    io.interrupt.cause := interruptCause
+    io.interrupt.userMode := csr.userMode
+    io.interrupt.csrMstatus :<= csr.statusTrace
+    io.interrupt.csrMepc :<= csr.epcTrace
+    io.interrupt.csrMcause :<= csr.causeTrace
+    io.interrupt.csrMtval :<= csr.valueTrace
+    io.sleeping := sleeping
   def architecture(p: Parameters) =
     val io = summon[Interface[CoreIO]]
     given ClockScope = ClockScope.posedge(io.clock)
@@ -120,6 +172,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val waiting = complete & m.wfi & !failed
     val synchronized = complete & synchronize & !failed
     val debugBreakpoint = complete & m.debugBreak & !failed
+    val triggerInterrupt = localWake & csr.io.interruptsEnabled & !debugStep
+    val (triggerMatched, triggerNative, triggerDebug) = triggerActions(p, csr.io, x, xValid, xUser,
+      debugAccess, mValid, triggerInterrupt, sleeping, debugResume, trap, interrupt, returning)
     if p.enableA then
       val permissionWrite = complete & m.csr & m.csrWrite & !failed &
         (csr.io.protectionSelected | (m.csrAddress === 0x300.U(12)))
@@ -128,27 +183,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       io.dataDebug.get := debugDataOwner
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
     val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
-    csr.io.address := m.csrAddress
-    csr.io.operand := m.csrOperand
-    csr.io.operation := m.csrOperation
-    csr.io.writeRequested := m.csrWrite
-    csr.io.commit := complete & m.csr & !failed
-    csr.io.trap := trap | interrupt
-    csr.io.trapPc := interrupt.?(architecturalPc, m.instruction.pc)
-    csr.io.cause := interrupt.?(interruptCause, finalCause)
-    csr.io.tval := interrupt.?(0.U(32), finalTval)
-    csr.io.mret := returning
-    csr.io.retire := complete & !failed & !debugBreakpoint
-    io.interrupt.valid := interrupt & !coreReset.asBool
-    io.interrupt.pc := architecturalPc
-    io.interrupt.target := csr.io.trapTarget
-    io.interrupt.cause := interruptCause
-    io.interrupt.userMode := csr.io.userMode
-    io.interrupt.csrMstatus :<= csr.io.statusTrace
-    io.interrupt.csrMepc :<= csr.io.epcTrace
-    io.interrupt.csrMcause :<= csr.io.causeTrace
-    io.interrupt.csrMtval :<= csr.io.valueTrace
-    io.sleeping := sleeping
+    driveTrap(csr.io, io, m, complete, failed, trap, interrupt, returning, debugBreakpoint,
+      architecturalPc, interruptCause, finalCause, finalTval, coreReset, sleeping)
     val loaded = (programData.response.bits.data >> shift).asBits
     val loadValue = Wire(UInt(32))
     loadValue := loaded.asUInt
@@ -310,9 +346,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val arithmeticValue = Wire(UInt(32))
     arithmeticReady := true.B
     arithmeticValue := 0.U(32)
-    val advance = xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
+    val advance = triggerNative | (xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
       (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping &
-      (!isMultiplyDivide | x.fault | arithmeticReady) & !debugStop
+      (!isMultiplyDivide | x.fault | arithmeticReady) & !debugStop & !triggerMatched)
     io.mulDiv.start := false.B
     io.mulDiv.resultValid := false.B
     io.mulDiv.finish := false.B
@@ -326,7 +362,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       multiplyDivide.io.reset := coreReset
       multiplyDivide.io.cancel := trap | interrupt | debugStop
       multiplyDivide.io.request.valid := xValid & isMultiplyDivide & !arithmeticPending &
-        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault & !debugStop
+        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault & !debugStop & !triggerMatched
       multiplyDivide.io.request.bits.operation := funct3.asUInt
       multiplyDivide.io.request.bits.left := a
       multiplyDivide.io.request.bits.right := b
@@ -368,7 +404,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       ((size === 2.U(2)) & (address.asBits.bits(1, 0) =/= 0.B(2))) |
       ((size === 1.U(2)) & address.asBits.bit(0)))
     val systemFault = (isMret & xUser) | (isWfi & csr.io.wfiIllegal)
-    val fault = x.fault | !legal | (isBreak & !isDebugBreak) | isCall | badTarget | badData | systemFault
+    val fault = triggerNative | x.fault | !legal | (isBreak & !isDebugBreak) | isCall | badTarget | badData | systemFault
     val cause = Wire(UInt(32))
     val tval = Wire(UInt(32))
     cause := 2.U(32)
@@ -378,6 +414,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(badData) { cause := (isStore | (isAtomic & !isLr)).?(6.U(32), 4.U(32)); tval := address }
     when(badTarget) { cause := 0.U(32); tval := target }
     when(x.fault) { cause := 1.U(32); tval := x.faultAddress }
+    when(triggerNative) { cause := 3.U(4); tval := x.pc }
     val value = Wire(UInt(32))
     val rhs = isRegister.?(b, immI)
     val amount = rhs.asBits.bits(4, 0).asUInt
@@ -465,8 +502,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       debug.io.core.architecturalPc := architecturalPc
       debug.io.core.userMode := csr.io.userMode
       debug.io.core.completed := complete & !debugBreakpoint
-      debug.io.core.breakpoint := debugBreakpoint
-      debug.io.core.breakpointPc := m.instruction.pc
+      debug.io.core.breakpoint := debugBreakpoint | triggerDebug
+      debug.io.core.breakpointPc := triggerDebug.?(x.pc, m.instruction.pc)
       debugStop := debug.io.core.stop
       debugResume := debug.io.core.resume
       debugResumePc := debug.io.core.resumePc

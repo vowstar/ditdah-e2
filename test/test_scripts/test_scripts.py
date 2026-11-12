@@ -61,6 +61,18 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 configuration(value)
 
+    def test_trigger_configuration(self):
+        baseline = configuration({})
+        self.assertNotIn("triggerCount", baseline)
+        self.assertEqual(configuration({"triggerCount": 0}), baseline)
+        selected = configuration({"enableDebug": True, "triggerCount": 2})
+        self.assertEqual(selected["triggerCount"], 2)
+        for value in ({"triggerCount": 1}, {"triggerCount": 2}, {"triggerCount": True},
+                      {"triggerCount": -2}, {"triggerCount": 4}, {"triggerCount": "2"},
+                      {"enableDebug": False, "triggerCount": 2}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                configuration(value)
+
     def test_atomic_configuration(self):
         for value in (False, True):
             self.assertEqual(configuration({"enableA": value})["enableA"], value)

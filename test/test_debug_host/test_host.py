@@ -12,6 +12,7 @@ from test.test_debug_host.verify_host import (
     READY,
     check_abstract_evidence,
     check_execution,
+    check_trigger_evidence,
     check_wrong_idcode,
     abstract_metrics,
     compare_metrics,
@@ -153,6 +154,34 @@ class HostEvidenceTests(unittest.TestCase):
             self.assertIn(token, text)
         self.assertIn("mis-matched", text)
         self.assertIn("quit 1", text)
+
+    def test_hardware_breakpoint_requires_two_triggers(self):
+        selected = manifest()
+        self.assertEqual(validate_manifest(selected, require_triggers=False), 3)
+        with self.assertRaisesRegex(ValueError, "triggerCount=2"):
+            validate_manifest(selected, require_triggers=True)
+        selected["parameters"]["triggerCount"] = 2
+        self.assertEqual(validate_manifest(selected, require_triggers=True), 3)
+        configuration = "\n".join(openocd_configuration(1000, 1001, 3, triggers=True))
+        self.assertIn("riscv expose_csrs 1952-1957 833-835", configuration)
+        self.assertLess(configuration.index("expose_csrs 1952"), configuration.index("init"))
+
+    def test_hardware_breakpoint_script_and_dmi_evidence(self):
+        expected = expectations()
+        text = gdb_commands(Path("program.elf"), 1234, expected, hardware=True)
+        for token in ("hbreak *0x80", "$tselect", "reg('tdata1')", "reg('tdata2')", "reg('tinfo')", "stepi"):
+            self.assertIn(token, text)
+        done = expected["done"]
+        trace = "\n".join((dmi(4, 0), dmi(0x17, 0x2307A0, 2), dmi(4, done, 3),
+                           dmi(0x17, 0x2307A2, 4), dmi(4, 0x28001044, 5),
+                           dmi(0x17, 0x2307A1, 6), dmi(0x17, 0x2207A4, 7)))
+        observed = check_trigger_evidence(trace, done)
+        self.assertEqual(observed["triggerReads"], [0x7A4])
+        self.assertEqual(observed["triggerWrites"], 3)
+        with self.assertRaisesRegex(ValueError, "address"):
+            check_trigger_evidence(trace.replace(f"J 3 4 2 {done}", "J 3 4 2 0"), done)
+        with self.assertRaisesRegex(ValueError, "enumerate"):
+            check_trigger_evidence(trace.replace(dmi(0x17, 0x2207A4, 7), ""), done)
 
     def test_tool_resolution_rejects_missing_programs(self):
         executable, info = resolve_tool(sys.executable, "E2_DEBUG_TEST_UNUSED", "missing")

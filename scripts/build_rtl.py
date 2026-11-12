@@ -29,13 +29,13 @@ BIT_INSTRUCTIONS = {
             "sext.b", "sext.h", "zext.h", "rol", "ror", "rori", "orc.b", "rev8"],
     "Zbs": ["bclr", "bclri", "bext", "bexti", "binv", "binvi", "bset", "bseti"],
 }
-TOPS = ["DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge", "DitDahE2DebugModule"]
+TOPS = ["DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge", "DitDahE2DebugModule", "DitDahE2Trigger"]
 GENERATORS = {"DitDahE2DebugModule": "DebugModule"}
 
 
 def configuration(value):
     fields = {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA",
-              "enableZba", "enableZbb", "enableZbs", "enableJtag", "jtagIdcode"}
+              "enableZba", "enableZbb", "enableZbs", "enableJtag", "jtagIdcode", "triggerCount"}
     if not isinstance(value, dict) or value.keys() - fields:
         raise ValueError("Unknown core configuration field")
     enable_c = value.get("enableC", True)
@@ -53,6 +53,11 @@ def configuration(value):
     debug = value.get("enableDebug", False)
     if type(debug) is not bool:
         raise ValueError("enableDebug must be a Boolean")
+    trigger_count = value.get("triggerCount", 0)
+    if type(trigger_count) is not int or trigger_count not in (0, 2):
+        raise ValueError("triggerCount must be zero or two")
+    if trigger_count and not debug:
+        raise ValueError("triggerCount=2 requires enableDebug")
     atomic = value.get("enableA", False)
     if type(atomic) is not bool:
         raise ValueError("enableA must be a Boolean")
@@ -73,6 +78,8 @@ def configuration(value):
               "enableDebug": debug, "enableA": atomic, **bits}
     if jtag or idcode is not None:
         result |= {"enableJtag": jtag, "jtagIdcode": idcode}
+    if trigger_count:
+        result["triggerCount"] = trigger_count
     return result
 
 
