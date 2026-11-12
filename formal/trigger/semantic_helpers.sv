@@ -31,8 +31,8 @@
        dut.m_nextPc == dut.m_instruction_pc + 32'd4);
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
-// Source closure is joint with the current CSR decode relation C.
-  wire core_mtvec_operand_register_R = !dut.mValid ||
+// Native CSR operands retain the register value captured by the decoded instruction.
+  wire core_mtvec_operand_register_R = !dut.mValid || dut.m_injected ||
       dut.m_instruction_word != 32'h30509073 ||
       dut.m_csrOperand == dut.registers;
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
@@ -66,7 +66,7 @@
 
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
-// Predicate fragment only; source closure requires the existing current FX relation.
+// Predicate fragment only; source closure includes the existing no-injection relation.
   wire core_word_load_base_zero_aligned =
       dut.m_instruction_word[6:0] == 7'h03 &&
       dut.m_instruction_word[14:12] == 3'd2 &&
@@ -86,7 +86,9 @@
         (!dut.fetch.secondValid || !dut.fetch.secondFault) &&
         (!dut.fetch.buffered || !dut.fetch.packet_fault) &&
         (!dut.xValid || !dut.x_fault);
+  wire core_semantic_execute_not_truncated_XT = !dut.xValid || !dut.xTruncated;
   always @(posedge clock) begin
-    core_native_trap_metadata: assert(core_semantic_fetch_execute_FX && core_memory_trap_metadata_T);
+    core_native_trap_metadata: assert(core_program_no_injection_I && core_semantic_fetch_execute_FX &&
+        core_semantic_execute_not_truncated_XT && core_memory_trap_metadata_T);
   end
 

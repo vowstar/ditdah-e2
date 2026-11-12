@@ -73,7 +73,10 @@ Counters stop while halted, while platform time continues.
 Halt drains older work before register or abstract memory access.
 Debug memory uses M privilege with MPRV applied. Its faults do not change machine trap CSRs.
 AAM postincrement updates data1 once after each successful access by its encoded byte size; faults do not increment it.
-`abstractauto` implements data0 and data1 only. Each accepted automatic access resamples current operands; a data0 read snapshots its old result before starting, and response backpressure cannot repeat execution.
+`abstractauto` implements data0, data1, progbuf0 and progbuf1. Each accepted automatic access resamples current operands; a data0 read snapshots its old result before starting, and response backpressure cannot repeat execution.
+The two Program Buffer words report `abstractcs.progbufsize=2` and `dmstatus.impebreak=1`, and end with an implicit EBREAK when exhausted. `postexec` executes them once after an optional register transfer, while `transfer=0` leaves data0 unchanged; a successful read remains valid when later buffer execution faults.
+Injected execution keeps the hart halted and suppresses native fetch, interrupts, triggers and retirement. Faults set `cmderr=3` without changing native trap CSRs; DCSR and DPC instructions update the live debug state. Accepted native transfers drain before command completion, deactivation or reset proceeds.
+Compressed halfwords may cross the word boundary; a truncated final halfword faults. Branches, jumps, AUIPC, MRET and FENCE.I are rejected, WFI is a NOP, and explicit or implicit EBREAK completes without a fault. Quick Access and SBA are absent.
 Single step completes one instruction or exception with interrupts masked, then halts.
 Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
 Already accepted competitor transactions complete across warm reset.
@@ -87,7 +90,7 @@ The matching instruction has no memory, CSR, multiply or retirement side effects
 Action zero raises breakpoint cause three with its PC in `mepc` and `mtval`; action one enters Debug with DPC at that PC.
 All simultaneous hit bits are recorded and Debug entry suppresses a coincident native breakpoint.
 Trap entry saves `tcontrol.mte` to `mpte` and clears `mte`; MRET restores it to prevent native-trigger loops.
-Triggers do not fire in Debug Mode. Watchpoints, exception, interrupt, icount and chains are absent.
+Triggers do not fire in Debug Mode or injected execution. Watchpoints, exception, interrupt, icount and chains are absent.
 
 The retirement port reports completed instructions and synchronous exceptions.
 Its order starts at zero after reset and increments for each valid event.

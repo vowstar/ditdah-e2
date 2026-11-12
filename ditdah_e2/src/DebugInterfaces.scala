@@ -14,6 +14,7 @@ class DebugAbstractCommand extends Bundle:
   val register = Aligned(UInt(16))
   val transfer = Aligned(Bool())
   val postIncrement = Aligned(Bool())
+  val postExec = Aligned(Bool())
 
 class DebugHartOperands extends Bundle:
   val address = Aligned(UInt(32))
@@ -26,10 +27,15 @@ class DebugHartRequest extends Bundle:
   val register = Aligned(UInt(16))
   val address = Aligned(UInt(32))
   val data = Aligned(UInt(32))
+  val transfer = Aligned(Bool())
+  val postExec = Aligned(Bool())
+  val program0 = Aligned(UInt(32))
+  val program1 = Aligned(UInt(32))
 
 class DebugHartResponse extends Bundle:
   val data = Aligned(UInt(32))
   val error = Aligned(UInt(3))
+  val dataValid = Aligned(Bool())
 
 class DebugHartControl extends Bundle:
   val active = Aligned(Bool())

@@ -5,7 +5,7 @@
 import unittest
 
 from test.test_debug.debug_module import (Driver, HEX_OUTPUT, Reference, auto_mutant, auto_vectors, busy_mutant,
-                                          check, command_error, expected, row, vectors)
+                                          check, command_error, expected, program_mutant, program_vectors, row, vectors)
 
 
 def render(samples):
@@ -15,9 +15,10 @@ def render(samples):
 
 class DebugModuleTests(unittest.TestCase):
     def test_command_fields_and_absent_features(self):
-        for word in (0x221001, 0x23101F, 0x02000000, 0x02110000, 0x02200000, 0x02080000, 0x02290000, 0x710FFF):
+        for word in (0x221001, 0x23101F, 0x261001, 0x00040000, 0x00261001,
+                     0x02000000, 0x02110000, 0x02200000, 0x02080000, 0x02290000, 0x710FFF):
             self.assertEqual(command_error(word), 0)
-        for word in (0x1221001, 0xA21001, 0x2A1001, 0x261001, 0x121001, 0x00280000,
+        for word in (0x1221001, 0xA21001, 0x2A1001, 0x121001, 0x00280000,
                      0x02800000, 0x02300000, 0x02020000, 0x02004000, 0x02000001):
             self.assertEqual(command_error(word), 2)
 
@@ -42,7 +43,7 @@ class DebugModuleTests(unittest.TestCase):
         while len(driver.rows) < driver.pending["due"]:
             driver.tick()
         driver.dmi(0x18, 2, 0)
-        driver.dmi(0x16, expected_data=0x102)
+        driver.dmi(0x16, expected_data=0x2000102)
         self.assertEqual(driver.reference.error, 1)
         self.assertEqual(driver.reference.counts["hartResults"], 1)
 
@@ -50,7 +51,7 @@ class DebugModuleTests(unittest.TestCase):
         driver = Driver()
         driver.dmi(0x10, 2, 1)
         driver.dmi(4, 2, 0x12345678)
-        driver.tick(result_valid=1, result_data=0xDEADBEEF)
+        driver.tick(result_valid=1, result_data=0xDEADBEEF, result_data_valid=1)
         driver.dmi(4, expected_data=0x12345678)
         self.assertEqual(driver.reference.counts["unownedResults"], 1)
 
@@ -92,29 +93,29 @@ class DebugModuleTests(unittest.TestCase):
         self.assertTrue(driver.reference.resume)
         driver.tick(resume_ack=1)
         driver.state.update(halted=0, running=1)
-        driver.dmi(0x11, expected_data=0x30CA3)
+        driver.dmi(0x11, expected_data=0x430CA3)
         driver.dmi(0x10, 2, 0x40000001)
         self.assertFalse(driver.reference.resume)
-        driver.dmi(0x11, expected_data=0xCA3)
+        driver.dmi(0x11, expected_data=0x400CA3)
         driver.state.update(reset_pending=1)
-        driver.dmi(0x11, expected_data=0x1000CA3)
+        driver.dmi(0x11, expected_data=0x1400CA3)
         driver.state.update(reset_pending=0)
         driver.tick(reset_event=1)
-        driver.dmi(0x11, expected_data=0xC0CA3)
+        driver.dmi(0x11, expected_data=0x4C0CA3)
 
     def test_error_clear_is_bitwise_and_blocks_commands(self):
         driver = Driver()
         driver.dmi(0x10, 2, 1)
         driver.dmi(0x17, 2, 0x220FFF)
         driver.drain()
-        driver.dmi(0x16, expected_data=0x302)
+        driver.dmi(0x16, expected_data=0x2000302)
         driver.dmi(0x16, 2, 0x100)
-        driver.dmi(0x16, expected_data=0x202)
+        driver.dmi(0x16, expected_data=0x2000202)
         before = driver.reference.counts["commands"]
         driver.dmi(0x17, 2, 0x221001)
         self.assertEqual(driver.reference.counts["commands"], before)
         driver.clear_error()
-        driver.dmi(0x16, expected_data=2)
+        driver.dmi(0x16, expected_data=0x2000002)
 
     def test_bad_source_and_changed_response_are_rejected(self):
         reference = Reference()
@@ -148,6 +149,15 @@ class DebugModuleTests(unittest.TestCase):
         self.assertEqual(counts["pending"], 0)
         check(rows, render(samples))
 
+    def test_program_buffer_driver_covers_execution_and_result_ownership(self):
+        rows = program_vectors()
+        samples, counts = expected(rows)
+        self.assertEqual(counts["postexecCommands"], 9)
+        self.assertEqual(counts["autoProgram"], 3)
+        self.assertEqual(counts["cancelled"], 1)
+        self.assertEqual(counts["pending"], 0)
+        check(rows, render(samples))
+
     def test_mutation_requires_one_error_assignment(self):
         source = "error <= 3'h1;"
         self.assertEqual(busy_mutant(source), "error <= 3'h5;")
@@ -168,6 +178,16 @@ class DebugModuleTests(unittest.TestCase):
                     auto_mutant("", name)
                 with self.assertRaises(ValueError):
                     auto_mutant(source + source, name)
+
+    def test_program_mutations_require_unique_targets(self):
+        for name, source in (("missing-postexec", "assign hart_request_bits_postExec = command_postExec;"),
+                             ("drop-data-valid", "else if (commandComplete & hart_response_bits_dataValid)")):
+            with self.subTest(name=name):
+                self.assertNotEqual(program_mutant(source, name), source)
+                with self.assertRaises(ValueError):
+                    program_mutant("", name)
+                with self.assertRaises(ValueError):
+                    program_mutant(source + source, name)
 
 
 if __name__ == "__main__":

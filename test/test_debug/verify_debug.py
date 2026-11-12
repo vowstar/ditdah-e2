@@ -150,6 +150,7 @@ class DebugReference:
             return
         if address == 0x11:
             assert data & 0xFF == 0xA3, "Unexpected debug module version or authentication"
+            assert data & (1 << 22), "Implicit EBREAK capability is missing"
             halted, running = data >> 8 & 3, data >> 10 & 3
             unavailable = data >> 12 & 3
             assert data >> 14 & 3 == 0, "Hart is absent"
@@ -193,7 +194,7 @@ class DebugReference:
                                           "observedCycle": self.cycle, "cycles": self.cycle - accepted})
                     self.run_control = None
         elif address == 0x16:
-            assert data & 15 == 2 and data >> 24 & 31 == 0, "Unexpected abstract command capabilities"
+            assert data & 15 == 2 and data >> 24 & 31 == 2, "Unexpected abstract command capabilities"
             if not data & (1 << 12) and self.pending is not None:
                 pending = self.pending
                 if "request" in pending:

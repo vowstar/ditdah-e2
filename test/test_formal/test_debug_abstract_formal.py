@@ -12,9 +12,11 @@ class DebugAbstractFormalTests(unittest.TestCase):
     def test_wrapper_inventory_and_binding(self):
         wrapper = (run.HERE / run.WRAPPER_NAME).read_bytes()
         run.check_wrapper(wrapper)
-        self.assertEqual(len(run.ASSERTIONS), 22)
-        self.assertEqual(len(run.COVERS), 8)
-        self.assertIn("_GEN_151", run.OBSERVATIONS)
+        self.assertEqual(len(run.ASSERTIONS), 29)
+        self.assertEqual(len(run.COVERS), 12)
+        self.assertEqual(len(run.MUTATIONS), 8)
+        self.assertNotIn("_GEN_151", run.OBSERVATIONS)
+        self.assertNotIn("dut._GEN_151", wrapper.decode())
         text = wrapper.decode()
         self.assertIn("input clock, input reset", text)
         self.assertNotIn("reg reset", text)
@@ -44,10 +46,31 @@ class DebugAbstractFormalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run.mutate(b"", "busy-priority")
 
+    def test_program_mutations_have_unique_anchors(self):
+        sources = {
+            "stale-program": ("executionProgram0 <= write & autoSelected ? dmi_request_bits_data : program0;\n"
+                              "      executionProgram1 <= write & autoSelected_0 ? dmi_request_bits_data : program1;"),
+            "drop-postexec-need": "? memoryCommand | dmi_request_bits_data[17] | dmi_request_bits_data[18]",
+            "drop-data-valid": "data0 <= hart_response_bits_data;",
+        }
+        for name, source in sources.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(run.mutate(source.encode(), name), source.encode())
+                for invalid in ("", source + source):
+                    with self.assertRaises(ValueError):
+                        run.mutate(invalid.encode(), name)
+
     def test_cases_bind_one_negative_target(self):
         source = (b"if (autoStart_1) begin\n      operands_address <= data1;\n      operands_data <= data0;\n"
+                  b"      executionProgram0 <= write & autoSelected ? dmi_request_bits_data : program0;\n"
+                  b"      executionProgram1 <= write & autoSelected_0 ? dmi_request_bits_data : program1;\n"
                   b"else if (commandComplete & command_memory & command_postIncrement & postincrement)\n"
-                  b"wire        autoStart = accepted & read | write;\nerror <= 3'h1;\n")
+                  b"wire        autoStart = accepted & read | write;\nerror <= 3'h1;\n"
+                  b"? memoryCommand | dmi_request_bits_data[17] | dmi_request_bits_data[18]\n"
+                  b"data0 <= hart_response_bits_data;\n"
+                  b"{7'h0,\n"
+                  b"  ndmreset | hart_status_resetPending,\n"
+                  b"  4'h4,\n")
         rtl = {run.RTL_NAME: source}
         wrapper = (run.HERE / run.WRAPPER_NAME).read_bytes()
         collector = (run.HERE / run.COLLECTOR_NAME).read_bytes()

@@ -9,9 +9,11 @@ from pathlib import Path
 from test.test_debug_host.verify_host import (
     ABSTRACT_ONLY,
     GDB_ACCEPTED,
+    PROGRAM_BUFFER_ONLY,
     READY,
     check_abstract_evidence,
     check_execution,
+    check_program_buffer_evidence,
     check_trigger_evidence,
     check_wrong_idcode,
     abstract_metrics,
@@ -80,8 +82,15 @@ class HostEvidenceTests(unittest.TestCase):
             check_abstract_evidence(log, dmi(0x17, 0x02200000))
         with self.assertRaisesRegex(ValueError, "read/write"):
             check_abstract_evidence(log, dmi(0x17, 0x02210000))
+        register_program = "\n".join((trace, dmi(0x20, 0x7A002473, 3),
+                                      dmi(0x21, 0x00100073, 4), dmi(0x17, 0x00241000, 5)))
+        observed = check_abstract_evidence(log, register_program)
+        self.assertEqual(observed["programBufferWrites"], 2)
+        self.assertEqual(observed["programBufferLoads"], 0)
+        memory_program = "\n".join((trace, dmi(0x20, 0x0000A103, 3),
+                                    dmi(0x21, 0x00100073, 4), dmi(0x17, 0x00241000, 5)))
         with self.assertRaisesRegex(ValueError, "Forbidden"):
-            check_abstract_evidence(log, trace + dmi(0x20, 0x00100073, 3))
+            check_abstract_evidence(log, memory_program)
         with self.assertRaisesRegex(ValueError, "Forbidden"):
             check_abstract_evidence(log, trace + dmi(0x38, 0, 3))
         with self.assertRaisesRegex(ValueError, "forbidden memory"):
@@ -92,6 +101,32 @@ class HostEvidenceTests(unittest.TestCase):
             check_abstract_evidence(log.replace("Succeeded to read memory via abstract access.\n", ""), trace)
         with self.assertRaisesRegex(ValueError, "fallback"):
             check_abstract_evidence(log + "Succeeded to read memory via progbuf\n", trace)
+
+    def test_program_buffer_evidence_requires_both_words_and_real_postexec(self):
+        text = "\n".join(openocd_configuration(1000, 1001, 3, program_buffer=True))
+        self.assertIn("riscv set_mem_access progbuf", text)
+        self.assertIn(f"echo {PROGRAM_BUFFER_ONLY}", text)
+        log = (f"{PROGRAM_BUFFER_ONLY}\n{READY}\n"
+               "Succeeded to read memory via program buffer.\n"
+               "Succeeded to write memory via program buffer.\n")
+        trace = "\n".join((dmi(0x20, 0x0000A103), dmi(0x21, 0x00100073, 2),
+                           dmi(0x17, 0x00271008, 3), dmi(0x20, 0x00942023, 4),
+                           dmi(0x17, 0x00241000, 5)))
+        observed = check_program_buffer_evidence(log, trace)
+        self.assertEqual(observed["programBufferWrites"], 3)
+        self.assertEqual(observed["postexecCommands"], 2)
+        self.assertEqual(observed["postexecOnlyCommands"], 1)
+        self.assertEqual(observed["abstractMemoryReads"], 0)
+        for label, changed in (
+                ("readiness", ""),
+                ("fallback", log + "Succeeded to read memory via abstract access.\n"),
+                ("program", trace.replace(dmi(0x21, 0x00100073, 2), "")),
+                ("postexec", trace.replace(dmi(0x17, 0x00271008, 3), dmi(0x17, 0x00231008, 3))),
+                ("direction", trace.replace(dmi(0x20, 0x00942023, 4), "")),
+                ("aam", trace + dmi(0x17, 0x02200000, 6))):
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                check_program_buffer_evidence(changed if label in ("readiness", "fallback") else log,
+                                              changed if label not in ("readiness", "fallback") else trace)
 
     def test_abstract_throughput_requires_postincrement_and_improvement(self):
         trace = ("J 10 23 2 36175872\n"

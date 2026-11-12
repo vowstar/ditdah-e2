@@ -138,7 +138,7 @@ def rtl():
     core = {name: b"module empty; endmodule\n" for name in (
         "DitDahE2.sv", "DitDahE2Counters.sv", "DitDahE2Csr.sv", "DitDahE2DebugHart.sv",
         "DitDahE2DebugModule.sv", "DitDahE2Fetch.sv", "DitDahE2MultiplyDivide.sv", "DitDahE2Trigger.sv")}
-    core[run.CORE_RTL] = (b"module DitDahE2(input clock);\nm_trap <= fault;\n"
+    core[run.CORE_RTL] = (("module DitDahE2(input clock, output " + ", ".join(run.CORE_DEBUG_OUTPUTS) + ");\nm_trap <= fault;\n").encode() +
         b"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault & ~_debug_core_stop\n    & ~_csr_trigger_matched;\n"
         b"_GEN_466 = redirect_0 | returning | waiting | waking | synchronized;\nendmodule\n")
     return unit, core
@@ -179,17 +179,17 @@ class StagedTests(unittest.TestCase):
             self.assertEqual(plan["goals"], list(run.CORE_ASSERTIONS))
             self.assertEqual(plan["targetBounds"], run.goal_bounds(plan["scenario"])[1])
             self.assertEqual(plan["querySchedule"], staged.query_schedule())
-            self.assertEqual(len(plan["allAssertions"]), 31)
+            self.assertEqual(len(plan["allAssertions"]), 32)
             self.assertEqual(len(plan["inputs"]), 11)
             self.assertEqual(plan["sources"], [*rtl()[1], run.CORE_WRAPPER])
-            self.assertEqual(plan["initialState"]["resetFacts"], 113)
+            self.assertEqual(plan["initialState"]["resetFacts"], 123)
             self.assertEqual(plan["dutInitialState"], run.CORE_INITIAL_STATE)
             fragment = collectors()["staged_helpers"]
             self.assertEqual(contents[run.CORE_WRAPPER].replace(fragment + b"\n", b""), (run.HERE / run.CORE_WRAPPER).read_bytes())
         self.assertEqual(definition("core-store-safety"), definition("core-dpc-safety"))
         older, contents = definition()
-        self.assertEqual(run.sha(contents["plan.tcl"]), "f1d4f83e2053122e98270e08d5581e703f86208ccb30923238fbc722a50ed3e2")
-        self.assertEqual(run.sha(contents[run.CORE_WRAPPER]), "9b4e9b477cacd66e725f653de94b0d95c3a25f4e366e38adf6c5d73443f8fff0")
+        self.assertEqual(run.sha(contents["plan.tcl"]), "229e62c503f4e5e4f10904d467887acd2449807214052e3922e522512d2a6b5d")
+        self.assertEqual(run.sha(contents[run.CORE_WRAPPER]), "4cbdcd81f92721e92f76f995afe3e5fee4e0e2a620348437243b4716ba1e2b07")
         self.assertEqual(older["allAssertions"], [*staged.ORIGINALS, *staged.HELPERS])
 
     def test_twelve_legacy_cases_remain_byte_exact(self):
@@ -201,14 +201,14 @@ class StagedTests(unittest.TestCase):
 
     def test_reviewed_source_configuration_and_collisions_are_rejected(self):
         plan, _ = definition()
-        for field, value in (("helperGoals", ["fake"]), ("dutColdFacts", 122), ("coldFacts", 123), ("name", "injection")):
+        for field, value in (("helperGoals", ["fake"]), ("dutColdFacts", 112), ("coldFacts", 113), ("name", "native")):
             changed = copy.deepcopy(plan)
             changed["stagedConfiguration"][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 staged.validate_protocol({}, changed)
-        self.assertEqual(len(staged.configuration()["helperGoals"]), 10)
+        self.assertEqual(len(staged.configuration()["helperGoals"]), 11)
         with self.assertRaisesRegex(ValueError, "Unsupported staged source configuration"):
-            staged.configuration("injection")
+            staged.configuration("native")
         for key in ("staged", "staged_helpers"):
             modified = collectors()
             modified[key] += b"\n"
@@ -218,6 +218,24 @@ class StagedTests(unittest.TestCase):
         names = [f"top.goal_{index}" for index in range(32)]
         staged.canonical_ids(" ".join(names), names)
 
+    def test_program_configuration_rejects_native_reset_wrapper_and_missing_i(self):
+        plan, contents = definition(flow="retry")
+        changed = copy.deepcopy(plan)
+        changed["initialState"]["resetFacts"] = 112
+        with self.assertRaisesRegex(ValueError, "cold source"):
+            staged.build(changed, contents, collectors()["staged"], collectors()["staged_helpers"])
+        changed = dict(contents)
+        changed[run.CORE_WRAPPER] = b"".join(line for line in contents[run.CORE_WRAPPER].splitlines(keepends=True)
+                                          if b".debugExecution_" not in line)
+        self.assertEqual(run.sha(changed[run.CORE_WRAPPER]), "356814749674be99b2c9db6422941c5144bbae3f0702c3ac3dd0e4ce26c5a7d1")
+        with self.assertRaisesRegex(ValueError, "reviewed source"):
+            staged.build(plan, changed, collectors()["staged"], collectors()["staged_helpers"])
+        for old, new in ((b"core_program_no_injection: assert(core_program_no_injection_I);", b""),
+                         (b"assert(core_program_no_injection_I &&", b"assert(")):
+            fragment = collectors()["staged_helpers"].replace(old, new, 1)
+            with self.subTest(old=old), self.assertRaisesRegex(ValueError, "reviewed source"):
+                staged.build(plan, contents, collectors()["staged"], fragment)
+
     @unittest.skipUnless(shutil.which("tclsh"), "tclsh is required")
     def test_real_tcl_all_nine_queries_all_scenarios_and_typed_ids(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -226,9 +244,9 @@ class StagedTests(unittest.TestCase):
                     process, records, plan = self.execute(Path(directory) / (name + str(typed)), typed=typed, name=name)
                     self.assertEqual(process.returncode, 0, process.stderr)
                     checked = run.check_native_records(records, plan)
-                    self.assertEqual((checked["goals"], checked["unboundedGoals"], checked["boundedGoals"], checked["unboundedHelperGoals"]), (21, 17, 4, 10))
+                    self.assertEqual((checked["goals"], checked["unboundedGoals"], checked["boundedGoals"], checked["unboundedHelperGoals"]), (21, 17, 4, 11))
                     self.assertEqual(records["query8", "iteration_cap"], "352" if plan["scenario"] == 1 else "288")
-                    self.assertEqual(len({tag for tag, key in records if key == "native_id" and not tag.startswith("bounded.")}), 620)
+                    self.assertEqual(len({tag for tag, key in records if key == "native_id" and not tag.startswith("bounded.")}), 640)
                     self.assertEqual(checked["stagedEvidence"]["executedQueries"], 9)
                     for label in ("older_fault_cause", "target_first_event_is_breakpoint"):
                         self.assertEqual(checked["propertyEvidence"][label]["verdict"], "bounded_proven_user")
@@ -276,7 +294,7 @@ class StagedTests(unittest.TestCase):
                 (("query8", "engines"), "Mp N Hp"), (("query7", "iteration_cap"), "288"),
                 (("query8", "labels"), staged.HELPERS[0]), (("query9", "labels"), ""),
                 (("query7", "fact_labels"), ""), (("query7", "fact_actual_properties"), ""),
-                (("setup", "native_assertions"), ""), (("setup", "dut_cold_facts"), "122"),
+                (("setup", "native_assertions"), ""), (("setup", "dut_cold_facts"), "112"),
                 (("before", "clock"), "clock"), (("before", "global"), ""),
                 (("query6.before.native_epc_metadata", "engine"), "N"),
                 (("query6.before.native_epc_metadata", "max_length"), "999"),
@@ -355,7 +373,7 @@ class StagedTests(unittest.TestCase):
         output = root / "evidence"
         args = argparse.Namespace(unit_rtl=paths[0], core_rtl=paths[1], source_root=root, output=output,
             time_limit=120, core_time_limit=600, proof_seed=None, proof_seed_scenario2=None, proof_seed_scenario3=None,
-            multiply_target_base=[], multiply_older_base=[], retry_case=[], flow=flow, staged_configuration="native")
+            multiply_target_base=[], multiply_older_base=[], retry_case=[], flow=flow, staged_configuration="injection")
         run.prepare(args)
         return output
 
@@ -429,7 +447,7 @@ class StagedTests(unittest.TestCase):
             def result(_records, plan):
                 fields = {"goals": len(plan["goals"]), "covers": len(plan["covers"]), "verdict": plan["expected"]}
                 if plan.get("proofStrategy") == staged.STRATEGY:
-                    fields.update(unboundedGoals=17, boundedGoals=4, unboundedHelperGoals=10)
+                    fields.update(unboundedGoals=17, boundedGoals=4, unboundedHelperGoals=11)
                 return fields
 
             with patch.object(run, "check_native_records", side_effect=result):
@@ -437,7 +455,7 @@ class StagedTests(unittest.TestCase):
                 self.assertEqual(summary["assertionsProven"], 128)
                 self.assertEqual(summary["unboundedAssertions"], 108)
                 self.assertEqual(summary["boundedAssertions"], 20)
-                self.assertEqual(summary["helperAssertionsProven"], 50)
+                self.assertEqual(summary["helperAssertionsProven"], 55)
                 self.assertFalse(summary["fullCoreProven"])
                 path = evidence / "cases/core-older-safety/receipt.json"
                 receipt = json.loads(path.read_text())

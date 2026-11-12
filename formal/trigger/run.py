@@ -40,6 +40,10 @@ UNIT_TOP = "trigger_formal"
 CORE_TOP = "trigger_core_formal"
 UNIT_RTL = "DitDahE2Trigger.sv"
 CORE_RTL = "DitDahE2.sv"
+CORE_DEBUG_OUTPUTS = tuple("debugExecution_" + name for name in (
+    "valid", "sequence", "pc", "word", "length", "rd", "writes", "value", "fault", "ebreak",
+    "csr", "load", "store", "address",
+))
 UNIT_WRAPPER = "trigger_formal.sv"
 CORE_WRAPPER = "trigger_core_formal.sv"
 MULTIPLY_COLLECTOR = "collect_multiply_safety.tcl"
@@ -99,13 +103,15 @@ GROUP_PROBE_STRATEGY = {
     "multiplyTargetTimeLimitSeconds": GROUP_PROBE_LIMITS["group"],
 }
 CORE_INITIAL_STATE = {
-    "profile": "implemented_cold_reset",
-    "resetExpressionSha256": "787a737d75c4f30d873a8531d22d002314584c10e254a1c016dcd26bb780b353",
-    "resetFacts": 112,
+    "profile": "source-cold-reset122",
+    "resetExpressionSha256": "8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0",
+    "resetFacts": 122,
     "resetGprs": 31,
-    "addedResetFacts": 42,
+    "addedResetFacts": 52,
     "previousResetExpressionSha256": "22b194ee11240f2f5b59baa2ff2c102943de00c0eb6a06a2ea02506989fc967a",
     "scopeChange": "Previously omitted implemented reset values are explicit; unreset payloads remain unconstrained",
+    "unresetPayloadExclusions": ["dut.dm.executionProgram0", "dut.dm.executionProgram1",
+                                 "dut.debug.program0", "dut.debug.program1", "dut.m_injected"],
 }
 MULTIPLY_LATE_RETRY = {
     "profile": "late_unbounded_fact_retry",
@@ -181,6 +187,10 @@ def load_rtl(path, top, core, source_root):
         source = source_root / name
         if not source.is_file() or digest(source) != expected:
             raise ValueError("Generation source differs: " + name)
+    if core:
+        header = re.search(r"\bmodule\s+DitDahE2\s*\((.*?)\);", contents.get(CORE_RTL, b"").decode(), re.DOTALL)
+        if header is None or any(not re.search(r"\b" + name + r"\b", header[1]) for name in CORE_DEBUG_OUTPUTS):
+            raise ValueError("Core proof requires Program Buffer observation ports")
     return build, contents
 
 
@@ -197,6 +207,8 @@ def check_wrappers():
             labels(core.decode(), "cover") != set(CORE_ALL_COVERS) or
             labels(core.decode(), "assume") != core_assumptions or core.count(b"DitDahE2 dut (") != 1):
         raise ValueError("Core wrapper inventory differs")
+    if any(core.count(("." + name + "()").encode()) != 1 for name in CORE_DEBUG_OUTPUTS):
+        raise ValueError("Core wrapper observation ports differ")
     return unit, core
 
 
@@ -224,19 +236,26 @@ def mutate(contents, name):
         replacement = "m_trap <= x_fault | ~legal | isBreak & ~isDebugBreak | isCall | badTarget | badData;"
     elif name == "negative-multiply-start":
         filename = CORE_RTL
-        target = ("& ~eligibleInterrupt & ~sleeping_0 & ~x_fault & ~_debug_core_stop\n"
-                  "    & ~_csr_trigger_matched;")
-        replacement = "& ~eligibleInterrupt & ~sleeping_0 & ~x_fault & ~_debug_core_stop;"
+        target = (r"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault"
+                  r"( & ~_debug_core_stop| & \(~_debug_core_stop \| xInjected\))"
+                  r"\n    & ~_csr_trigger_matched;")
+        replacement = r"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault\1;"
     elif name == "negative-older-priority":
         filename = CORE_RTL
-        target = "_GEN_466 = redirect_0 | returning | waiting | waking | synchronized;"
-        replacement = "_GEN_466 = 1'h0;"
+        target = r"(_GEN_\d+) = redirect_0 \| returning \| waiting \| waking \| synchronized;"
+        replacement = r"\1 = 1'h0;"
     else:
         raise ValueError("Unknown trigger mutation")
     text = changed[filename].decode()
-    if text.count(target) != 1:
-        raise ValueError("Mutation anchor differs: " + name)
-    changed[filename] = text.replace(target, replacement).encode()
+    if name in ("negative-multiply-start", "negative-older-priority"):
+        text, count = re.subn(target, replacement, text)
+        if count != 1:
+            raise ValueError("Mutation anchor differs: " + name)
+    else:
+        if text.count(target) != 1:
+            raise ValueError("Mutation anchor differs: " + name)
+        text = text.replace(target, replacement)
+    changed[filename] = text.encode()
     return changed
 
 
@@ -453,7 +472,7 @@ def load_property_base(path, label, index):
 
 def case_definition(name, unit, core, wrappers, collectors, unit_time_limit, core_time_limit, proof_seed=None,
                     scenario_proof_seeds=None, property_bases=None, retry_cases=SAFETY_RETRY_CASES,
-                    flow="retry", source_configuration="native"):
+                    flow="retry", source_configuration="injection"):
     if flow not in ("retry", "staged"):
         raise ValueError("Unsupported trigger safety flow")
     top = UNIT_TOP if name.startswith("unit") or NEGATIVE_TARGETS.get(name, (None,))[0] == UNIT_TOP else CORE_TOP
@@ -590,7 +609,7 @@ def prepare(args):
            for name in ("proof_seed", "proof_seed_scenario2", "proof_seed_scenario3")):
         raise ValueError("Implemented cold-reset proofs require fresh matching design inputs; external seeds are unsupported")
     flow = getattr(args, "flow", "retry")
-    source_configuration = getattr(args, "staged_configuration", "native")
+    source_configuration = getattr(args, "staged_configuration", "injection")
     if flow not in ("retry", "staged"):
         raise ValueError("Unsupported trigger safety flow")
     staged_files = {name: (HERE / name).read_bytes() for name in staged.FILES}
@@ -613,7 +632,7 @@ def prepare(args):
                    ("safety_retry", SAFETY_RETRY_COLLECTOR),
                    ("negative_older", "collect_negative_older.tcl"))}
     if staged_files:
-        collector_name, helper_name = staged.artifacts(source_configuration if flow == "staged" else "native")
+        collector_name, helper_name = staged.artifacts(source_configuration if flow == "staged" else "injection")
         collectors.update(staged=staged_files[collector_name], staged_helpers=staged_files[helper_name])
     check_core_reset_collectors(collectors)
     runner = Path(__file__).read_bytes()
@@ -737,7 +756,7 @@ def validate_frozen(evidence):
     flow = manifest.get("flow", "retry")
     if flow not in ("retry", "staged"):
         raise ValueError("Frozen trigger safety flow differs")
-    source_configuration = "native"
+    source_configuration = "injection"
     if flow == "staged":
         source_configuration = manifest.get("stagedConfiguration", {}).get("name")
         if manifest.get("stagedConfiguration") != staged.configuration(source_configuration):
@@ -1190,7 +1209,7 @@ def main():
     prepare_parser = commands.add_parser("prepare", parents=[candidate])
     prepare_parser.add_argument("--time-limit", type=int, default=120)
     prepare_parser.add_argument("--flow", choices=("retry", "staged"), default="retry")
-    prepare_parser.add_argument("--staged-configuration", choices=("native", "semantic", "payload-semantic", "payload-joint", 'store-state', 'program-state', 'store-complete', 'program-complete'), default="native")
+    prepare_parser.add_argument("--staged-configuration", choices=("injection", "injection-semantic", "injection-payload-semantic", "injection-payload-joint", 'injection-store-state', 'injection-program-state', 'injection-store-complete', 'injection-program-complete'), default="injection")
     collect = commands.add_parser("collect")
     collect.add_argument("--evidence", type=Path, required=True)
     collect.add_argument("--private-output", type=Path, required=True)

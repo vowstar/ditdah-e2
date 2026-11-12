@@ -175,6 +175,15 @@ int main(int argc, char **argv) {
             bool advance = false;
             if (rvfi.is_open()) writeRvfi(rvfi, dut, cycle);
             if (rvfiInterrupts.is_open()) writeRvfiInterrupt(rvfiInterrupts, dut, cycle);
+            if (dut.debugExecution_valid && std::getenv("DITDAH_E2_DEBUG_INJECTION")) {
+                std::cout << "X " << cycle << ' ' << unsigned(dut.debugExecution_sequence) << ' ' << dut.debugExecution_pc << ' '
+                          << dut.debugExecution_word << ' ' << unsigned(dut.debugExecution_length) << ' '
+                          << unsigned(dut.debugExecution_rd) << ' ' << unsigned(dut.debugExecution_writes) << ' '
+                          << dut.debugExecution_value << ' ' << unsigned(dut.debugExecution_fault) << ' '
+                          << unsigned(dut.debugExecution_ebreak) << ' ' << unsigned(dut.debugExecution_csr) << ' '
+                          << unsigned(dut.debugExecution_load) << ' ' << unsigned(dut.debugExecution_store) << ' '
+                          << dut.debugExecution_address << '\n';
+            }
             if (dut.retire_valid) {
                 if (dut.interrupt_valid) throw std::runtime_error("Interrupt and instruction completed together");
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '

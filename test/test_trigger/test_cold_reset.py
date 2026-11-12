@@ -31,7 +31,7 @@ class ColdResetTests(unittest.TestCase):
     def test_core_collectors_share_the_audited_reset_expression(self):
         collectors = self.collectors()
         check_core_reset_collectors(collectors)
-        for role in ("safety", "multiply_safety", "trace", "negative_older"):
+        for role in ("safety", "multiply_safety", "multiply_retry", "trace", "negative_older"):
             expression = re.search(r"assume -reset \{([^\n]+)\}", collectors[role].decode()).group(1)
             for name in ("dut.registers", *(f"dut.registers_{index}" for index in range(30))):
                 self.assertIn(name + " == 0", expression)
@@ -40,12 +40,17 @@ class ColdResetTests(unittest.TestCase):
                 self.assertNotIn(name + " ==", expression)
             self.assertIn("dut.dm.commandValid == 0", expression)
             self.assertIn("dut.dm.auto == 0", expression)
-        self.assertEqual(CORE_INITIAL_STATE["resetFacts"], 112)
+            for name in ("dut.xInjected", "dut.xSequence", "dut.xTruncated", "dut.debug.ebreakUser",
+                         "dut.debug.injecting", "dut.debug.cancelInjection", "dut.debug.pendingIssue",
+                         "dut.debug.slot", "dut.dm.program0", "dut.dm.program1"):
+                self.assertIn(name + " == 0", expression)
+        self.assertEqual(CORE_INITIAL_STATE["profile"], "source-cold-reset122")
+        self.assertEqual(CORE_INITIAL_STATE["resetFacts"], 122)
         self.assertEqual(CORE_INITIAL_STATE["resetGprs"], 31)
-        self.assertEqual(CORE_INITIAL_STATE["addedResetFacts"], 42)
+        self.assertEqual(CORE_INITIAL_STATE["addedResetFacts"], 52)
 
     def test_missing_register_or_unreset_payload_changes_are_rejected(self):
-        for mutation in (" && dut.registers_0 == 0", " && dut.dm.commandValid == 0"):
+        for mutation in (" && dut.registers_0 == 0", " && dut.dm.commandValid == 0", " && dut.xInjected == 0"):
             collectors = self.collectors()
             self.assertIn(mutation.encode(), collectors["safety"])
             collectors["safety"] = collectors["safety"].replace(mutation.encode(), b"", 1)
@@ -69,6 +74,14 @@ class ColdResetTests(unittest.TestCase):
                 args = argparse.Namespace(**{field: "external checkpoint"})
                 with self.assertRaisesRegex(ValueError, "external seeds are unsupported"):
                     prepare(args)
+
+    def test_unsupported_payload_is_rejected_in_each_core_collector(self):
+        collectors = self.collectors()
+        for role in ("safety", "multiply_safety", "multiply_retry", "trace", "negative_older"):
+            changed = dict(collectors)
+            changed[role] = collectors[role].replace(b"systemReset == 0", b"systemReset == 0 && dut.m_injected == 0")
+            with self.subTest(role=role), self.assertRaisesRegex(ValueError, "cold-reset contract differs"):
+                check_core_reset_collectors(changed)
 
     def test_basis_with_a_different_debug_module_is_rejected(self):
         module = "DitDahE2DebugModule.sv"

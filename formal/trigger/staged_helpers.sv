@@ -1,5 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
+  wire core_program_no_injection_I = (!dut.dm.busy || dut.dm.commandValid) &&
+      (!dut.dm.commandValid || !dut.dm.command_postExec) && !dut.debug.injecting &&
+      !dut.debug.pendingIssue && !dut.xInjected && (!dut.mValid || !dut.m_injected);
+// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+// SPDX-License-Identifier: MIT
   wire rom_local_response_safe = instruction_response_bits_data != 32'h10500073 &&
       instruction_response_bits_data != 32'h00100073 &&
       !(instruction_response_bits_data[6:0] == 7'h0f && instruction_response_bits_data[14:12] == 3'b001);
@@ -109,7 +114,7 @@
   wire core_data_memory_A = !(dut.debug.sending || dut.debug.waiting) || dut.debug.halted;
   wire core_data_reset_R = !dut.debug.resetting || !(dut.debug.sending || dut.debug.waiting);
   always @(posedge clock) begin
-    core_data_owner_control_consistent: assert(core_data_owner_C && core_data_halt_P && core_data_memory_A && core_data_reset_R);
+    core_data_owner_control_consistent: assert(core_program_no_injection_I && core_data_owner_C && core_data_halt_P && core_data_memory_A && core_data_reset_R);
   end
 
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
@@ -119,6 +124,10 @@
         (!dut.fetch.secondValid || !dut.fetch.secondFault) &&
         (!dut.fetch.buffered || !dut.fetch.packet_fault) &&
         (!dut.xValid || !dut.x_fault));
+  end
+
+  always @(posedge clock) begin
+    core_program_no_injection: assert(core_program_no_injection_I);
   end
 
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>

@@ -73,9 +73,10 @@ wire last_resume_terminal = !last_resume_operating || dmi_phase <= execution_pha
 wire last_resume_pulse_owner = !last_resume_operating || !dut._debug_core_resume ||
     (dmi_phase == execution_phase && dmi_pending && !target_trap &&
      dut.debug.halted && !dut.xValid && !dut.mValid);
+wire last_resume_cancel_owner = !dut.debug.cancelInjection;
 wire last_resume_ok = last_resume_step_domain && last_resume_status_owner &&
     last_resume_response_owner && last_resume_setup_halt && last_resume_entry &&
-    last_resume_pending && last_resume_terminal && last_resume_pulse_owner;
+    last_resume_pending && last_resume_terminal && last_resume_pulse_owner && last_resume_cancel_owner;
 wire handler_postexec = check && dmi_phase >= execution_phase;
 wire handler_first_pending_trap = !(handler_postexec && dut.mValid && dut.m_trap) ||
     (!target_trap && dut.m_instruction_pc == 32'd48 && dut.m_cause == 32'd3 &&

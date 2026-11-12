@@ -18,6 +18,28 @@ class DebugHartLayers(p: DebugHartParameters) extends LayerInterface(p):
   def layers = Seq.empty
 class DebugHartProbe(p: DebugHartParameters) extends DVBundle[DebugHartParameters, DebugHartLayers](p)
 
+class DebugInjection extends Bundle:
+  val word = Aligned(UInt(32))
+  val length = Aligned(UInt(3))
+  val sequence = Aligned(UInt(3))
+  val truncated = Aligned(Bool())
+
+class DebugInjectionDone extends Bundle:
+  val valid = Aligned(Bool())
+  val sequence = Aligned(UInt(3))
+  val fault = Aligned(Bool())
+  val ebreak = Aligned(Bool())
+
+class DebugLocalCsr extends Bundle:
+  val address = Flipped(UInt(12))
+  val operand = Flipped(UInt(32))
+  val operation = Flipped(UInt(2))
+  val writeRequested = Flipped(Bool())
+  val commit = Flipped(Bool())
+  val readData = Aligned(UInt(32))
+  val writeMask = Aligned(UInt(32))
+  val writtenData = Aligned(UInt(32))
+
 class DebugCoreControl extends Bundle:
   val empty = Flipped(Bool())
   val fetchIdle = Flipped(Bool())
@@ -26,6 +48,8 @@ class DebugCoreControl extends Bundle:
   val completed = Flipped(Bool())
   val breakpoint = Flipped(Bool())
   val breakpointPc = Flipped(UInt(32))
+  val injectedIdle = Flipped(Bool())
+  val injectionDone = Flipped(new DebugInjectionDone)
   val stop = Aligned(Bool())
   val resume = Aligned(Bool())
   val resumePc = Aligned(UInt(32))
@@ -35,6 +59,10 @@ class DebugCoreControl extends Bundle:
   val ebreakMachine = Aligned(Bool())
   val ebreakUser = Aligned(Bool())
   val freezeCounters = Aligned(Bool())
+  val entry = Aligned(Bool())
+  val injectionActive = Aligned(Bool())
+  val injection = Aligned(new Channel(new DebugInjection))
+  val localCsr = Aligned(new DebugLocalCsr)
 
 class DebugRegisterBackend extends Bundle:
   val register = Aligned(UInt(16))

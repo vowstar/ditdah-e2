@@ -29,13 +29,20 @@ DEBUG_TRANSPORT_JG_ARGS ?=
 DEBUG_MODULE_OUTPUT ?= result/debug-module
 DEBUG_ABSTRACT_OUTPUT ?= result/debug-abstract-commercial
 DEBUG_ABSTRACT_JG_ARGS ?=
+DEBUG_ABSTRACT_TIME_LIMIT ?= 180
 TRIGGER_OUTPUT ?= result/trigger-verification
 TRIGGER_HOST_OUTPUT ?= result/trigger-host
 TRIGGER_COMMERCIAL_OUTPUT ?= result/trigger-commercial
 TRIGGER_PREPARE_ARGS ?=
 TRIGGER_JG_ARGS ?=
+PROGRAM_OUTPUT ?= result/program-buffer
+PROGRAM_HART_OUTPUT ?= result/program-hart
+PROGRAM_HOST_OUTPUT ?= result/program-host
+PROGRAM_CORE_OUTPUT ?= result/program-core
+PROGRAM_COMMERCIAL_OUTPUT ?= result/program-commercial
+PROGRAM_JG_ARGS ?=
 
-.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-module verify-jtag verify-debug-host verify-trigger verify-trigger-host verify-trigger-commercial verify-debug-commercial verify-debug-abstract-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance
+.PHONY: rtl platform atomic-platform software verify-signoff verify-formal verify-throughput verify-fetch-performance verify-generic verify-software verify-platform verify-router verify-axi verify-isa verify-isa-m verify-isa-c verify-isa-bit verify-isa-menvcfg verify-multiply verify-bit verify-debug verify-debug-module verify-jtag verify-debug-host verify-trigger verify-trigger-host verify-trigger-commercial verify-debug-commercial verify-debug-abstract-commercial verify-debug-formal verify-debug-latency verify-atomic verify-atomic-memory verify-atomic-formal verify-timer verify-console verify-protection verify-pmp verify-pmp-data verify-interrupts verify-compliance verify-program-buffer verify-program-host verify-program-commercial
 rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
@@ -125,9 +132,43 @@ verify-debug-abstract-commercial:
 	printf '%s\n' '{"enableDebug":true,"enableJtag":false}' > "$(DEBUG_ABSTRACT_OUTPUT)/input.json"
 	python3 scripts/build_rtl.py --top DitDahE2DebugModule --config "$(DEBUG_ABSTRACT_OUTPUT)/input.json" --output "$(DEBUG_ABSTRACT_OUTPUT)/rtl"
 	hash=$$(python3 -c 'import hashlib; print(hashlib.sha256(open("$(DEBUG_ABSTRACT_OUTPUT)/rtl/DitDahE2DebugModule.sv","rb").read()).hexdigest())'); \
-	python3 -m formal.debug_abstract.run prepare --rtl "$(DEBUG_ABSTRACT_OUTPUT)/rtl" --source-root . --expected-rtl-sha256 "$$hash" --output "$(DEBUG_ABSTRACT_OUTPUT)/evidence"
+	python3 -m formal.debug_abstract.run prepare --rtl "$(DEBUG_ABSTRACT_OUTPUT)/rtl" --source-root . --expected-rtl-sha256 "$$hash" --time-limit "$(DEBUG_ABSTRACT_TIME_LIMIT)" --output "$(DEBUG_ABSTRACT_OUTPUT)/evidence"
 	python3 -m formal.debug_abstract.run collect --evidence "$(DEBUG_ABSTRACT_OUTPUT)/evidence" --private-output "$(DEBUG_ABSTRACT_OUTPUT)/native-private" $(DEBUG_ABSTRACT_JG_ARGS)
 	python3 -m formal.debug_abstract.run validate --evidence "$(DEBUG_ABSTRACT_OUTPUT)/evidence"
+
+verify-program-buffer:
+	python3 test/test_debug/program_hart.py --enable-c --output "$(PROGRAM_HART_OUTPUT)/compressed"
+	python3 test/test_debug/program_hart.py --output "$(PROGRAM_HART_OUTPUT)/words"
+	mkdir -p "$(PROGRAM_OUTPUT)"
+	printf '%s\n' '{"enableDebug":true,"enableC":true,"enableM":true,"triggerCount":2}' > "$(PROGRAM_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --config "$(PROGRAM_OUTPUT)/input.json" --output "$(PROGRAM_OUTPUT)/rtl"
+	python3 test/test_debug/verify_program_buffer.py --rtl "$(PROGRAM_OUTPUT)/rtl" --output "$(PROGRAM_OUTPUT)/check"
+
+verify-program-host:
+	mkdir -p "$(PROGRAM_CORE_OUTPUT)"
+	printf '%s\n' '{"enableDebug":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE),"triggerCount":2,"enableC":true,"enableM":true}' > "$(PROGRAM_CORE_OUTPUT)/input.json"
+	python3 scripts/build_rtl.py --config "$(PROGRAM_CORE_OUTPUT)/input.json" --output "$(PROGRAM_CORE_OUTPUT)/design"
+	python3 test/test_debug_host/verify_host.py --rtl "$(PROGRAM_CORE_OUTPUT)/design" --output "$(PROGRAM_HOST_OUTPUT)" --program-buffer
+
+.PHONY: verify-debug-program-hart-commercial verify-debug-program-core-commercial
+verify-debug-program-hart-commercial:
+	mkdir -p "$(PROGRAM_COMMERCIAL_OUTPUT)/hart"
+	python3 test/test_debug/program_hart.py --enable-c --output "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/build"
+	hash=$$(python3 -c 'import hashlib; print(hashlib.sha256(open("$(PROGRAM_COMMERCIAL_OUTPUT)/hart/build/rtl/DitDahE2DebugHart.sv","rb").read()).hexdigest())'); \
+	python3 -m formal.debug_program_hart.run prepare --rtl "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/build" --source-root . --expected-rtl-sha256 "$$hash" --output "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/evidence"
+	python3 -m formal.debug_program_hart.run collect --evidence "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/evidence" --private-output "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/native-private" $(PROGRAM_JG_ARGS)
+	python3 -m formal.debug_program_hart.run validate --evidence "$(PROGRAM_COMMERCIAL_OUTPUT)/hart/evidence"
+
+verify-debug-program-core-commercial:
+	mkdir -p "$(PROGRAM_COMMERCIAL_OUTPUT)/core"
+	printf '%s\n' '{"enableDebug":true,"enableJtag":false,"enableC":true,"enableM":true,"triggerCount":2}' > "$(PROGRAM_COMMERCIAL_OUTPUT)/core/input.json"
+	python3 scripts/build_rtl.py --config "$(PROGRAM_COMMERCIAL_OUTPUT)/core/input.json" --output "$(PROGRAM_COMMERCIAL_OUTPUT)/core/rtl"
+	hash=$$(python3 -c 'import hashlib; print(hashlib.sha256(open("$(PROGRAM_COMMERCIAL_OUTPUT)/core/rtl/DitDahE2.sv","rb").read()).hexdigest())'); \
+	python3 -m formal.debug_program_core.run prepare --rtl "$(PROGRAM_COMMERCIAL_OUTPUT)/core/rtl" --source-root . --expected-rtl-sha256 "$$hash" --output "$(PROGRAM_COMMERCIAL_OUTPUT)/core/evidence"
+	python3 -m formal.debug_program_core.run collect --evidence "$(PROGRAM_COMMERCIAL_OUTPUT)/core/evidence" --private-output "$(PROGRAM_COMMERCIAL_OUTPUT)/core/native-private" $(PROGRAM_JG_ARGS)
+	python3 -m formal.debug_program_core.run validate --evidence "$(PROGRAM_COMMERCIAL_OUTPUT)/core/evidence"
+
+verify-program-commercial: verify-debug-abstract-commercial verify-debug-program-hart-commercial verify-debug-program-core-commercial
 
 verify-debug-formal:
 	mkdir -p result
@@ -212,7 +253,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl verify-jtag verify-debug-host verify-debug-module
+verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py

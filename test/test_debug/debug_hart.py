@@ -29,7 +29,15 @@ INPUTS = (("reset", "reset", 1), ("active", "debug_control_active", 1), ("halt",
           ("backend_data", "backend_readData", 32), ("backend_error", "backend_error", 1),
           ("allowed", "protection_allowed", 1), ("machine", "protection_machine", 1),
           ("bus_ready", "memory_request_ready", 1), ("bus_valid", "memory_response_valid", 1),
-          ("bus_data", "memory_response_bits_data", 32), ("bus_fault", "memory_response_bits_fault", 1))
+          ("bus_data", "memory_response_bits_data", 32), ("bus_fault", "memory_response_bits_fault", 1),
+          ("transfer", "debug_request_bits_transfer", 1), ("post_exec", "debug_request_bits_postExec", 1),
+          ("program0", "debug_request_bits_program0", 32), ("program1", "debug_request_bits_program1", 32),
+          ("injected_idle", "core_injectedIdle", 1), ("injection_ready", "core_injection_ready", 1),
+          ("done_valid", "core_injectionDone_valid", 1), ("done_sequence", "core_injectionDone_sequence", 3),
+          ("done_fault", "core_injectionDone_fault", 1), ("done_ebreak", "core_injectionDone_ebreak", 1),
+          ("local_address", "core_localCsr_address", 12), ("local_operand", "core_localCsr_operand", 32),
+          ("local_operation", "core_localCsr_operation", 2), ("local_write", "core_localCsr_writeRequested", 1),
+          ("local_commit", "core_localCsr_commit", 1))
 OUTPUTS = (("ready", "debug_request_ready", 1), ("valid", "debug_response_valid", 1),
            ("data", "debug_response_bits_data", 32), ("error", "debug_response_bits_error", 3),
            ("halted", "debug_status_halted", 1), ("running", "debug_status_running", 1),
@@ -47,6 +55,14 @@ OUTPUTS = (("ready", "debug_request_ready", 1), ("valid", "debug_response_valid"
            ("bus_data", "memory_request_bits_data", 32), ("bus_mask", "memory_request_bits_mask", 4),
            ("bus_size", "memory_request_bits_size", 2), ("bus_operation", "memory_request_bits_operation", 4),
            ("bus_ready", "memory_response_ready", 1))
+PROGRAM_OUTPUTS = (("response_data_valid", "debug_response_bits_dataValid", 1), ("entry", "core_entry", 1),
+                   ("injection_active", "core_injectionActive", 1), ("issue_valid", "core_injection_valid", 1),
+                   ("issue_word", "core_injection_bits_word", 32), ("issue_length", "core_injection_bits_length", 3),
+                   ("issue_sequence", "core_injection_bits_sequence", 3),
+                   ("issue_truncated", "core_injection_bits_truncated", 1),
+                   ("local_read_data", "core_localCsr_readData", 32),
+                   ("local_write_mask", "core_localCsr_writeMask", 32),
+                   ("local_written_data", "core_localCsr_writtenData", 32))
 WRAPPER = """// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
 package ditdah_e2
@@ -70,14 +86,17 @@ object DitDahE2 extends Generator[DebugHartParameters, DebugHartLayers, DebugHar
 """
 
 
-def harness():
+def harness(detailed=False):
     declarations = [f"  reg {'[' + str(width - 1) + ':0] ' if width > 1 else ''}{name} = {int(name == 'reset')};"
                     for _, name, width in INPUTS]
-    declarations += [f"  wire {'[' + str(width - 1) + ':0] ' if width > 1 else ''}{name};" for _, name, width in OUTPUTS]
+    outputs = OUTPUTS + (PROGRAM_OUTPUTS if detailed else ())
+    declarations += [f"  wire {'[' + str(width - 1) + ':0] ' if width > 1 else ''}{name};"
+                     for _, name, width in OUTPUTS + PROGRAM_OUTPUTS]
     values = []
-    for _, name, _ in OUTPUTS:
-        valid = "debug_response_valid" if name.startswith("debug_response_bits_") else \
-                "memory_request_valid" if name.startswith("memory_request_bits_") else None
+    for _, name, _ in outputs:
+        valid = ("debug_response_valid" if name.startswith("debug_response_bits_") else
+                 "memory_request_valid" if name.startswith("memory_request_bits_") else
+                 "core_injection_valid" if name.startswith("core_injection_bits_") else None)
         values.append(f"{valid} ? {name} : 0" if valid else name)
     return """// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
@@ -95,7 +114,7 @@ module DebugHartBench;
 """ + '      fields = $fscanf(file, "' + " ".join(["%h"] * len(INPUTS)) + '\\n", ' + \
         ", ".join(name for _, name, _ in INPUTS) + ");\n" + \
         f"      if (fields == {len(INPUTS)}) begin\n" + '        #1 $display("%0d ' + \
-        " ".join(["%h"] * len(OUTPUTS)) + '", sample, ' + ", ".join(values) + ");\n" + """
+        " ".join(["%h"] * len(outputs)) + '", sample, ' + ", ".join(values) + ");\n" + """
         clock = 1;
         #1 clock = 0;
         sample = sample + 1;
@@ -124,7 +143,8 @@ def configuration(value):
 
 def row(**values):
     defaults = dict.fromkeys((name for name, _, _ in INPUTS), 0)
-    defaults.update(active=1, empty=1, fetch_idle=1, size=2, ready=1, allowed=1, machine=1, bus_ready=1)
+    defaults.update(active=1, empty=1, fetch_idle=1, size=2, ready=1, allowed=1, machine=1, bus_ready=1,
+                    transfer=1, injected_idle=1, injection_ready=1)
     if values.keys() - defaults.keys():
         raise ValueError("Unknown debug hart stimulus field")
     return tuple(values.get(name, defaults[name]) for name, _, _ in INPUTS)
@@ -582,8 +602,8 @@ def digest(path):
 def build(output, parameters):
     output = Path(output)
     names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/DebugInterfaces.scala",
-             "ditdah_e2/src/DebugHartInterfaces.scala", "ditdah_e2/src/DebugHart.scala",
-             "test/test_debug/debug_hart.py", "test/test_debug/test_debug_hart.py", "flake.nix", "flake.lock"]
+             "ditdah_e2/src/DebugTransportInterfaces.scala", "ditdah_e2/src/DebugHartInterfaces.scala", "ditdah_e2/src/DebugHart.scala",
+             "test/test_debug/debug_hart.py", "test/test_debug/test_debug_hart.py", "test/test_debug/program_hart.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(ROOT)) for path in sorted((ROOT / "nix").glob("*.nix"))]
     contents = {name: (ROOT / name).read_bytes() for name in names}
     for name, data in contents.items():
@@ -632,10 +652,10 @@ def build(output, parameters):
     return report
 
 
-def simulate(output, rows, rtl, commands):
+def simulate(output, rows, rtl, commands, detailed=False):
     output.mkdir(parents=True)
     (output / "vectors.txt").write_text("".join(" ".join(f"{value:x}" for value in values) + "\n" for values in rows))
-    (output / "debug_hart_tb.sv").write_text(harness())
+    (output / "debug_hart_tb.sv").write_text(harness(detailed))
     shutil.copyfile(rtl, output / "DitDahE2DebugHart.sv")
     for command in (["iverilog", "-g2012", "-s", "DebugHartBench", "-o", "debug-hart-sim", "DitDahE2DebugHart.sv", "debug_hart_tb.sv"],
                     ["vvp", "debug-hart-sim"]):

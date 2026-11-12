@@ -6,9 +6,9 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -16,7 +16,7 @@ if not __package__:
     sys.path.insert(0, str(ROOT))
 from formal.debug_transport import run as native
 
-SCHEMA = "ditdah-e2.debug-abstract.v1"
+SCHEMA = "ditdah-e2.debug-abstract.v2"
 TOP = "debug_abstract_formal"
 RTL_NAME = "DitDahE2DebugModule.sv"
 WRAPPER_NAME = "debug_abstract_formal.sv"
@@ -28,20 +28,27 @@ ASSERTIONS = (
     "dmi_request_blocked_with_response",
     "hart_request_has_start",
     "fresh_operands",
+    "fresh_program_operands",
     "stable_command_description",
     "auto_requires_accepted_dmi",
-    "auto_requires_enabled_data",
+    "auto_requires_enabled_access",
+    "postexec_start_has_request",
+    "postexec_only_preserves_data",
+    "data_valid_updates_data0",
     "error_blocks_new_command",
     "dmi_response_valid_stable",
     "dmi_response_payload_stable",
     "hart_request_valid_stable",
     "hart_request_payload_stable",
     "data0_read_returns_previous",
-    "abstractauto_upper_bits_zero",
+    "abstractauto_reserved_bits_zero",
+    "program_buffer_size_is_two",
+    "implicit_ebreak_is_advertised",
     "data1_update_exactly_once",
     "busy_conflict_priority",
     "busy_conflict_preserves_error",
     "memory_bus_error_is_five",
+    "postexec_error_is_three",
     "unsupported_command_error",
     "deactivate_clears_command_state",
 )
@@ -62,18 +69,27 @@ COVERS = (
     "cover_fault_without_postincrement",
     "cover_busy_conflict_with_fault",
     "cover_deactivate_with_completion",
+    "cover_postexec_only",
+    "cover_postexec_with_transfer",
+    "cover_program_auto_high",
+    "cover_read_then_fault_preserves_data",
 )
 MUTATIONS = {
     "stale-operands": "fresh_operands",
     "early-increment": "data1_update_exactly_once",
     "backpressure-repeat": "auto_requires_accepted_dmi",
     "busy-priority": "busy_conflict_priority",
+    "stale-program": "fresh_program_operands",
+    "drop-postexec-need": "postexec_start_has_request",
+    "drop-data-valid": "data_valid_updates_data0",
+    "drop-implicit-ebreak": "implicit_ebreak_is_advertised",
 }
 CASES = ("safety", "covers", *("negative-" + name for name in MUTATIONS))
 OBSERVATIONS = (
     "autoStart_1", "manualStart", "commandComplete", "command_memory", "command_write",
-    "command_size", "command_register", "command_transfer", "command_postIncrement",
-    "operands_address", "data0", "data1", "error", "busy", "active", "auto", "commandValid", "_GEN_151",
+    "command_size", "command_register", "command_transfer", "command_postIncrement", "command_postExec",
+    "operands_address", "data0", "data1", "error", "busy", "active", "auto", "commandValid", "needsHart",
+    "program0", "program1", "executionProgram0", "executionProgram1",
 )
 
 
@@ -136,14 +152,30 @@ def mutate(value, name):
         pattern = r"(error\s*<=\s*)3'h1(;)"
         replacement = r"\g<1>3'h5\2"
     elif name == "stale-operands":
-        pattern = r"(if \(autoStart_1\) begin\n\s*)operands_address <= [^;]+;\n\s*operands_data <= [^;]+;"
-        replacement = lambda match: match[1] + "operands_address <= operands_address;\n      operands_data <= operands_data;"
+        pattern = (r"(if \(autoStart_1\) begin\n(?:\s*executionProgram[01] <= [^;]+;\n){0,2}\s*)"
+                   r"operands_address <= [^;]+;(\n\s*)operands_data <= [^;]+;")
+        replacement = lambda match: (match[1] + "operands_address <= operands_address;" +
+                                     match[2] + "operands_data <= operands_data;")
     elif name == "early-increment":
-        pattern = r"else if \(commandComplete & command_memory & command_postIncrement & postincrement\)"
+        pattern = (r"else if \(commandComplete & command_memory & command_postIncrement\s+"
+                   r"& (?:postincrement|hart_response_bits_error == 3'h0)\)")
         replacement = "else if (busyConflict & ~issued & command_memory & command_postIncrement)"
     elif name == "backpressure-repeat":
         pattern = r"wire\s+autoStart = accepted & read \| write;"
         replacement = "wire        autoStart = dmi_request_valid & read | write;"
+    elif name == "stale-program":
+        pattern = (r"executionProgram0 <= write & autoSelected \? dmi_request_bits_data : program0;\n"
+                   r"\s*executionProgram1 <= write & autoSelected_0 \? dmi_request_bits_data : program1;")
+        replacement = "executionProgram0 <= executionProgram0;\n      executionProgram1 <= executionProgram1;"
+    elif name == "drop-postexec-need":
+        pattern = r"(\? memoryCommand \| dmi_request_bits_data\[17\] \|) dmi_request_bits_data\[18\]"
+        replacement = r"\g<1> 1'h0"
+    elif name == "drop-data-valid":
+        pattern = r"data0 <= hart_response_bits_data;"
+        replacement = "data0 <= data0;"
+    elif name == "drop-implicit-ebreak":
+        pattern = r"(\{7'h0,\s*ndmreset \| hart_status_resetPending,\s*)4'h4(,)"
+        replacement = r"\g<1>4'h0\g<2>"
     else:
         raise ValueError("Unknown abstract mutation")
     changed, count = re.subn(pattern, replacement, text)
@@ -202,7 +234,7 @@ def prepare_bundle(args):
         "hartState": "halted_available",
         "timeLimitSeconds": args.time_limit,
         "cases": list(CASES),
-        "programBufferProven": False,
+        "programBufferProven": True,
         "fullCoreProven": False,
     }
     write_json(output / "manifest.json", manifest)
@@ -220,7 +252,7 @@ def validate_frozen(evidence):
     manifest = json.loads((evidence / "manifest.json").read_text())
     if (manifest.get("schema") != SCHEMA or manifest.get("top") != "DitDahE2DebugModule" or
             manifest.get("resetScope") != "initial_common_cold_reset" or manifest.get("hartState") != "halted_available" or
-            manifest.get("cases") != list(CASES) or manifest.get("programBufferProven") is not False or
+            manifest.get("cases") != list(CASES) or manifest.get("programBufferProven") is not True or
             manifest.get("fullCoreProven") is not False or type(manifest.get("timeLimitSeconds")) is not int or
             manifest["timeLimitSeconds"] < 1):
         raise ValueError("Abstract evidence configuration differs")
@@ -315,7 +347,7 @@ def validate_commercial(evidence):
         "schema": SCHEMA,
         "exitStatus": 0,
         "commercialGate": "passed",
-        "proofScope": "unbounded_debug_module_abstract_safety",
+        "proofScope": "unbounded_debug_module_abstract_and_program_buffer_safety",
         "rtlSha256": json.loads((evidence / "manifest.json").read_text())["rtlSha256"],
         "outcomes": outcomes,
         "assertionsProven": len(ASSERTIONS),
@@ -324,8 +356,8 @@ def validate_commercial(evidence):
         "assumptions": list(ASSUMPTIONS),
         "initialAssumptions": [INITIAL_ASSUMPTION],
         "abstractions": ["single_hart_halted_available", "initial_common_cold_reset", "one_outstanding_hart_response"],
-        "excluded": ["program_buffer", "system_bus_access", "full_core_proof", "physical_transport"],
-        "programBufferProven": False,
+        "excluded": ["hart_program_execution", "native_trap_csr_isolation", "system_bus_access", "full_core_proof", "physical_transport"],
+        "programBufferProven": True,
         "fullCoreProven": False,
     }
     write_json(evidence / "summary.json", summary)

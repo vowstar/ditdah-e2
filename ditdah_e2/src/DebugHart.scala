@@ -36,6 +36,12 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
     val offered = RegInit(false.B)
     val waiting = RegInit(false.B)
     val memory = Reg(new MemoryRequest)
+    val injecting = RegInit(false.B)
+    val cancelInjection = RegInit(false.B)
+    val pendingIssue = RegInit(false.B)
+    val slot = RegInit(0.U(3))
+    val program0 = Reg(UInt(32))
+    val program1 = Reg(UInt(32))
     val control = io.debug.control
     val request = io.debug.request.bits
     val resetRequest = control.active & control.reset
@@ -54,7 +60,10 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
     io.core.ebreakUser := (if p.protectedMode then ebreakUser else false.B)
     io.core.freezeCounters := halted | io.core.breakpoint | (stopping & (stopCause === 1.U(3)))
     io.core.coreReset := resetting
-    val resume = control.active & control.resume & halted & !haltRequest & !resetBusy & !responding & !sending & !waiting
+    io.core.entry := !halted & haltNeeded & !resetBusy & io.core.empty & io.core.fetchIdle
+    io.core.injectionActive := injecting
+    val resume = control.active & control.resume & halted & !haltRequest & !resetBusy & !responding &
+      !sending & !waiting & !injecting & !pendingIssue & !cancelInjection
     io.core.resume := resume
     io.core.resumePc := dpc
     io.core.resumeUser := (if p.protectedMode then user else false.B)
@@ -93,15 +102,18 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
     val aligned = (request.size === 0.U(2)) |
       ((request.size === 1.U(2)) & !request.address.asBits.bit(0)) |
       (word & (request.address.asBits.bits(1, 0) === 0.B(2)))
-    val format = request.memory.?(request.size =/= 3.U(2), word)
-    io.debug.request.ready := control.active & !responding & !sending & !waiting & !resetBusy & !control.resume
+    val format = request.memory.?(request.size =/= 3.U(2) & !request.postExec, !request.transfer | word)
+    val transferError = request.transfer & !local & io.backend.error
+    io.debug.request.ready := control.active & !responding & !sending & !waiting & !injecting & !pendingIssue &
+      !cancelInjection & !resetBusy & !control.resume
     val accepted = io.debug.request.valid & io.debug.request.ready
+    val startProgram = accepted & halted & format & !request.memory & request.postExec & !transferError
     io.debug.response.valid := responding & control.active
     io.debug.response.bits :<= response
     io.backend.register := request.register
-    io.backend.writeRequested := !request.memory & request.write
+    io.backend.writeRequested := !request.memory & request.transfer & request.write
     io.backend.writeData := request.data
-    io.backend.writePulse := accepted & halted & format & !request.memory & !local & request.write & !io.backend.error
+    io.backend.writePulse := accepted & halted & format & !request.memory & request.transfer & !local & request.write & !io.backend.error
     io.protection.address := request.address
     io.protection.size := request.size
     io.protection.write := request.write
@@ -117,19 +129,21 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
       responding := true.B
       response.data := 0.U(32)
       response.error := (!format).?(2.U(3), (!halted).?(4.U(3), 0.U(3)))
+      response.dataValid := false.B
       when(format & halted) {
         when(!request.memory) {
-          response.error := (!local & io.backend.error).?(3.U(3), 0.U(3))
-          when(!request.write & (local | !io.backend.error)) {
+          response.error := transferError.?(3.U(3), 0.U(3))
+          when(request.transfer & !request.write & (local | !io.backend.error)) {
             response.data := csr.?(status, pc.?(dpc, io.backend.readData))
+            response.dataValid := true.B
           }
-          when(request.write & csr) {
+          when(request.transfer & request.write & csr) {
             step := request.data.asBits.bit(2)
             ebreakMachine := request.data.asBits.bit(15)
             ebreakUser := (if p.protectedMode then request.data.asBits.bit(12) else false.B)
             user := (if p.protectedMode then request.data.asBits.bits(1, 0) === 0.B(2) else false.B)
           }
-          when(request.write & pc) {
+          when(request.transfer & request.write & pc) {
             dpc := (if p.enableC then request.data.asBits.bits(31, 1) ## 0.B(1) else request.data.asBits.bits(31, 2) ## 0.B(2)).asUInt
           }
         }
@@ -152,6 +166,79 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
         }
       }
     }
+    when(startProgram) {
+      responding := false.B
+      injecting := true.B
+      cancelInjection := false.B
+      pendingIssue := true.B
+      slot := 0.U(3)
+      program0 := request.program0
+      program1 := request.program1
+    }
+
+    io.core.injection.valid := pendingIssue & !cancelInjection
+    io.core.injection.bits.sequence := slot
+    io.core.injection.bits.word := 0x00100073.U(32)
+    io.core.injection.bits.length := 4.U(3)
+    io.core.injection.bits.truncated := false.B
+    if p.enableC then
+      val raw = Wire(UInt(16))
+      raw := 0.U(16)
+      when(slot === 0.U(3)) {
+        raw := program0.asBits.bits(15, 0).asUInt
+        io.core.injection.bits.word := program0
+      }
+      when(slot === 1.U(3)) {
+        raw := program0.asBits.bits(31, 16).asUInt
+        io.core.injection.bits.word := (program1.asBits.bits(15, 0) ## program0.asBits.bits(31, 16)).asUInt
+      }
+      when(slot === 2.U(3)) {
+        raw := program1.asBits.bits(15, 0).asUInt
+        io.core.injection.bits.word := program1
+      }
+      when(slot === 3.U(3)) {
+        raw := program1.asBits.bits(31, 16).asUInt
+        io.core.injection.bits.word := (0.B(16) ## program1.asBits.bits(31, 16)).asUInt
+        io.core.injection.bits.truncated := raw.asBits.bits(1, 0) === 3.B(2)
+      }
+      when(slot =/= 4.U(3)) {
+        io.core.injection.bits.length := (raw.asBits.bits(1, 0) === 3.B(2)).?(4.U(3), 2.U(3))
+        when(raw.asBits.bits(1, 0) =/= 3.B(2)) {
+          io.core.injection.bits.word := (0.B(16) ## raw.asBits).asUInt
+        }
+      }
+    else
+      when(slot === 0.U(3)) { io.core.injection.bits.word := program0 }
+      when(slot === 2.U(3)) { io.core.injection.bits.word := program1 }
+      when((slot === 1.U(3)) | (slot === 3.U(3))) { io.core.injection.bits.truncated := true.B }
+
+    val finishingInjection = io.core.injectionDone.valid & injecting & (io.core.injectionDone.sequence === slot) &
+      (io.core.injectionDone.fault | io.core.injectionDone.ebreak | (slot === 4.U(3)))
+    when(io.core.injection.valid & io.core.injection.ready) { pendingIssue := false.B }
+    when(io.core.injectionDone.valid & injecting & (io.core.injectionDone.sequence === slot)) {
+      pendingIssue := false.B
+      when(!cancelInjection) {
+        when(io.core.injectionDone.fault | io.core.injectionDone.ebreak | (slot === 4.U(3))) {
+          injecting := false.B
+          when(owner & control.active) {
+            responding := true.B
+            response.error := io.core.injectionDone.fault.?(3.U(3), 0.U(3))
+          }
+        }.otherwise {
+          slot := (slot + (io.core.injection.bits.length === 2.U(3)).?(1.U(3), 2.U(3))).asBits.bits(2, 0).asUInt
+          pendingIssue := true.B
+        }
+      }
+    }
+    when(cancelInjection & injecting & !pendingIssue & io.core.injectedIdle) {
+      injecting := false.B
+      cancelInjection := false.B
+      when(owner & control.active) {
+        responding := true.B
+        response.error := 4.U(3)
+      }
+    }
+
     val newOffer = control.active & !resetBusy
     io.memory.request.valid := sending & (offered | newOffer)
     io.memory.request.bits :<= memory
@@ -168,6 +255,7 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
         responding := true.B
         response.data := 0.U(32)
         response.error := 4.U(3)
+        response.dataValid := false.B
       }
     }
     when(io.memory.response.valid & io.memory.response.ready) {
@@ -180,12 +268,57 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
         val loaded = (memory.size === 0.U(2)).?((0.B(24) ## data.bits(7, 0)).asUInt,
           (memory.size === 1.U(2)).?((0.B(16) ## data.bits(15, 0)).asUInt, data.asUInt))
         response.data := (memory.write | resetBusy | io.memory.response.bits.fault).?(0.U(32), loaded)
+        response.dataValid := !memory.write & !resetBusy & !io.memory.response.bits.fault
       }
     }
+
+    val localAddress = io.core.localCsr.address
+    val localRead = Wire(UInt(32))
+    localRead := 0.U(32)
+    when(localAddress === 0x7b0.U(12)) { localRead := status }
+    when(localAddress === 0x7b1.U(12)) { localRead := dpc }
+    val localWrite = Wire(UInt(32))
+    localWrite := io.core.localCsr.operand
+    when(io.core.localCsr.operation === 2.U(2)) { localWrite := (localRead.asBits | io.core.localCsr.operand.asBits).asUInt }
+    when(io.core.localCsr.operation === 3.U(2)) { localWrite := (localRead.asBits & ~io.core.localCsr.operand.asBits).asUInt }
+    val dcsrMask = (if p.protectedMode then 0x9007L else 0x8004L).U(32)
+    val localPrv = (if p.protectedMode then (localWrite.asBits.bits(1, 0) === 0.B(2)).?(0.B(2), 3.B(2)) else 3.B(2))
+    val dcsrValue = ((status.asBits & ~dcsrMask.asBits) |
+      (localWrite.asBits & dcsrMask.asBits & 0xfffffffcL.B(32)) | localPrv.asBits).asUInt
+    val dpcValue = (if p.enableC then localWrite.asBits.bits(31, 1) ## 0.B(1) else localWrite.asBits.bits(31, 2) ## 0.B(2)).asUInt
+    io.core.localCsr.readData := localRead
+    io.core.localCsr.writeMask := 0.U(32)
+    io.core.localCsr.writtenData := localRead
+    when(io.core.localCsr.commit) {
+      when(localAddress === 0x7b0.U(12)) {
+        io.core.localCsr.writeMask := dcsrMask
+        io.core.localCsr.writtenData := dcsrValue
+        when(io.core.localCsr.writeRequested) {
+          step := localWrite.asBits.bit(2)
+          ebreakMachine := localWrite.asBits.bit(15)
+          ebreakUser := (if p.protectedMode then localWrite.asBits.bit(12) else false.B)
+          user := (if p.protectedMode then localWrite.asBits.bits(1, 0) === 0.B(2) else false.B)
+        }
+      }
+      when(localAddress === 0x7b1.U(12)) {
+        io.core.localCsr.writeMask := (if p.enableC then 0xfffffffeL.U(32) else 0xfffffffcL.U(32))
+        io.core.localCsr.writtenData := dpcValue
+        when(io.core.localCsr.writeRequested) { dpc := dpcValue }
+      }
+    }
+
     // An inactive DM cancels command identity, but not an offered native transfer.
-    when(!control.active) { responding := false.B; owner := false.B }
+    when(!control.active) {
+      responding := false.B
+      owner := false.B
+    }
+    when((!control.active | resetBusy) & injecting & !cancelInjection & !finishingInjection) {
+      cancelInjection := true.B
+    }
+    when(cancelInjection) { pendingIssue := false.B }
     when(resetRequest) { resetPending := true.B }
-    when(resetBusy & !resetting & io.core.empty & io.core.fetchIdle & !sending & !waiting) {
+    when(resetBusy & !resetting & io.core.empty & io.core.fetchIdle & !sending & !waiting &
+      !injecting & !pendingIssue & io.core.injectedIdle) {
       resetting := true.B
       halted := false.B
       stopping := false.B
@@ -196,6 +329,7 @@ object DebugHart extends Generator[DebugHartParameters, DebugHartLayers, DebugHa
       user := false.B
       cause := 0.U(3)
       dpc := BigInt(p.resetVector).U(32)
+      cancelInjection := false.B
     }
     when(resetting & !resetRequest) {
       resetting := false.B

@@ -38,12 +38,12 @@ class DebugTests(unittest.TestCase):
     def test_step_rejects_second_retirement(self):
         self.debug.step_start = 3
         with self.assertRaisesRegex(AssertionError, "incorrect instruction count"):
-            self.debug.response(0x11, 1, 0, 0, 0x3A3,
+            self.debug.response(0x11, 1, 0, 0, 0x4003A3,
                                 {"outstanding": False, "completed": False, "pc": 16, "user": False, "retirements": 5})
 
     def test_halt_rejects_pending_memory(self):
         with self.assertRaisesRegex(AssertionError, "unfinished memory"):
-            self.debug.response(0x11, 1, 0, 0, 0x3A3,
+            self.debug.response(0x11, 1, 0, 0, 0x4003A3,
                                 {"outstanding": True, "completed": False})
 
     def test_abstract_read_rejects_wrong_result(self):
@@ -92,14 +92,14 @@ class DebugTests(unittest.TestCase):
                             debug.request(4, 2, value, 0)
                         command = (2 << 20) | (1 << 17) | (int(value is not None) << 16) | address
                         debug.request(0x17, 2, command, 0)
-                        debug.response(0x16, 1, 0, 0, 2, {})
+                        debug.response(0x16, 1, 0, 0, 0x2000002, {})
                         if value is None:
                             debug.response(4, 1, 0, 0, 0, {})
                         self.assertEqual((model.pc, model.user_mode, model.csrs, debug.dpc, debug.control), before)
 
     def test_menvcfg_abstract_access_rejects_wrong_result_or_error(self):
         for address in (0x30A, 0x31A):
-            for data, status in ((1, 2), (0, 0x202)):
+            for data, status in ((1, 0x2000002), (0, 0x2000202)):
                 debug = DebugReference(Model({}, protected_mode=True))
                 debug.active = debug.halted = True
                 debug.request(0x17, 2, 0x220000 | address, 0)
@@ -149,7 +149,7 @@ class DebugTests(unittest.TestCase):
         self.debug.data = [VALUE, 0x440]
         self.debug.request(0x17, 2, 0x2200000, 0)
         self.debug.pending.update(completed=True, fault=True)
-        self.debug.response(0x16, 1, 0, 0, 0x502, {})
+        self.debug.response(0x16, 1, 0, 0, 0x2000502, {})
         self.assertEqual(self.debug.error, 5)
         self.assertEqual(self.debug.data[0], VALUE)
         with self.assertRaisesRegex(AssertionError, "before error clearance"):
@@ -157,14 +157,14 @@ class DebugTests(unittest.TestCase):
         self.debug.request(0x16, 2, 0x700, 0)
         self.debug.request(0x17, 2, 0x2200000, 0)
         self.debug.pending.update(completed=True, fault=False)
-        self.debug.response(0x16, 1, 0, 0, 2, {})
+        self.debug.response(0x16, 1, 0, 0, 0x2000002, {})
         self.assertEqual(self.debug.error, 0)
 
     def test_abstract_fault_rejects_success_status(self):
         self.debug.pending = {"request": (0x440, 0, 0, 0, 2, 1), "denied": False,
                               "completed": True, "fault": True}
         with self.assertRaisesRegex(AssertionError, "command error differs"):
-            self.debug.response(0x16, 1, 0, 0, 2, {})
+            self.debug.response(0x16, 1, 0, 0, 0x2000002, {})
 
     def test_reset_halt_set_clear_and_busy(self):
         self.debug.active = True
@@ -180,12 +180,12 @@ class DebugTests(unittest.TestCase):
     def test_reset_halt_cause_and_boundary(self):
         self.debug.reset_halt_pending = True
         snapshot = {"outstanding": False, "completed": False, "pc": 0, "user": False, "retirements": 9}
-        self.debug.response(0x11, 1, 0, 0, 0x3A3, snapshot)
+        self.debug.response(0x11, 1, 0, 0, 0x4003A3, snapshot)
         self.assertEqual((self.debug.cause, self.debug.dpc, self.debug.reset_halts), (5, 0, 1))
         self.debug.halted = False
         self.debug.reset_halt_pending = True
         with self.assertRaisesRegex(AssertionError, "initial boundary"):
-            self.debug.response(0x11, 1, 0, 0, 0x3A3, snapshot | {"pc": 4})
+            self.debug.response(0x11, 1, 0, 0, 0x4003A3, snapshot | {"pc": 4})
 
     def test_directed_step_encodings(self):
         for case in cases():
@@ -236,10 +236,10 @@ class DebugTests(unittest.TestCase):
         self.debug.cycle = 10
         self.debug.request(0x10, 2, 0x40000001, 3)
         snapshot = {"outstanding": True, "completed": False, "orphan": True, "retirements": 3}
-        self.debug.response(0x11, 1, 0, 0, 0x3A3, snapshot)
+        self.debug.response(0x11, 1, 0, 0, 0x4003A3, snapshot)
         self.assertEqual(self.debug.steps, 0)
         with self.assertRaisesRegex(AssertionError, "Resume acknowledged before orphan"):
-            self.debug.response(0x11, 1, 0, 0, 0x30CA3, snapshot)
+            self.debug.response(0x11, 1, 0, 0, 0x430CA3, snapshot)
 
     def test_orphan_scenarios_resume_without_waiting_for_the_transfer(self):
         for case in cases(False, False, False):

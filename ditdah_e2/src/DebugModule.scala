@@ -23,6 +23,10 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val haveReset = RegInit(false.B)
     val data0 = RegInit(0.U(32))
     val data1 = RegInit(0.U(32))
+    val program0 = RegInit(0.U(32))
+    val program1 = RegInit(0.U(32))
+    val executionProgram0 = Reg(UInt(32))
+    val executionProgram1 = Reg(UInt(32))
     val error = RegInit(0.U(3))
     val busy = RegInit(false.B)
     val needsHart = RegInit(false.B)
@@ -30,7 +34,7 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val commandValid = RegInit(false.B)
     val command = Reg(new DebugAbstractCommand)
     val operands = Reg(new DebugHartOperands)
-    val auto = RegInit(0.U(2))
+    val auto = RegInit(0.U(18))
     val responding = RegInit(false.B)
     val response = Reg(new DmiResponse)
     val request = io.dmi.request.bits
@@ -40,7 +44,9 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val controlWrite = write & (request.address === 0x10.U(7))
     val deactivate = controlWrite & !request.data.asBits.bit(0)
     val dataAccess = (request.address === 4.U(7)) | (request.address === 5.U(7))
-    val busyConflict = active & busy & (((read | write) & dataAccess) |
+    val programAccess = (request.address === 0x20.U(7)) | (request.address === 0x21.U(7))
+    val autoAccess = dataAccess | programAccess
+    val busyConflict = active & busy & (((read | write) & autoAccess) |
       (write & ((request.address === 0x16.U(7)) | (request.address === 0x17.U(7)) |
         (request.address === 0x18.U(7)))))
     io.dmi.request.ready := !responding
@@ -58,6 +64,10 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     io.hart.request.bits.register := command.register
     io.hart.request.bits.address := operands.address
     io.hart.request.bits.data := operands.data
+    io.hart.request.bits.transfer := command.memory | command.transfer
+    io.hart.request.bits.postExec := command.postExec
+    io.hart.request.bits.program0 := executionProgram0
+    io.hart.request.bits.program1 := executionProgram1
     io.hart.response.ready := true.B
 
     val halted = io.hart.status.halted & !io.hart.status.unavailable
@@ -67,17 +77,19 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     when(active) {
       when(request.address === 4.U(7)) { readData := busy.?(0.U(32), data0) }
       when(request.address === 5.U(7)) { readData := busy.?(0.U(32), data1) }
+      when(request.address === 0x20.U(7)) { readData := busy.?(0.U(32), program0) }
+      when(request.address === 0x21.U(7)) { readData := busy.?(0.U(32), program1) }
       when(request.address === 0x10.U(7)) { readData := (0.B(30) ## ndmreset.asBits ## active.asBits).asUInt }
       when(request.address === 0x11.U(7)) {
-        readData := (0.B(7) ## (ndmreset | io.hart.status.resetPending).asBits ## 0.B(4) ##
+        readData := (0.B(7) ## (ndmreset | io.hart.status.resetPending).asBits ## 0.B(1) ## 1.B(1) ## 0.B(2) ##
           haveReset.asBits ## haveReset.asBits ## resumeAck.asBits ## resumeAck.asBits ## 0.B(2) ##
           io.hart.status.unavailable.asBits ## io.hart.status.unavailable.asBits ##
           running.asBits ## running.asBits ## halted.asBits ## halted.asBits ## 0xa3.B(8)).asUInt
       }
       when(request.address === 0x16.U(7)) {
-        readData := (0.B(19) ## busy.asBits ## 0.B(1) ## error.asBits ## 2.B(8)).asUInt
+        readData := (0.B(3) ## 2.B(5) ## 0.B(11) ## busy.asBits ## 0.B(1) ## error.asBits ## 2.B(8)).asUInt
       }
-      when(request.address === 0x18.U(7)) { readData := (0.B(30) ## auto.asBits).asUInt }
+      when(request.address === 0x18.U(7)) { readData := (0.B(14) ## auto.asBits).asUInt }
     }
 
     val bits = request.data.asBits
@@ -85,7 +97,7 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val memoryCommand = bits.bits(31, 24) === 2.B(8)
     val transfer = bits.bit(17)
     val size = bits.bits(22, 20).asUInt
-    val registerSupported = registerCommand & !bits.bit(23) & !bits.bit(19) & !bits.bit(18) &
+    val registerSupported = registerCommand & !bits.bit(23) & !bits.bit(19) &
       (!transfer | (size === 2.U(3)))
     val memorySupported = memoryCommand & !bits.bit(23) & (size <= 2.U(3)) &
       (bits.bits(18, 17) === 0.B(2)) & (bits.bits(15, 0) === 0.B(16))
@@ -93,10 +105,14 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val commandWrite = write & (request.address === 0x17.U(7))
     val manualStart = active & commandWrite & !busy & (error === 0.U(3)) & supported & halted
     val autoSelected = ((request.address === 4.U(7)) & auto.asBits.bit(0)) |
-      ((request.address === 5.U(7)) & auto.asBits.bit(1))
-    val autoStart = active & (read | write) & dataAccess & autoSelected & commandValid & !busy & (error === 0.U(3))
+      ((request.address === 5.U(7)) & auto.asBits.bit(1)) |
+      ((request.address === 0x20.U(7)) & auto.asBits.bit(16)) |
+      ((request.address === 0x21.U(7)) & auto.asBits.bit(17))
+    val autoStart = active & (read | write) & autoAccess & autoSelected & commandValid & !busy & (error === 0.U(3))
     val sampledData0 = (write & (request.address === 4.U(7))).?(request.data, data0)
     val sampledData1 = (write & (request.address === 5.U(7))).?(request.data, data1)
+    val sampledProgram0 = (write & (request.address === 0x20.U(7))).?(request.data, program0)
+    val sampledProgram1 = (write & (request.address === 0x21.U(7))).?(request.data, program1)
     val commandComplete = active & busy & issued & io.hart.response.valid
     val postincrement = commandComplete & command.memory & command.postIncrement &
       (io.hart.response.bits.error === 0.U(3))
@@ -114,7 +130,7 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
       busy := false.B
       issued := false.B
       when(error === 0.U(3)) { error := io.hart.response.bits.error }
-      when(!command.write & (io.hart.response.bits.error === 0.U(3))) { data0 := io.hart.response.bits.data }
+      when(io.hart.response.bits.dataValid) { data0 := io.hart.response.bits.data }
       when(postincrement) { data1 := (operands.address + incrementBy).asBits.bits(31, 0).asUInt }
     }
     when(active & resume & io.hart.status.resumeAck) {
@@ -142,8 +158,12 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     when(active & write & !busy) {
       when(request.address === 4.U(7)) { data0 := request.data }
       when(request.address === 5.U(7)) { data1 := request.data }
+      when(request.address === 0x20.U(7)) { program0 := request.data }
+      when(request.address === 0x21.U(7)) { program1 := request.data }
       when(request.address === 0x16.U(7)) { error := (error.asBits & ~request.data.asBits.bits(10, 8)).asUInt }
-      when(request.address === 0x18.U(7)) { auto := request.data.asBits.bits(1, 0).asUInt }
+      when(request.address === 0x18.U(7)) {
+        auto := (bits.bits(17, 16) ## 0.B(14) ## bits.bits(1, 0)).asUInt
+      }
       when(commandWrite & (error === 0.U(3))) {
         when(!supported) { error := 2.U(3) }
         when(supported & !halted) { error := 4.U(3) }
@@ -153,22 +173,27 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
       busy := true.B
       issued := false.B
       commandValid := true.B
-      needsHart := memoryCommand | transfer
+      needsHart := memoryCommand | transfer | bits.bit(18)
       command.memory := memoryCommand
       command.write := bits.bit(16)
       command.size := size.asBits.bits(1, 0).asUInt
       command.register := bits.bits(15, 0).asUInt
       command.transfer := transfer
       command.postIncrement := memoryCommand & bits.bit(19)
+      command.postExec := registerCommand & bits.bit(18)
       operands.address := data1
       operands.data := data0
+      executionProgram0 := program0
+      executionProgram1 := program1
     }
     when(autoStart) {
       busy := true.B
       issued := false.B
-      needsHart := command.memory | command.transfer
+      needsHart := command.memory | command.transfer | command.postExec
       operands.address := sampledData1
       operands.data := sampledData0
+      executionProgram0 := sampledProgram0
+      executionProgram1 := sampledProgram1
     }
     // A conflicting DMI access takes priority over a command result on this edge.
     when(busyConflict & (error === 0.U(3))) { error := 1.U(3) }
@@ -182,10 +207,12 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
       haveReset := false.B
       data0 := 0.U(32)
       data1 := 0.U(32)
+      program0 := 0.U(32)
+      program1 := 0.U(32)
       error := 0.U(3)
       busy := false.B
       issued := false.B
       needsHart := false.B
       commandValid := false.B
-      auto := 0.U(2)
+      auto := 0.U(18)
     }

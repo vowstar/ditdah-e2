@@ -60,6 +60,11 @@ module trigger_core_formal #(parameter [1:0] SCENARIO = 0)(input clock, input re
     .interrupt_csrMepc_after(), .interrupt_csrMepc_writeMask(), .interrupt_csrMcause_before(),
     .interrupt_csrMcause_after(), .interrupt_csrMcause_writeMask(), .interrupt_csrMtval_before(),
     .interrupt_csrMtval_after(), .interrupt_csrMtval_writeMask(),
+    .debugExecution_valid(), .debugExecution_sequence(), .debugExecution_pc(),
+    .debugExecution_word(), .debugExecution_length(), .debugExecution_rd(),
+    .debugExecution_writes(), .debugExecution_value(), .debugExecution_fault(),
+    .debugExecution_ebreak(), .debugExecution_csr(), .debugExecution_load(),
+    .debugExecution_store(), .debugExecution_address(),
     .*
   );
 

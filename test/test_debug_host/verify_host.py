@@ -24,6 +24,7 @@ from test.common.model import Model
 
 READY = "E2_OPENOCD_READY"
 ABSTRACT_ONLY = "E2_MEM_ACCESS_ABSTRACT_ONLY"
+PROGRAM_BUFFER_ONLY = "E2_MEM_ACCESS_PROGRAM_BUFFER"
 GDB_ACCEPTED = "E2_GDB_ACCEPTED"
 CONSOLE = 0x10000000
 SCRATCH = 0x20008000
@@ -60,7 +61,7 @@ def validate_manifest(manifest, require_triggers=False):
     return idcode
 
 
-def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False, triggers=False):
+def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False, triggers=False, program_buffer=False):
     commands = [
         "adapter driver remote_bitbang",
         "transport select jtag",
@@ -73,8 +74,8 @@ def openocd_configuration(bitbang_port, gdb_port, idcode, strict_idcode=False, t
         f"jtag newtap ditdah cpu -irlen 5 -expected-id 0x{idcode:08x}",
         "target create ditdah.cpu riscv -chain-position ditdah.cpu -coreid 0",
         "riscv expose_csrs 832",
-        "riscv set_mem_access abstract",
-        f"echo {ABSTRACT_ONLY}",
+        f"riscv set_mem_access {'progbuf' if program_buffer else 'abstract'}",
+        f"echo {PROGRAM_BUFFER_ONLY if program_buffer else ABSTRACT_ONLY}",
         "riscv set_command_timeout_sec 30",
         "ditdah.cpu configure -event resume-end {poll on}",
         "ditdah.cpu configure -event halted {poll off}",
@@ -231,7 +232,8 @@ def check_abstract_evidence(openocd_log, trace):
     for direction in ("read", "write"):
         if not re.search(rf"Succeeded to {direction} memory via abstract access\b", openocd_log, re.IGNORECASE):
             raise ValueError(f"OpenOCD log lacks a successful abstract memory {direction}")
-    reads = writes = 0
+    reads = writes = word_writes = 0
+    program = [0, 0]
     for line in trace.splitlines():
         fields = line.split()
         if not fields or fields[0] != "J":
@@ -242,15 +244,74 @@ def check_abstract_evidence(openocd_log, trace):
         address, operation, data = int(address), int(operation), int(data)
         if operation != 2:
             continue
-        if 0x20 <= address <= 0x2F or 0x38 <= address <= 0x3F:
+        if address in (0x20, 0x21):
+            word_writes += 1
+            program[address - 0x20] = data
+        if 0x22 <= address <= 0x2F or 0x38 <= address <= 0x3F:
             raise ValueError(f"Forbidden debug memory transport write at DMI {address:#x}")
-        if address == 0x17 and data >> 24 == 2:
-            writes += bool(data & (1 << 16))
-            reads += not bool(data & (1 << 16))
+        if address == 0x17:
+            if data >> 24 == 2:
+                writes += bool(data & (1 << 16))
+                reads += not bool(data & (1 << 16))
+            elif data >> 24 == 0 and data & (1 << 18):
+                for word in program:
+                    if word & 3 == 3 and word & 0x7F in (0x03, 0x23, 0x2F):
+                        raise ValueError("Forbidden debug memory transport: Program Buffer memory instruction")
     if not reads or not writes:
         raise ValueError("No observed abstract memory read/write command pair")
     return {"abstractMemoryReads": reads, "abstractMemoryWrites": writes,
-            "programBufferWrites": 0, "systemBusWrites": 0}
+            "programBufferWrites": word_writes, "programBufferLoads": 0,
+            "programBufferStores": 0, "systemBusWrites": 0}
+
+
+def check_program_buffer_evidence(openocd_log, trace):
+    if PROGRAM_BUFFER_ONLY not in openocd_log or READY not in openocd_log:
+        raise ValueError("OpenOCD did not confirm Program Buffer configuration and readiness")
+    if re.search(r"Succeeded to (?:read|write) memory via (?:abstract access|sysbus)", openocd_log, re.IGNORECASE):
+        raise ValueError("OpenOCD used a forbidden Program Buffer fallback")
+    for direction in ("read", "write"):
+        if not re.search(rf"Succeeded to {direction} memory via (?:program buffer|progbuf)\b", openocd_log, re.IGNORECASE):
+            raise ValueError(f"OpenOCD log lacks a successful Program Buffer memory {direction}")
+    words = set()
+    program = [0, 0]
+    writes = reads = stores = commands = postexec_only = 0
+    for line in trace.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "J":
+            continue
+        if len(fields) != 5:
+            raise ValueError("Malformed DMI observation")
+        _, _, address, operation, data = fields
+        address, operation, data = int(address), int(operation), int(data)
+        if operation != 2:
+            continue
+        if address in (0x20, 0x21):
+            words.add(address)
+            writes += 1
+            program[address - 0x20] = data
+        if 0x22 <= address <= 0x2F or 0x38 <= address <= 0x3F:
+            raise ValueError(f"Unexpected debug memory transport write at DMI {address:#x}")
+        if address == 0x17:
+            if data >> 24 == 2:
+                raise ValueError("Program Buffer acceptance used an abstract memory command")
+            if data >> 24 == 0 and data & (1 << 18):
+                commands += 1
+                postexec_only += not bool(data & (1 << 17))
+                for word in program:
+                    if word & 3 != 3:
+                        continue
+                    reads += word & 0x7F == 3
+                    stores += word & 0x7F == 0x23
+    if words != {0x20, 0x21}:
+        raise ValueError("Both Program Buffer words were not written")
+    if not reads or not stores:
+        raise ValueError("No observed Program Buffer load/store instruction pair")
+    if not postexec_only:
+        raise ValueError("No observed postexec-only command")
+    return {"abstractMemoryReads": 0, "abstractMemoryWrites": 0,
+            "programBufferWrites": writes, "programBufferWords": sorted(words),
+            "programBufferLoads": reads, "programBufferStores": stores,
+            "postexecCommands": commands, "postexecOnlyCommands": postexec_only, "systemBusWrites": 0}
 
 
 def abstract_metrics(trace):
@@ -322,7 +383,7 @@ def compare_baseline(baseline, output, report):
                                  abstract_metrics(current_trace.read_text()))
     for directory in (baseline, output):
         run = (summary if directory == baseline else report)["runs"][0]
-        if run["programBufferWrites"] or run["systemBusWrites"]:
+        if run["systemBusWrites"] or run.get("programBufferLoads", 0) or run.get("programBufferStores", 0):
             raise ValueError("Comparison contains a forbidden memory transport")
         log = (directory / "openocd-gdb/gdb.log").read_text().lower()
         if "matched." not in log or "mis-matched" in log or "load size 210" not in log:
@@ -466,7 +527,8 @@ def stop_process(process, timeout=5):
         process.wait(timeout)
 
 
-def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong_idcode=None, hardware=False):
+def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong_idcode=None, hardware=False,
+             program_buffer=False):
     directory.mkdir()
     trace, errors = directory / "simulator.trace", directory / "simulator.stderr"
     openocd_log, gdb_log = directory / "openocd.log", directory / "gdb.log"
@@ -480,7 +542,8 @@ def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong
             bitbang_port = wait_for_simulator(simulator, trace, args.timeout)
             gdb_port = reserve_port()
             configuration = openocd_configuration(bitbang_port, gdb_port, selected_idcode,
-                                                  strict_idcode=wrong_idcode is not None, triggers=hardware)
+                                                  strict_idcode=wrong_idcode is not None, triggers=hardware,
+                                                  program_buffer=program_buffer)
             (directory / "openocd.cfg").write_text("\n".join(configuration) + "\n")
             openocd = subprocess.Popen([str(tools["openocd"][0]), "-d", "-f", str(directory / "openocd.cfg")],
                                        stdout=openocd_output, stderr=subprocess.STDOUT, text=True)
@@ -518,7 +581,8 @@ def run_case(binary, image, tools, directory, idcode, args, expected=None, wrong
     if wrong_idcode is not None:
         record.update({"rejectedIdcode": selected_idcode, "actualIdcode": idcode, "rejected": True})
         return record
-    record.update(check_abstract_evidence(openocd_log.read_text(), trace_text))
+    evidence = check_program_buffer_evidence if program_buffer else check_abstract_evidence
+    record.update(evidence(openocd_log.read_text(), trace_text))
     record.update(check_execution(trace_text, expected, hardware=hardware))
     if hardware:
         record.update(check_trigger_evidence(trace_text, expected["done"]))
@@ -553,13 +617,16 @@ def main():
     parser.add_argument("--cycle-limit", type=lambda value: int(value, 0), default=50000000)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--hardware-break", action="store_true")
+    parser.add_argument("--program-buffer", action="store_true")
     args = parser.parse_args()
     if args.seed < 0 or args.seed > 0xFFFFFFFF or args.delay < 0 or args.cycle_limit <= 0 or args.timeout <= 0:
         parser.error("Invalid seed, delay, cycle limit or timeout")
+    if args.program_buffer and args.baseline:
+        parser.error("AAM throughput comparisons require abstract-only host acceptance")
     os.chdir(ROOT)
     rtl, output = args.rtl.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    report = {"scope": "real OpenOCD and GDB over JTAG remote_bitbang using abstract memory only",
+    report = {"scope": f"real OpenOCD and GDB over JTAG remote_bitbang using {'Program Buffer' if args.program_buffer else 'abstract memory only'}",
               "exitStatus": 1, "runs": [], "negativeControls": []}
     try:
         manifest_data = (rtl / "manifest.json").read_bytes()
@@ -594,10 +661,10 @@ def main():
                               "isa": software["isa"], "expectedSignature": expected["signature"],
                               "expectedProduct": expected["product"]}
         positive = run_case(binary, initial, tools, output / "openocd-gdb", idcode, args, expected=expected,
-                            hardware=args.hardware_break)
+                            hardware=args.hardware_break, program_buffer=args.program_buffer)
         report["runs"].append(positive)
         negative = run_case(binary, initial, tools, output / "wrong-idcode", idcode, args,
-                            wrong_idcode=idcode ^ 1)
+                            wrong_idcode=idcode ^ 1, program_buffer=args.program_buffer)
         report["negativeControls"].append(negative)
         if args.baseline:
             report["baselineComparison"] = compare_baseline(args.baseline, output, report)
@@ -612,7 +679,7 @@ def main():
         raise
     finally:
         (output / "summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print("PASS: OpenOCD/GDB abstract JTAG acceptance and wrong-IDCODE rejection")
+    print(f"PASS: OpenOCD/GDB {'Program Buffer' if args.program_buffer else 'abstract'} JTAG acceptance and wrong-IDCODE rejection")
 
 
 if __name__ == "__main__":

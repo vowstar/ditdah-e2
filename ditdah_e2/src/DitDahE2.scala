@@ -18,7 +18,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   // Keep retirement observation below the JVM method-size limit.
   private def observeRetirement(body: () => Unit): Unit = body()
   private def triggerActions(p: Parameters, csr: Interface[CsrIO], x: Referable[Instruction],
-      xValid: Referable[Bool], xUser: Referable[Bool], debugAccess: Referable[Bool],
+      xValid: Referable[Bool], xInjected: Referable[Bool], xUser: Referable[Bool], debugAccess: Referable[Bool],
       mValid: Referable[Bool], eligibleInterrupt: Referable[Bool], sleeping: Referable[Bool],
       debugResume: Referable[Bool], trap: Referable[Bool], interrupt: Referable[Bool],
       returning: Referable[Bool])(using Arena, Context, Block, InstanceContext): (Wire[Bool], Wire[Bool], Wire[Bool]) =
@@ -30,7 +30,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     debug := false.B
     if p.triggerCount == 2 then
       csr.trigger.get.pc := x.pc
-      csr.trigger.get.valid := xValid
+      csr.trigger.get.valid := xValid & !xInjected
       csr.trigger.get.user := xUser
       csr.trigger.get.debug := debugAccess
       csr.trigger.get.ready := !mValid & !eligibleInterrupt & !sleeping & !debugResume
@@ -50,13 +50,14 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     csr.operand := m.csrOperand
     csr.operation := m.csrOperation
     csr.writeRequested := m.csrWrite
-    csr.commit := complete & m.csr & !failed
+    val debugLocal = m.injected & m.csr & ((m.csrAddress === 0x7b0.U(12)) | (m.csrAddress === 0x7b1.U(12)))
+    csr.commit := complete & m.csr & !failed & !debugLocal
     csr.trap := trap | interrupt
     csr.trapPc := interrupt.?(architecturalPc, m.instruction.pc)
     csr.cause := interrupt.?(interruptCause, finalCause)
     csr.tval := interrupt.?(0.U(32), finalTval)
     csr.mret := returning
-    csr.retire := complete & !failed & !debugBreakpoint
+    csr.retire := complete & !failed & !debugBreakpoint & !m.injected
     io.interrupt.valid := interrupt & !coreReset.asBool
     io.interrupt.pc := architecturalPc
     io.interrupt.target := csr.trapTarget
@@ -67,6 +68,91 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.interrupt.csrMcause :<= csr.causeTrace
     io.interrupt.csrMtval :<= csr.valueTrace
     io.sleeping := sleeping
+  private def injectExecution(debug: Interface[DebugHartIO], io: Interface[CoreIO],
+      x: Reg[Instruction], xValid: Reg[Bool], xUser: Reg[Bool],
+      xInjected: Reg[Bool], xSequence: Reg[UInt], xTruncated: Reg[Bool],
+      m: Referable[Completion], mValid: Referable[Bool], complete: Referable[Bool], failed: Referable[Bool],
+      actualWriteback: Referable[Bool], writeback: Referable[UInt], debugLocalSelected: Referable[Bool],
+      debugStop: Referable[Bool], debugResume: Referable[Bool], coreReset: Referable[Reset])
+      (using Arena, Context, Block, InstanceContext): Unit =
+    debug.core.injection.ready := !xValid & !mValid & debugStop & !debugResume & !coreReset.asBool
+    debug.core.injectedIdle := !(xValid & xInjected) & !(mValid & m.injected)
+    debug.core.injectionDone.valid := complete & m.injected & !coreReset.asBool
+    debug.core.injectionDone.sequence := m.injectedSequence
+    debug.core.injectionDone.fault := complete & failed & m.injected
+    debug.core.injectionDone.ebreak := complete & m.injectedBreak & !failed
+    debug.core.localCsr.address := m.csrAddress
+    debug.core.localCsr.operand := m.csrOperand
+    debug.core.localCsr.operation := m.csrOperation
+    debug.core.localCsr.writeRequested := m.csrWrite
+    debug.core.localCsr.commit := complete & debugLocalSelected & m.csrWrite & !failed
+    io.debugExecution.get.valid := complete & m.injected & !coreReset.asBool
+    io.debugExecution.get.sequence := m.injectedSequence
+    io.debugExecution.get.pc := m.instruction.pc
+    io.debugExecution.get.word := m.instruction.word
+    io.debugExecution.get.length := m.instruction.length
+    io.debugExecution.get.rd := actualWriteback.?(m.rd, 0.U(5))
+    io.debugExecution.get.writes := actualWriteback
+    io.debugExecution.get.value := actualWriteback.?(writeback, 0.U(32))
+    io.debugExecution.get.fault := complete & failed & m.injected
+    io.debugExecution.get.ebreak := complete & m.injectedBreak & !failed
+    io.debugExecution.get.csr := m.csr
+    io.debugExecution.get.load := m.load
+    io.debugExecution.get.store := m.store
+    io.debugExecution.get.address := (m.load | m.store).?(m.address, 0.U(32))
+    val injectionFire = debug.core.injection.valid & debug.core.injection.ready
+    when(injectionFire) {
+      xValid := true.B
+      x.pc := (debug.core.injection.bits.sequence.asBits ## 0.B(1)).asUInt
+      x.word := debug.core.injection.bits.word
+      x.length := debug.core.injection.bits.length
+      x.fault := false.B
+      x.faultAddress := 0.U(32)
+      xUser := false.B
+      xInjected := true.B
+      xSequence := debug.core.injection.bits.sequence
+      xTruncated := debug.core.injection.bits.truncated
+    }
+
+  private def debugBackend(debug: Interface[DebugHartIO], csr: Interface[CsrIO], io: Interface[CoreIO],
+      registers: Seq[Reg[UInt]], debugAccess: Referable[Bool], debugInjectionActive: Referable[Bool],
+      debugDataOwner: Wire[Bool], programData: Wire[MemoryPort])
+      (using Arena, Context, Block, InstanceContext): Unit =
+    val register = debug.backend.register
+    val gpr = (register >= 0x1000.U(16)) & (register <= 0x101f.U(16))
+    val csrRegister = register <= 0x0fff.U(16)
+    debug.backend.readData := csrRegister.?(csr.readData, 0.U(32))
+    debug.backend.error := !(gpr | csrRegister) | (csrRegister & csr.illegal)
+    for index <- 1 to 31 do
+      when(register === (0x1000 + index).U(16)) {
+        debug.backend.readData := registers(index - 1)
+        when(debug.backend.writePulse) { registers(index - 1) := debug.backend.writeData }
+      }
+    when(debugAccess & !debugInjectionActive) {
+      csr.address := register.asBits.bits(11, 0).asUInt
+      csr.operand := debug.backend.writeData
+      csr.operation := 1.U(2)
+      csr.writeRequested := debug.backend.writeRequested
+      csr.commit := debug.backend.writePulse & csrRegister
+      csr.dataProtection.address := debug.protection.address
+      csr.dataProtection.size := debug.protection.size
+      csr.dataProtection.kind := debug.protection.write.?(1.U(2), 0.U(2))
+    }
+    debug.protection.allowed := csr.dataProtection.allowed
+    debug.protection.machine := csr.dataMachine
+    val debugMemory = debug.memory.request.valid | debug.memory.response.ready
+    debugDataOwner := (debugAccess & !debugInjectionActive) | debugMemory
+    debug.memory.request.ready := io.data.request.ready & debugMemory
+    debug.memory.response.valid := io.data.response.valid & debugMemory
+    debug.memory.response.bits :<= io.data.response.bits
+    when(debugMemory) {
+      io.data.request.valid := debug.memory.request.valid
+      io.data.request.bits :<= debug.memory.request.bits
+      io.data.response.ready := debug.memory.response.ready
+      programData.request.ready := false.B
+      programData.response.valid := false.B
+    }
+
   def architecture(p: Parameters) =
     val io = summon[Interface[CoreIO]]
     given ClockScope = ClockScope.posedge(io.clock)
@@ -96,6 +182,12 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     debugBreakUser := false.B
     val debugDataOwner = Wire(Bool())
     debugDataOwner := false.B
+    val debugInjectionActive = Wire(Bool())
+    debugInjectionActive := false.B
+    val debugEntry = Wire(Bool())
+    debugEntry := false.B
+    val debugLocalRead = Wire(UInt(32))
+    debugLocalRead := 0.U(32)
     val programData = Wire(new MemoryPort)
     io.data :<>= programData
     val fetch = Fetch.instantiate(p)
@@ -126,6 +218,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val xValid = RegInit(false.B)
     val x = Reg(new Instruction)
     val xUser = RegInit(false.B)
+    val xInjected = RegInit(false.B)
+    val xSequence = RegInit(0.U(3))
+    val xTruncated = RegInit(false.B)
     val mValid = RegInit(false.B)
     val m = Reg(new Completion)
     val sent = RegInit(false.B)
@@ -161,25 +256,26 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     programData.request.bits.operation := m.atomicOperation
     programData.response.ready := mValid & memory & sent
     val response = programData.response.valid & programData.response.ready
-    val csrError = m.csr & csr.io.illegal
+    val debugLocalSelected = m.injected & m.csr & ((m.csrAddress === 0x7b0.U(12)) | (m.csrAddress === 0x7b1.U(12)))
+    val csrError = m.csr & csr.io.illegal & !debugLocalSelected
     val protectionUpdate = mValid & m.csr & m.csrWrite & csr.io.protectionSelected & !csrError & !m.trap
     val synchronize = m.fenceI | protectionUpdate
     val synchronizing = mValid & synchronize & !m.trap
     val complete = mValid & (m.trap | denied | (!memory & (!synchronize | fetch.io.idle)) | response)
     val failed = m.trap | csrError | denied | (response & programData.response.bits.fault)
-    val trap = complete & failed
+    val trap = complete & failed & !m.injected
     val returning = complete & m.mret & !failed
     val waiting = complete & m.wfi & !failed
-    val synchronized = complete & synchronize & !failed
+    val synchronized = complete & synchronize & !failed & !m.injected
     val debugBreakpoint = complete & m.debugBreak & !failed
     val triggerInterrupt = localWake & csr.io.interruptsEnabled & !debugStep
-    val (triggerMatched, triggerNative, triggerDebug) = triggerActions(p, csr.io, x, xValid, xUser,
+    val (triggerMatched, triggerNative, triggerDebug) = triggerActions(p, csr.io, x, xValid, xInjected, xUser,
       debugAccess, mValid, triggerInterrupt, sleeping, debugResume, trap, interrupt, returning)
     if p.enableA then
       val permissionWrite = complete & m.csr & m.csrWrite & !failed &
         (csr.io.protectionSelected | (m.csrAddress === 0x300.U(12)))
       io.reservationClear.get := io.reset.asBool | systemReset | trap | interrupt | returning |
-        permissionWrite | debugAccess | debugResume
+        permissionWrite | debugEntry | debugResume
       io.dataDebug.get := debugDataOwner
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
     val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
@@ -194,14 +290,15 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(m.size === 1.U(2)) {
       loadValue := ((loaded.bit(15) & !m.unsignedLoad).?(0xffff.B(16), 0.B(16)) ## loaded.bits(15, 0)).asUInt
     }
-    val writeback = m.csr.?(csr.io.readData, m.load.?(loadValue, m.value))
-    io.retire.valid := complete & !debugBreakpoint & !coreReset.asBool
+    val writeback = m.csr.?(debugLocalSelected.?(debugLocalRead, csr.io.readData), m.load.?(loadValue, m.value))
+    val actualWriteback = complete & !debugBreakpoint & !failed & m.writes & (m.rd =/= 0.U(5)) & !coreReset.asBool
+    io.retire.valid := complete & !debugBreakpoint & !coreReset.asBool & !m.injected
     io.retire.userMode := m.userMode
     io.retire.pc := m.instruction.pc
     io.retire.word := m.instruction.word
     io.retire.nextPc := failed.?(csr.io.trapTarget, m.mret.?(csr.io.returnPc, m.nextPc))
-    io.retire.rd := io.retire.writes.?(m.rd, 0.U(5))
-    io.retire.writes := io.retire.valid & !failed & m.writes & (m.rd =/= 0.U(5))
+    io.retire.rd := (actualWriteback & !m.injected).?(m.rd, 0.U(5))
+    io.retire.writes := actualWriteback & !m.injected
     io.retire.value := io.retire.writes.?(writeback, 0.U(32))
     io.retire.trap := trap
     io.retire.cause := finalCause
@@ -253,11 +350,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       }
       when(trap | interrupt) { handlerPending := true.B }
     })
-    when(complete & !debugBreakpoint) { architecturalPc := io.retire.nextPc }
+    when(complete & !debugBreakpoint & !m.injected) { architecturalPc := io.retire.nextPc }
     when(debugResume) { architecturalPc := debugResumePc }
     when(interrupt) { architecturalPc := csr.io.trapTarget }
     for i <- 1 to 31 do
-      when(io.retire.writes & (m.rd === i.U(5))) { registers(i - 1) := writeback }
+      when(actualWriteback & (m.rd === i.U(5))) { registers(i - 1) := writeback }
 
     val decoded = Wire(UInt(32))
     val encodingLegal = Wire(Bool())
@@ -310,7 +407,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val isJal = opcode === 0x6f.B(7)
     val isJalr = (opcode === 0x67.B(7)) & (funct3 === 0.B(3))
     val isBreak = decoded === 0x00100073.U(32)
-    val isDebugBreak = isBreak & xUser.?(debugBreakUser, debugBreakMachine)
+    val isDebugBreak = isBreak & !xInjected & xUser.?(debugBreakUser, debugBreakMachine)
     val isCall = decoded === 0x00000073.U(32)
     val isFence = (opcode === 0x0f.B(7)) & (funct3 === 0.B(3))
     val isFenceI = (opcode === 0x0f.B(7)) & (funct3 === 1.B(3))
@@ -348,7 +445,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     arithmeticValue := 0.U(32)
     val advance = triggerNative | (xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
       (!(isCsr | isMret | isWfi | isFenceI) | !mValid) & !eligibleInterrupt & !sleeping &
-      (!isMultiplyDivide | x.fault | arithmeticReady) & !debugStop & !triggerMatched)
+      (!isMultiplyDivide | x.fault | arithmeticReady) & (!debugStop | xInjected) & !triggerMatched)
     io.mulDiv.start := false.B
     io.mulDiv.resultValid := false.B
     io.mulDiv.finish := false.B
@@ -360,9 +457,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       val arithmeticPending = RegInit(false.B)
       multiplyDivide.io.clock := io.clock
       multiplyDivide.io.reset := coreReset
-      multiplyDivide.io.cancel := trap | interrupt | debugStop
+      multiplyDivide.io.cancel := trap | interrupt | (debugStop & !debugInjectionActive)
       multiplyDivide.io.request.valid := xValid & isMultiplyDivide & !arithmeticPending &
-        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault & !debugStop & !triggerMatched
+        !loadUse & !serialM & !trap & !eligibleInterrupt & !sleeping & !x.fault & (!debugStop | xInjected) & !triggerMatched
       multiplyDivide.io.request.bits.operation := funct3.asUInt
       multiplyDivide.io.request.bits.left := a
       multiplyDivide.io.request.bits.right := b
@@ -374,11 +471,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       io.mulDiv.start := started
       io.mulDiv.resultValid := arithmeticPending & multiplyDivide.io.response.valid
       io.mulDiv.finish := finished
-      io.mulDiv.cancel := arithmeticPending & (trap | interrupt | debugStop)
+      io.mulDiv.cancel := arithmeticPending & (trap | interrupt | (debugStop & !debugInjectionActive))
       io.mulDiv.pc := x.pc
       io.mulDiv.value := multiplyDivide.io.response.valid.?(multiplyDivide.io.response.bits, 0.U(32))
       when(started) { arithmeticPending := true.B }
-      when(finished | trap | interrupt | debugStop) { arithmeticPending := false.B }
+      when(finished | trap | interrupt | (debugStop & !debugInjectionActive)) { arithmeticPending := false.B }
     io.loadUse := xValid & loadUse
     io.forward := advance & !m.load & (match1 | match2)
     io.memoryWait := mValid & memory & !complete
@@ -403,8 +500,10 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val badData = (isLoad | isStore | isAtomic) & (
       ((size === 2.U(2)) & (address.asBits.bits(1, 0) =/= 0.B(2))) |
       ((size === 1.U(2)) & address.asBits.bit(0)))
-    val systemFault = (isMret & xUser) | (isWfi & csr.io.wfiIllegal)
-    val fault = triggerNative | x.fault | !legal | (isBreak & !isDebugBreak) | isCall | badTarget | badData | systemFault
+    val injectedControl = xInjected & (isBranch | isJal | isJalr | isAuipc | isMret | isFenceI)
+    val systemFault = (isMret & xUser) | (isWfi & csr.io.wfiIllegal & !xInjected)
+    val fault = triggerNative | x.fault | xTruncated | injectedControl | !legal |
+      (isBreak & !xInjected & !isDebugBreak) | isCall | badTarget | badData | systemFault
     val cause = Wire(UInt(32))
     val tval = Wire(UInt(32))
     cause := 2.U(32)
@@ -454,6 +553,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.rs2Data := (use2 & legal & !x.fault).?(b, 0.U(32))
       m.userMode := xUser
       m.debugBreak := isDebugBreak
+      m.injected := xInjected
+      m.injectedSequence := xSequence
+      m.injectedBreak := xInjected & isBreak
       m.nextPc := jump.?(target, sequential)
       m.rd := bits.bits(11, 7).asUInt
       m.writes := isImmediate | isRegister | isMultiplyDivide | isBit | isAtomic | isLui | isAuipc | isLoad | isJal | isJalr | isCsr
@@ -472,7 +574,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.csrWrite := (funct3.bits(1, 0) === 1.B(2)) | (rs1 =/= 0.U(5))
       m.csrRead := isCsr & ((funct3.bits(1, 0) =/= 1.B(2)) | (bits.bits(11, 7) =/= 0.B(5)))
       m.mret := isMret
-      m.wfi := isWfi
+      m.wfi := isWfi & !xInjected
       m.fenceI := isFenceI
       m.trap := fault
       m.cause := cause
@@ -482,11 +584,14 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       xValid := true.B
       x :<= fetch.io.output.bits
       xUser := csr.io.userMode
+      xInjected := false.B
+      xSequence := 0.U(3)
+      xTruncated := false.B
     }
     when(waiting) { sleeping := !localWake & !debugStep }
     when(waking | trap | interrupt | debugStop | debugResume) { sleeping := false.B }
     when(trap | interrupt | returning | waiting | waking | synchronized) { xValid := false.B; mValid := false.B }
-    when(debugStop | debugResume) { xValid := false.B }
+    when(debugResume | (debugStop & !xInjected)) { xValid := false.B }
     if p.enableDebug then
       val dm = DebugModule.instantiate(p)
       val debug = DebugHart.instantiate(DebugHartParameters(p.resetVector, p.enableC, p.protectedMode))
@@ -501,7 +606,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       debug.io.core.fetchIdle := fetch.io.idle
       debug.io.core.architecturalPc := architecturalPc
       debug.io.core.userMode := csr.io.userMode
-      debug.io.core.completed := complete & !debugBreakpoint
+      debug.io.core.completed := complete & !debugBreakpoint & !m.injected
       debug.io.core.breakpoint := debugBreakpoint | triggerDebug
       debug.io.core.breakpointPc := triggerDebug.?(x.pc, m.instruction.pc)
       debugStop := debug.io.core.stop
@@ -513,39 +618,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       debugAccess := debug.io.debug.status.halted
       debugBreakMachine := debug.io.core.ebreakMachine
       debugBreakUser := debug.io.core.ebreakUser
+      debugInjectionActive := debug.io.core.injectionActive
+      debugEntry := debug.io.core.entry
+      debugLocalRead := debug.io.core.localCsr.readData
       systemReset := debug.io.core.coreReset
       io.systemReset.get := systemReset
-      val register = debug.io.backend.register
-      val gpr = (register >= 0x1000.U(16)) & (register <= 0x101f.U(16))
-      val csrRegister = register <= 0x0fff.U(16)
-      debug.io.backend.readData := csrRegister.?(csr.io.readData, 0.U(32))
-      debug.io.backend.error := !(gpr | csrRegister) | (csrRegister & csr.io.illegal)
-      for index <- 1 to 31 do
-        when(register === (0x1000 + index).U(16)) {
-          debug.io.backend.readData := registers(index - 1)
-          when(debug.io.backend.writePulse) { registers(index - 1) := debug.io.backend.writeData }
-        }
-      when(debugAccess) {
-        csr.io.address := register.asBits.bits(11, 0).asUInt
-        csr.io.operand := debug.io.backend.writeData
-        csr.io.operation := 1.U(2)
-        csr.io.writeRequested := debug.io.backend.writeRequested
-        csr.io.commit := debug.io.backend.writePulse & csrRegister
-        csr.io.dataProtection.address := debug.io.protection.address
-        csr.io.dataProtection.size := debug.io.protection.size
-        csr.io.dataProtection.kind := debug.io.protection.write.?(1.U(2), 0.U(2))
-      }
-      debug.io.protection.allowed := csr.io.dataProtection.allowed
-      debug.io.protection.machine := csr.io.dataMachine
-      val debugMemory = debugAccess | debug.io.memory.request.valid | debug.io.memory.response.ready
-      debugDataOwner := debugMemory
-      debug.io.memory.request.ready := io.data.request.ready & debugMemory
-      debug.io.memory.response.valid := io.data.response.valid & debugMemory
-      debug.io.memory.response.bits :<= io.data.response.bits
-      when(debugMemory) {
-        io.data.request.valid := debug.io.memory.request.valid
-        io.data.request.bits :<= debug.io.memory.request.bits
-        io.data.response.ready := debug.io.memory.response.ready
-        programData.request.ready := false.B
-        programData.response.valid := false.B
-      }
+      injectExecution(debug.io, io, x, xValid, xUser, xInjected, xSequence, xTruncated, m, mValid,
+        complete, failed, actualWriteback, writeback, debugLocalSelected, debugStop, debugResume, coreReset)
+      debugBackend(debug.io, csr.io, io, registers, debugAccess, debugInjectionActive, debugDataOwner, programData)

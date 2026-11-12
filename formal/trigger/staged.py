@@ -12,46 +12,40 @@ from formal.debug_transport.run import EXPECTED_RESET, check_cpu_receipt
 
 HERE = Path(__file__).resolve().parent
 PROFILE = "staged_current_facts"
-STRATEGY = {"profile": PROFILE, "configuration": "native"}
+STRATEGY = {"profile": PROFILE, "configuration": "injection"}
 FILES = ("staged.py", "collect_staged.tcl", "staged_helpers.sv", "collect_semantic.tcl", "semantic_helpers.sv", "collect_payload.tcl", "payload_helpers.sv", "collect_joint.tcl", "collect_store_state.tcl", "store_state_helpers.sv", "program_state_helpers.sv", "complete_setup_helpers.sv", "complete_state_helpers.sv", "complete_protocol_helpers.sv", "complete_cluster_helpers.sv", "complete_multiply_helpers.sv", "complete_illegal_helpers.sv")
 ORIGINALS = ('no_external_event', 'native_epc_metadata', 'native_cause_metadata', 'native_tval_metadata', 'native_control_metadata', 'native_hit_metadata', 'older_fault_cause', 'target_first_event_is_breakpoint', 'target_retry_has_no_trap', 'target_has_no_writeback_on_trap', 'target_single_retry', 'illegal_single_breakpoint', 'older_load_retires_first', 'older_fault_blocks_target', 'no_store_before_breakpoint', 'older_fault_blocks_store', 'no_multiply_before_breakpoint', 'multiply_has_target_identity', 'initial_dpc_zero', 'abstract_dpc_value', 'resume_pc_matches')
-HELPERS = ('rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_reverse_memory_system_decode')
-NATIVE_CONFIG = {
-    "name": "native", "helperGoals": list(HELPERS), "dutColdFacts": 112, "coldFacts": 113,
-    "dutColdExpressionSha256": "787a737d75c4f30d873a8531d22d002314584c10e254a1c016dcd26bb780b353",
-    "coldExpressionSha256": "bd7ef1a4b89d597082f80937289490e852945dc0e7417b680d99ea84847ba964",
-    "wrapperSha256": "356814749674be99b2c9db6422941c5144bbae3f0702c3ac3dd0e4ce26c5a7d1",
-    "collectorSha256": '8777b9a7c59da2730f92437ede7c34047bbf85842a53a5f8995742095db23faf',
-    "helperSha256": "c74e971b3c386e618783afb2d60d96df9b06e73d1030f1cb013a416d561d22d9",
-}
+HELPERS = ('rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode')
+INJECTION_CONFIG = {'coldExpressionSha256': 'cddf44ae6e073813e60ded592a417e0110e7f0b4161dd629a3eb975937faf6cc', 'coldFacts': 123, 'collectorSha256': '02d3a9efc913bc2bf2049bff6e54449d57f84d1e1ee247fc7032d082c9f197e8', 'dutColdExpressionSha256': '8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0', 'dutColdFacts': 122, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode'], 'helperSha256': '749262b3273f28caec4338b579d61b8ad48986275e09b15af78d52497c528694', 'name': 'injection', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
+
 HINT_GROUPS = (('initial_dpc_zero',), ('no_external_event',), ('native_epc_metadata', 'native_cause_metadata'), ('native_tval_metadata', 'native_control_metadata', 'native_hit_metadata'), ('target_retry_has_no_trap', 'target_single_retry', 'illegal_single_breakpoint', 'older_load_retires_first'), ('target_has_no_writeback_on_trap', 'no_store_before_breakpoint', 'no_multiply_before_breakpoint', 'multiply_has_target_identity'))
 
 
 SEMANTIC_HELPERS = ('core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata')
-SEMANTIC_CONFIG = {'coldExpressionSha256': 'bd7ef1a4b89d597082f80937289490e852945dc0e7417b680d99ea84847ba964', 'coldFacts': 113, 'collectorSha256': 'f45c82baf1cc6d2ee7562485624c2cd8e5edbe317af38d5202b7147ad2352707', 'dutColdExpressionSha256': '787a737d75c4f30d873a8531d22d002314584c10e254a1c016dcd26bb780b353', 'dutColdFacts': 112, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_reverse_memory_system_decode', 'core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata'], 'helperSha256': '15380c0c00b68d7a8f887e04932d39c6e859e8cc824dac5d68d7178ad6180fcd', 'name': 'semantic', 'wrapperSha256': '356814749674be99b2c9db6422941c5144bbae3f0702c3ac3dd0e4ce26c5a7d1'}
+SEMANTIC_CONFIG = {'coldExpressionSha256': 'cddf44ae6e073813e60ded592a417e0110e7f0b4161dd629a3eb975937faf6cc', 'coldFacts': 123, 'collectorSha256': 'b484c1639fdf0bcd7f0a1728048afe0bb987ddbfc009459e6f55d0d0f548ed59', 'dutColdExpressionSha256': '8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0', 'dutColdFacts': 122, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode', 'core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata'], 'helperSha256': '356dfe265c8eec191f6102c263d6d66f8baa779a12e140589c84f2d2650f2240', 'name': 'injection-semantic', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
 
 
 PAYLOAD_HELPERS = ('core_setup_transaction_payload_metadata', 'core_setup_exact_command_payload')
 PAYLOAD_COVERS = ('cover_target_breakpoint', 'cover_older_fault_event', 'cover_older_load_accepted', 'cover_native_epc', 'cover_native_cause', 'cover_native_tval', 'cover_native_control', 'cover_native_hit', 'cover_multiply_start', 'cover_multiply_done', 'cover_target_normal', 'cover_target_retry', 'cover_multiply_value', 'cover_completion', 'cover_metadata_complete', 'cover_store_finish', 'cover_multiply_finish', 'cover_illegal_finish', 'cover_older_fault', 'cover_resume_dpc', 'cover_first_dmi', 'cover_cold_reset', 'cover_setup_guard_07a2', 'cover_setup_guard_07a1', 'cover_setup_guard_0305')
-PAYLOAD_CONFIG = {**SEMANTIC_CONFIG, "name": 'payload-semantic', "helperGoals": [*SEMANTIC_CONFIG["helperGoals"], *PAYLOAD_HELPERS],
-                  "helperSha256": '2ddb32b98d4e4d17bb0806b962abf00243e942f414175c39434d70406972d476', "collectorSha256": 'd2c7dee97c88a3620112ec5179cbc091af63cb3b148d4575b699293e11774606'}
+PAYLOAD_CONFIG = {**SEMANTIC_CONFIG, "name": 'injection-payload-semantic', "helperGoals": [*SEMANTIC_CONFIG["helperGoals"], *PAYLOAD_HELPERS],
+                  "helperSha256": '0f8835965ae765431d67cbb271369e38034b664a4d9995db286b1b555a23f4e5', "collectorSha256": '1b04615808145084779ea2e16c897885ef518701d804b007f3c46acf7ff3cf38'}
 
 
-JOINT_CONFIG = {**PAYLOAD_CONFIG, "name": 'payload-joint', "collectorSha256": '243aeae2bb4bb9197808b4843f5138303b3408ef61aa73a2220b110efb6f4439'}
+JOINT_CONFIG = {**PAYLOAD_CONFIG, "name": 'injection-payload-joint', "collectorSha256": 'caefbe8c9a3c1409055d261174135f09af924111a76dfd93080e3e831a1ca9ab'}
 
 
 STORE_STATE_HELPERS = ("core_store_source_state", "core_armed_target_capture", "core_store_value_owner_metadata", "core_store_configuration_history")
-STORE_STATE_CONFIG = {**JOINT_CONFIG, "name": 'store-state',
+STORE_STATE_CONFIG = {**JOINT_CONFIG, "name": 'injection-store-state',
     "helperGoals": [*JOINT_CONFIG["helperGoals"], *STORE_STATE_HELPERS],
-    "collectorSha256": 'b02015da4286dbe2764347f5c64168f220943a7f87fd1819168fc5c1467c78fd', "helperSha256": 'd2639d2f1a602a2672af733b1a98181a41810bef1ac8df1bbefe85022ccb92ae'}
+    "collectorSha256": 'ef60ea4bc60c543040b4718a5f3c5b5d902da8cec5eb16b6f8acaac355da863d', "helperSha256": 'd2639d2f1a602a2672af733b1a98181a41810bef1ac8df1bbefe85022ccb92ae'}
 STORE_EVENT_PRIORITY = ("target_first_event_is_breakpoint", "target_retry_has_no_trap", "target_single_retry",
                         "older_load_retires_first", "no_store_before_breakpoint")
 
 
 PROGRAM_STATE_HELPERS = ("core_store_source_state", "core_armed_target_capture", "core_store_value_owner_metadata", "core_program_configuration_history")
-PROGRAM_STATE_CONFIG = {**JOINT_CONFIG, "name": 'program-state',
+PROGRAM_STATE_CONFIG = {**JOINT_CONFIG, "name": 'injection-program-state',
     "helperGoals": [*JOINT_CONFIG["helperGoals"], *PROGRAM_STATE_HELPERS],
-    "collectorSha256": 'b02015da4286dbe2764347f5c64168f220943a7f87fd1819168fc5c1467c78fd', "helperSha256": '0b698cbda65b828346ddf86df8103b74436637100f2a98822dffa4e761aca59c'}
+    "collectorSha256": 'ef60ea4bc60c543040b4718a5f3c5b5d902da8cec5eb16b6f8acaac355da863d', "helperSha256": '0b698cbda65b828346ddf86df8103b74436637100f2a98822dffa4e761aca59c'}
 
 
 def program_state_schedule():
@@ -66,12 +60,12 @@ def program_state_schedule():
 COMPLETE_STATE_HELPER = "core_complete_target_trap_metadata"
 COMPLETE_STATE_SHA256 = '4de96db901fd34066d5ec9bcc2bbb036ebea31168c091f4d487d38f99bcd083d'
 COMPLETE_PROTOCOL_SHA256 = '51bcacb02c35f86dbfe4c5ec4b69c23b103d75a4a0fd79ed3f20f0d5bbb5513b'
-COMPLETE_CLUSTER_SHA256 = '27cc1dc1b17eeac21684545ca3fdc0a16ccba0bf547cf9260af611f15e7e8a3c'
-COMPLETE_MULTIPLY_SHA256 = 'f03378857a9a4170142bdbea0493e0cf53ea72e78d8dc85a7ff4d69281a26793'
-COMPLETE_ILLEGAL_SHA256 = '44e15792e0cb47f0bdaf162574476f70f951e40463541b89f1f33dcfa3bdcf73'
+COMPLETE_CLUSTER_SHA256 = '178be551e6ed96fde2eb863be184e679d7e5e29bb3afd3dcb44affb39dd53f26'
+COMPLETE_MULTIPLY_SHA256 = '0e3c8bd87c521adabfc2f081b0634914cd3084baf35e03e7d7556ab1d1c6cc28'
+COMPLETE_ILLEGAL_SHA256 = 'd7109855ab7fef670f67512fdd86004099b74719259c9db4dbdac26daede7a5a'
 
-STORE_COMPLETE_CONFIG = {**STORE_STATE_CONFIG, "helperGoals": [*STORE_STATE_CONFIG["helperGoals"], COMPLETE_STATE_HELPER], "name": 'store-complete', "helperSha256": 'b422d847eb95c971dcae972c2f70d9359885470554799e8467a9a5cec64c1731'}
-PROGRAM_COMPLETE_CONFIG = {**PROGRAM_STATE_CONFIG, "helperGoals": [*PROGRAM_STATE_CONFIG["helperGoals"], COMPLETE_STATE_HELPER], "name": 'program-complete', "helperSha256": 'b422d847eb95c971dcae972c2f70d9359885470554799e8467a9a5cec64c1731'}
+STORE_COMPLETE_CONFIG = {**STORE_STATE_CONFIG, "helperGoals": [*STORE_STATE_CONFIG["helperGoals"], COMPLETE_STATE_HELPER], "name": 'injection-store-complete', "helperSha256": 'b422d847eb95c971dcae972c2f70d9359885470554799e8467a9a5cec64c1731'}
+PROGRAM_COMPLETE_CONFIG = {**PROGRAM_STATE_CONFIG, "helperGoals": [*PROGRAM_STATE_CONFIG["helperGoals"], COMPLETE_STATE_HELPER], "name": 'injection-program-complete', "helperSha256": 'b422d847eb95c971dcae972c2f70d9359885470554799e8467a9a5cec64c1731'}
 COMPLETE_NAMES = (STORE_COMPLETE_CONFIG["name"], PROGRAM_COMPLETE_CONFIG["name"])
 
 
@@ -337,7 +331,7 @@ def build_payload(plan, contents, collector, template, config):
     return plan, contents
 
 
-def configuration(name="native"):
+def configuration(name="injection"):
     if name in COMPLETE_NAMES:
         return copy.deepcopy(STORE_COMPLETE_CONFIG if name == STORE_COMPLETE_CONFIG["name"] else PROGRAM_COMPLETE_CONFIG)
     if name == PROGRAM_STATE_CONFIG["name"]:
@@ -346,11 +340,11 @@ def configuration(name="native"):
         return copy.deepcopy(STORE_STATE_CONFIG)
     if name == JOINT_CONFIG["name"]:
         return copy.deepcopy(JOINT_CONFIG)
-    require(name in ("native", "semantic", "payload-semantic"), "Unsupported staged source configuration: " + str(name))
-    return copy.deepcopy(PAYLOAD_CONFIG if name == "payload-semantic" else SEMANTIC_CONFIG if name == "semantic" else NATIVE_CONFIG)
+    require(name in ("injection", "injection-semantic", "injection-payload-semantic"), "Unsupported staged source configuration: " + str(name))
+    return copy.deepcopy(PAYLOAD_CONFIG if name == "injection-payload-semantic" else SEMANTIC_CONFIG if name == "injection-semantic" else INJECTION_CONFIG)
 
 
-def strategy(name="native"):
+def strategy(name="injection"):
     configuration(name)
     return {"profile": PROFILE, "configuration": name}
 
@@ -372,7 +366,7 @@ def artifacts(name):
         return ("collect_store_state.tcl", "store_state_helpers.sv")
     if name == JOINT_CONFIG["name"]:
         return ("collect_joint.tcl", "payload_helpers.sv")
-    return (("collect_payload.tcl", "payload_helpers.sv") if name == "payload-semantic" else ("collect_semantic.tcl", "semantic_helpers.sv") if name == "semantic" else
+    return (("collect_payload.tcl", "payload_helpers.sv") if name == "injection-payload-semantic" else ("collect_semantic.tcl", "semantic_helpers.sv") if name == "injection-semantic" else
             ("collect_staged.tcl", "staged_helpers.sv"))
 
 
@@ -382,7 +376,7 @@ def budgets(name):
         return (960, 1080)
     if name in (JOINT_CONFIG["name"], STORE_STATE_CONFIG["name"], PROGRAM_STATE_CONFIG["name"]):
         return (960, 1080)
-    return (960, 1080) if name in ("semantic", "payload-semantic") else (840, 960)
+    return (960, 1080) if name in ("injection-semantic", "injection-payload-semantic") else (840, 960)
 
 
 def check_cold_collector(collector, config):
@@ -485,7 +479,7 @@ def query_schedule(helpers=HELPERS, source_configuration=None):
     return result
 
 
-def build(plan, contents, collector, fragment, source_configuration="native"):
+def build(plan, contents, collector, fragment, source_configuration="injection"):
     config = configuration(source_configuration)
     check_cold_collector(collector, config)
     if source_configuration in COMPLETE_NAMES:
@@ -509,9 +503,9 @@ def build(plan, contents, collector, fragment, source_configuration="native"):
             return build_store_state(plan, contents, collector, fragment, config)
         return build(plan, contents, (HERE / "collect_joint.tcl").read_bytes(),
                      (HERE / "payload_helpers.sv").read_bytes(), JOINT_CONFIG["name"])
-    if source_configuration in ("payload-semantic", "payload-joint"):
+    if source_configuration in ("injection-payload-semantic", "injection-payload-joint"):
         return build_payload(plan, contents, collector, fragment, config)
-    if source_configuration == "semantic":
+    if source_configuration == "injection-semantic":
         return build_semantic(plan, contents, collector, fragment, config)
     require(plan["goals"] == list(ORIGINALS) and plan["covers"] == [] and plan["expected"] == "proven" and
             plan["top"] == "trigger_core_formal", "Staged flow requires the original core safety scope")
@@ -540,7 +534,7 @@ def build(plan, contents, collector, fragment, source_configuration="native"):
     plan["initialState"] = {**plan["dutInitialState"], "profile": "implemented_cold_reset_with_geometry_observer",
         "resetFacts": config["coldFacts"], "dutResetFacts": config["dutColdFacts"], "observerResetFacts": 1,
         "previousResetExpressionSha256": config["dutColdExpressionSha256"], "addedResetFacts": 1,
-        "scopeChange": "DUT cold112 unchanged; one read-only epoch is1 after implemented cold reset",
+        "scopeChange": "DUT cold122 unchanged; one read-only epoch is1 after implemented cold reset",
         "dutResetExpressionSha256": config["dutColdExpressionSha256"], "resetExpressionSha256": config["coldExpressionSha256"]}
     contents["plan.tcl"] = plan_tcl(plan, config)
     plan["inputs"] = sorted(contents)
@@ -567,7 +561,7 @@ def build_semantic(plan, contents, collector, fragment, config):
     require(hashlib.sha256(collector).hexdigest() == config["collectorSha256"] and
             hashlib.sha256(fragment).hexdigest() == config["helperSha256"], "Semantic reviewed source differs")
     plan, contents = build(plan, contents, (HERE / "collect_staged.tcl").read_bytes(),
-                           (HERE / "staged_helpers.sv").read_bytes(), "native")
+                           (HERE / "staged_helpers.sv").read_bytes(), "injection")
     original = contents["trigger_core_formal.sv"]
     names = re.findall(rb"\bwire\s*(?:\[[^]]+\]\s*)?(\w+)", fragment)
     require(len(names) == len(set(names)) and not set(names).intersection(re.findall(rb"\b\w+\b", original)),
