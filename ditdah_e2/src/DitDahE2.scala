@@ -597,6 +597,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       val debug = DebugHart.instantiate(DebugHartParameters(p.resetVector, p.enableC, p.protectedMode))
       dm.io.clock := io.clock
       dm.io.reset := io.reset
+      if p.enableSba then io.systemBus.get :<>= dm.io.systemBus.get
       if p.enableJtag then DitDahE2DebugTransport.connect(p, io.clock, io.reset, io.jtag.get, dm.io.dmi)
       else dm.io.dmi :<>= io.dmi.get
       debug.io.clock := io.clock

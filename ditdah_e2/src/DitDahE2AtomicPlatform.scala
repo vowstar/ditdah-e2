@@ -66,12 +66,22 @@ object DitDahE2AtomicPlatform extends Generator[PlatformParameters, PlatformLaye
     timer.io.clock := io.clock
     timer.io.reset := platformReset
     router.io.instruction :<>= core.io.instruction
-    router.io.data :<>= core.io.data
+    if p.core.enableSba then
+      val arbiter = MemoryArbiter.instantiate(p.core)
+      arbiter.io.clock := io.clock
+      arbiter.io.reset := platformReset
+      arbiter.io.first :<>= core.io.data
+      arbiter.io.second :<>= core.io.systemBus.get
+      arbiter.io.firstDebug := core.io.dataDebug.get
+      router.io.data :<>= arbiter.io.output
+      shared.io.dataDebug := arbiter.io.outputDebug
+    else
+      router.io.data :<>= core.io.data
+      shared.io.dataDebug := core.io.dataDebug.get
     shared.io.clock := io.clock
     shared.io.reset := platformReset
     shared.io.instruction :<>= router.io.memoryInstruction
     shared.io.data :<>= router.io.memoryData
-    shared.io.dataDebug := core.io.dataDebug.get
     bus.io.instruction :<>= shared.io.externalInstruction
     bus.io.data :<>= shared.io.externalData
     atomic.io.clock := io.clock

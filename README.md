@@ -1,91 +1,83 @@
 # DitDah-E2
 
-DitDah-E2 is a three-stage RV32 processor for embedded control.
-It issues at most one instruction per cycle and preserves program order.
-The full configuration enables RV32IMC, Zicsr, Zicntr, Zifencei, A, Zba, Zbb, Zbs, protectedMode and debug with an explicit JTAG IDCODE.
-It includes precise traps, software, timer and external interrupts, counters, MRET and WFI.
+DitDah-E2 is a configurable 32-bit RISC-V processor for embedded control.
+Its three-stage F / X / M pipeline is single issue and executes in program order.
+It includes precise traps, machine interrupts, counters, MRET and WFI, with optional memory protection, atomics and JTAG debugging.
 
-| Option | Default | Effect |
+| Instruction configuration | ISA string |
+| --- | --- |
+| Default | `RV32IMC_Zicntr_Zicsr_Zifencei` |
+| All instruction options | `RV32IMAC_Zicntr_Zicsr_Zifencei_Zba_Zbb_Zbs` |
+
+Use the `ilp32` ABI. For GCC, use the lowercase ISA string with `-march` and `-mabi=ilp32`.
+Privilege modes, PMP and Debug are configured separately from the ISA string.
+
+| Option | Default | Capability |
 | --- | --- | --- |
-| `enableM`, `enableC` | True | Integer multiplication and division, compressed instructions |
-| `protectedMode` | False | M/U privilege modes, counter permissions and 16 PMP entries |
-| `enableDebug` | False | Synchronous DMI, halt, resume, single step, abstract access and a two-word Program Buffer |
-| `enableJtag` | False | JTAG DTM/CDC instead of external DMI; requires `enableDebug` and `jtagIdcode` |
-| `enableZba`, `enableZbb`, `enableZbs` | False | Standard address, basic and single-bit operations |
-| `enableA` | False | Word atomics through an atomic memory interface |
-| `triggerCount` | 0 | Zero or two execute-address mcontrol triggers; two requires `enableDebug` |
+| `enableM`, `enableC` | `true` | Integer multiplication/division and compressed instructions |
+| `enableZba`, `enableZbb`, `enableZbs` | `false` | Address, basic and single-bit operations |
+| `enableA` | `false` | Word LR/SC and AMOs with a shared atomic memory endpoint |
+| `protectedMode` | `false` | M/U privilege modes, counter permissions and 16 PMP entries |
+| `enableDebug` | `false` | Halt, resume, step, abstract register/memory access and a two-word Program Buffer |
+| `enableJtag` | `false` | JTAG DTM/CDC; requires Debug and an explicit `jtagIdcode` |
+| `triggerCount` | `0` | Zero or two execute-address triggers; two requires Debug |
+| `enableSba` | `false` | 32-bit system bus addressing with 8/16/32-bit accesses; requires Debug |
 
-Protected configurations support only M and U modes; S mode and an MMU are absent.
+The default privilege mode is M. Protected configurations add U; S mode and an MMU are absent.
+Debug supports synchronous DMI or JTAG. SBA accesses memory while the hart runs or is halted.
 
-## Build
+## Build and integrate
+
+Enter the pinned Nix environment and generate the default SystemVerilog:
 
 ```sh
-nix build .#default .#software --no-link
 nix develop .
+make rtl
 ```
 
-The Nix lock pins Zaozi and CIRCT. Nix reads Git-tracked files.
-`python3 scripts/build_rtl.py --config input.json --output result/rtl` generates SystemVerilog.
-The JSON configuration accepts the options above and `resetVector`, which defaults to zero.
-The reset address must be halfword aligned with C enabled, otherwise word aligned.
+The Nix lock pins Zaozi, CIRCT and software tools. Generated RTL and its configuration/source/tool manifest are in `result/rtl/`.
+Supply options in a JSON file; `resetVector` defaults to zero and requires halfword alignment with C, otherwise word alignment.
+
+```sh
+printf '%s\n' '{"enableDebug":true,"enableSba":true}' > result/debug.json
+python3 scripts/build_rtl.py --config result/debug.json --output result/debug-rtl
+```
+
+The core exposes separate instruction and data request/response ports, plus a separate system bus master when SBA is enabled.
+`DitDahE2Platform` connects these to console/timer devices and AXI4-Lite memory; it requires A disabled.
+`DitDahE2AtomicPlatform` requires A enabled and serializes all SRAM writers through the shared atomic endpoint, including SBA and external competitors.
+
+```sh
+make platform PLATFORM_OUTPUT=result/platform
+printf '%s\n' '{"enableA":true}' > result/atomic.json
+make atomic-platform CONFIG=result/atomic.json PLATFORM_OUTPUT=result/atomic
+make software
+```
+
+[Integration contracts](doc/microarchitecture.md) define stage ownership, memory completion and reset behavior.
+[System bus access](doc/debug-system-bus.md) describes registers, arbitration, physical addressing and debugger use.
 
 ## Verify
-
-Run compliance and functional signoff:
 
 ```sh
 make verify-compliance
 make verify-signoff
 ```
 
-Verification combines simulation, independent architectural models, bounded formal checks and commercial proofs.
-Commercial proof verdicts govern acceptance; open-source runs provide reference evidence.
-Use a zero `resetVector` for `verify-signoff`, `verify-formal`, `verify-throughput` and RVFI profiles.
-RVFI requires A and debug disabled; B checks require all three bit options with M and C disabled. These are bounded checks, not complete ISA conformance or physical signoff.
+Signoff combines independent architectural models, protocol checks, bounded formal checks and real OpenOCD/GDB sessions.
+`make verify-sba` runs SBA register, DMI, arbiter, platform and sysbus-only debugger checks; `SBA_OUTPUT` selects a fresh output directory.
+`make verify-trigger-host` checks GDB hardware breakpoints; `make verify-program-host` selects Program Buffer memory access.
+[Architectural tests](test/test_isa/README.md) document ISA profiles and signature comparisons. `make verify-sail` checks instruction events and signatures with the independent Sail model.
 
-```sh
-make verify-rvfi RVFI_RTL=result/rtl RVFI_OUTPUT=result/rvfi
-printf '%s\n' '{"resetVector":2147483648}' > result/reset.json
-python3 scripts/build_rtl.py --config result/reset.json --output result/isa-rtl
-make verify-sail SAIL_PROFILES=imc=result/isa-rtl SAIL_OUTPUT=result/sail
-```
-
-[Architectural tests](test/test_isa/README.md) lists other ISA profiles. Sail checks instruction events and memory signatures from one ELF, excluding external interrupts, debugger intervention and external time.
-
-### Platforms and commercial arithmetic
-
-`make PLATFORM_OUTPUT=result/platform-check verify-platform` executes a timer program through the AXI4-Lite adapter and console.
-`make verify-debug-module` checks direct DMI commands, automatic execution and negative controls. `make CONFIG=input.json verify-debug` requires direct DMI debug enabled and a zero reset address. `make verify-jtag` checks asynchronous transport.
-`make DEBUG_HOST_OUTPUT=result/jtag-host verify-debug-host` runs OpenOCD/GDB with abstract memory access; `make verify-program-host` uses the two-word Program Buffer. `make verify-program-buffer` checks injected execution and native-state isolation.
-`make verify-trigger` checks CSR and core trigger behavior; `make verify-trigger-host` checks a real GDB hardware breakpoint.
-`make CONFIG=input.json PLATFORM_OUTPUT=result/atomic-check verify-atomic` uses the shared SRAM platform with the default map and a zero reset address.
-Use this configuration for its complete program collection:
-
-```json
-{"enableA": true, "enableDebug": true, "protectedMode": true}
-```
-
-`DitDahE2Platform` requires A disabled. `DitDahE2AtomicPlatform` requires A enabled.
-
-`make verify-arithmetic` requires licensed JG as `jg` or `JG_BIN` and generated M-enabled RTL in `ARITHMETIC_RTL`.
-It proves 32-bit unit results after initial reset from native properties and independent Z3 rules.
-`ARITHMETIC_OUTPUT/replay/result.json` reports `operationsAccepted=8` and `fullUnitMProven=true` for a complete run.
-This is a full-unit arithmetic proof, not a full-core proof or complete RVFI coverage.
-`make DEBUG_TRANSPORT_OUTPUT=result/debug-commercial verify-debug-commercial` requires licensed JG and proves transport safety with covers and negative controls under the documented reset and digital-CDC assumptions. `make DEBUG_ABSTRACT_OUTPUT=result/debug-abstract-commercial verify-debug-abstract-commercial` similarly proves abstract execution, fresh operands, exactly-once updates and Program Buffer response ownership.
-`make verify-trigger-commercial TRIGGER_PREPARE_ARGS='--flow staged --staged-configuration injection-program-complete'` adds helper assertions for store, multiply and illegal-instruction cases.
-`make verify-trigger-commercial TRIGGER_PREPARE_ARGS='--flow staged --staged-configuration injection-store-complete'` adds helpers for the store case. Both require the [full trigger gate](doc/microarchitecture.md#verification-scope). `make verify-program-commercial` adds standalone Hart proofs and bounded full-core Program Buffer witnesses, not complete-core or complete-debug proofs.
-
-### Outputs and reports
-
-Use new directories for `PLATFORM_OUTPUT`, `GENERIC_OUTPUT`, `DEBUG_LATENCY_OUTPUT`, `PMP_DATA_OUTPUT`, `INTERRUPT_OUTPUT`, `FETCH_PERFORMANCE_OUTPUT`, `ISA_MENVCFG_OUTPUT`, `RVFI_OUTPUT`, `SAIL_OUTPUT`, `ARITHMETIC_OUTPUT`, `JTAG_OUTPUT`, `JTAG_CORE_OUTPUT`, `DEBUG_HOST_OUTPUT`, `DEBUG_TRANSPORT_OUTPUT`, `DEBUG_MODULE_OUTPUT`, `DEBUG_ABSTRACT_OUTPUT`, `TRIGGER_OUTPUT`, `TRIGGER_HOST_OUTPUT`, `TRIGGER_COMMERCIAL_OUTPUT`, `PROGRAM_OUTPUT`, `PROGRAM_HART_OUTPUT`, `PROGRAM_HOST_OUTPUT`, `PROGRAM_CORE_OUTPUT` and `PROGRAM_COMMERCIAL_OUTPUT`.
-Set `SAIL_PROFILES`, `RVFI_RTL` and `ARITHMETIC_RTL` when selecting generated inputs.
-Reports are written under `result/`, including `result/verification/summary.json` and `ARITHMETIC_OUTPUT/replay/result.json`.
-RVFI and Sail write `summary.json` under their selected output directories.
-[Integration](doc/microarchitecture.md) defines the memory and reset contracts.
+Commercial proofs have separate targets: `verify-arithmetic`, `verify-debug-commercial`, `verify-debug-abstract-commercial`, `verify-program-commercial`, `verify-trigger-commercial` and `verify-sba-commercial`.
+They require licensed tools and input-bound reports. Open-source formal runs provide reference evidence; accepted commercial verdicts govern the declared proof scope.
+Unit proofs, bounded core witnesses and fixed-program trigger proofs do not establish a full-core proof, complete ISA certification or physical signoff.
+See [verification scope](doc/microarchitecture.md#verification-scope) and the SBA contract for assumptions and exclusions.
+Reports record the selected configuration, source and RTL hashes, tools, commands and results under the chosen output directory.
 
 ## License
 
-Project-authored files use the MIT license. `REUSE.toml` records file declarations.
+Project-authored files use the [MIT license](LICENSE). `REUSE.toml` records file declarations.
 
 ## Credits
 

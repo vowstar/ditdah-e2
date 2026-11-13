@@ -9,11 +9,12 @@ case class Parameters(resetVector: Long = 0, enableM: Boolean = true, enableC: B
                       protectedMode: Boolean = false, enableDebug: Boolean = false, enableA: Boolean = false,
                       enableZba: Boolean = false, enableZbb: Boolean = false, enableZbs: Boolean = false,
                       enableJtag: Boolean = false, jtagIdcode: Option[Long] = None,
-                      triggerCount: Int = 0) extends Parameter:
+                      triggerCount: Int = 0, enableSba: Boolean = false) extends Parameter:
   require(resetVector >= 0 && resetVector <= 0xffffffffL, "resetVector must fit RV32")
   require((resetVector & (if enableC then 1 else 3)) == 0, "resetVector must satisfy instruction alignment")
   require(triggerCount == 0 || triggerCount == 2, "triggerCount must be zero or two")
   require(triggerCount == 0 || enableDebug, "Execute triggers require Debug")
+  require(!enableSba || enableDebug, "System bus access requires Debug")
   require(!enableJtag || enableDebug, "JTAG transport requires Debug")
   require(jtagIdcode.forall(id => id > 0 && id <= 0xffffffffL && (id & 1) == 1),
     "JTAG IDCODE must be an odd unsigned 32-bit value")

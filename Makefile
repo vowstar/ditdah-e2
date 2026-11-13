@@ -253,7 +253,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module
+verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module verify-sba
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py
@@ -285,3 +285,43 @@ verify-generic: rtl
 verify-compliance:
 	python3 -m unittest discover -s test -p 'test_*.py'
 	reuse lint
+
+SBA_OUTPUT ?= result/sba
+
+.PHONY: verify-sba verify-sba-unit verify-sba-platform verify-sba-host verify-sba-reference verify-sba-commercial
+verify-sba: verify-sba-unit verify-sba-platform verify-sba-host
+
+verify-sba-unit:
+	mkdir -p "$(SBA_OUTPUT)/unit"
+	printf '%s\n' '{"enableDebug":true,"enableSba":true}' > "$(SBA_OUTPUT)/unit/input.json"
+	python3 -m unittest test.test_sba.test_model test.test_sba.test_protocol test.test_sba.test_platform
+	python3 scripts/build_rtl.py --top DitDahE2DebugSystemBus --config "$(SBA_OUTPUT)/unit/input.json" --output "$(SBA_OUTPUT)/unit/rtl"
+	python3 -m test.test_sba.verify_sba --rtl "$(SBA_OUTPUT)/unit/rtl" --output "$(SBA_OUTPUT)/unit/check"
+	python3 scripts/build_rtl.py --top DitDahE2DebugModule --config "$(SBA_OUTPUT)/unit/input.json" --output "$(SBA_OUTPUT)/dm/rtl"
+	python3 -m test.test_sba.verify_dm --rtl "$(SBA_OUTPUT)/dm/rtl" --output "$(SBA_OUTPUT)/dm/check"
+	python3 scripts/build_rtl.py --top DitDahE2MemoryArbiter --config "$(SBA_OUTPUT)/unit/input.json" --output "$(SBA_OUTPUT)/arbiter/rtl"
+	python3 -m test.test_sba.arbiter --rtl "$(SBA_OUTPUT)/arbiter/rtl" --output "$(SBA_OUTPUT)/arbiter/check"
+
+verify-sba-platform:
+	mkdir -p "$(SBA_OUTPUT)/platform" "$(SBA_OUTPUT)/atomic"
+	printf '%s\n' '{"enableDebug":true,"enableSba":true}' > "$(SBA_OUTPUT)/platform/input.json"
+	printf '%s\n' '{"enableDebug":true,"enableSba":true,"enableA":true}' > "$(SBA_OUTPUT)/atomic/input.json"
+	python3 scripts/build_platform.py --config "$(SBA_OUTPUT)/platform/input.json" --output "$(SBA_OUTPUT)/platform/rtl"
+	python3 -m test.test_sba.platform --platform "$(SBA_OUTPUT)/platform/rtl" --output "$(SBA_OUTPUT)/platform/check"
+	python3 scripts/build_atomic_platform.py --config "$(SBA_OUTPUT)/atomic/input.json" --output "$(SBA_OUTPUT)/atomic/rtl"
+	python3 -m test.test_sba.platform --platform "$(SBA_OUTPUT)/atomic/rtl" --output "$(SBA_OUTPUT)/atomic/check"
+
+verify-sba-host:
+	mkdir -p "$(SBA_OUTPUT)/host"
+	printf '%s\n' '{"enableDebug":true,"enableSba":true,"enableJtag":true,"jtagIdcode":$(JTAG_IDCODE),"triggerCount":2}' > "$(SBA_OUTPUT)/host/input.json"
+	python3 scripts/build_rtl.py --config "$(SBA_OUTPUT)/host/input.json" --output "$(SBA_OUTPUT)/host/rtl"
+	python3 test/test_debug_host/verify_host.py --rtl "$(SBA_OUTPUT)/host/rtl" --output "$(SBA_OUTPUT)/host/check" --system-bus
+
+verify-sba-reference: verify-sba-unit
+	python3 -m formal.debug_sba.reference --rtl "$(SBA_OUTPUT)/unit/rtl" --output "$(SBA_OUTPUT)/reference"
+	python3 -m formal.debug_sba.arbiter_reference --rtl "$(SBA_OUTPUT)/arbiter/rtl" --output "$(SBA_OUTPUT)/arbiter-reference"
+
+verify-sba-commercial: verify-sba-unit
+	python3 -m formal.debug_sba.run prepare --rtl "$(SBA_OUTPUT)/unit/rtl" --arbiter-rtl "$(SBA_OUTPUT)/arbiter/rtl" --output "$(SBA_OUTPUT)/commercial"
+	python3 -m formal.debug_sba.run collect --evidence "$(SBA_OUTPUT)/commercial" --private-output "$(SBA_OUTPUT)/native-private"
+	python3 -m formal.debug_sba.run validate --evidence "$(SBA_OUTPUT)/commercial"

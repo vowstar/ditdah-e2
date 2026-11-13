@@ -47,6 +47,19 @@ class ConfigurationTests(unittest.TestCase):
         for top in ("DitDahE2", "DitDahE2JtagDtm", "DitDahE2DmiBridge"):
             self.assertEqual(GENERATORS.get(top, top), top)
 
+    def test_system_bus_access_configuration(self):
+        baseline = configuration({"enableDebug": True})
+        self.assertNotIn("enableSba", baseline)
+        self.assertEqual(configuration({"enableDebug": True, "enableSba": False}), baseline)
+        self.assertTrue(configuration({"enableDebug": True, "enableSba": True})["enableSba"])
+        for value in ({"enableSba": True}, {"enableDebug": False, "enableSba": True},
+                      {"enableDebug": True, "enableSba": 1}, {"enableSba": None},
+                      {"enableSba": "true"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                configuration(value)
+        self.assertIn("DitDahE2DebugSystemBus", TOPS)
+        self.assertEqual(GENERATORS["DitDahE2DebugSystemBus"], "DebugSystemBus")
+
     def test_jtag_configuration(self):
         selected = configuration({"enableDebug": True, "enableJtag": True, "jtagIdcode": 0xE2000001})
         self.assertEqual((selected["enableJtag"], selected["jtagIdcode"]), (True, 0xE2000001))

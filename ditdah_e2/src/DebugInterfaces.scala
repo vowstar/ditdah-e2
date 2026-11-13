@@ -63,3 +63,14 @@ class DebugModuleIO(p: Parameters) extends HWBundle(p):
   val reset = Flipped(Reset())
   val dmi = Flipped(new DmiPort)
   val hart = Aligned(new DebugHartPort)
+  val systemBus = Option.when(p.enableSba)(Aligned(new MemoryPort))
+
+class DebugSystemBusIO(p: Parameters) extends HWBundle(p):
+  val clock = Flipped(Clock())
+  val reset = Flipped(Reset())
+  val active = Flipped(Bool())
+  val accepted = Flipped(Bool())
+  val request = Flipped(new DmiRequest)
+  val readData = Aligned(UInt(32))
+  val idle = Aligned(Bool())
+  val systemBus = Aligned(new MemoryPort)

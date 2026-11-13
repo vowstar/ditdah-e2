@@ -29,7 +29,7 @@ struct Request {
 };
 
 struct Port {
-    bool active = false, held = false;
+    bool active = false, held = false, fault = false;
     Request request{}, previous{};
     uint64_t due = 0;
     uint32_t data = 0;
@@ -42,7 +42,11 @@ class TapObserver {
     };
     State state = reset;
     uint64_t shifted = 0;
+    uint64_t observed = 0;
     unsigned bits = 0, instruction = 1;
+    int halted = -1, running = -1;
+    bool statusPending = false;
+    uint64_t statusRequest = 0;
 
     State next(State current, bool tms) const {
         switch (current) {
@@ -71,25 +75,54 @@ public:
         state = reset;
         instruction = 1;
         shifted = 0;
+        observed = 0;
         bits = 0;
+        invalidateHartState();
     }
 
-    void clock(bool tms, bool tdi, uint64_t cycle, std::ostream &trace) {
+    void invalidateHartState() { halted = running = -1; statusPending = false; }
+    int hartHalted() const { return halted; }
+    int hartRunning() const { return running; }
+
+    void clock(bool tms, bool tdi, bool tdo, uint64_t cycle, std::ostream &trace) {
         if (state == captureDr || state == captureIr) {
             shifted = 0;
+            observed = 0;
             bits = 0;
         }
         if (state == shiftDr || state == shiftIr) {
             if (bits < 64) shifted |= uint64_t(tdi) << bits;
+            if (bits < 64) observed |= uint64_t(tdo) << bits;
             ++bits;
         }
         if (state == updateIr && bits == 5) instruction = shifted & 31;
         if (state == updateDr && instruction == 0x11 && bits == 41) {
+            const unsigned responseAddress = (observed >> 34) & 0x7f;
+            const unsigned status = observed & 3;
+            const uint32_t responseData = (observed >> 2) & 0xffffffffULL;
+            trace << "K " << cycle << ' ' << responseAddress << ' ' << status << ' ' << responseData << '\n';
+            if (responseAddress == 0x11 && status == 0 && statusPending) {
+                const unsigned flags = (responseData >> 8) & 15;
+                halted = flags == 3 ? 1 : flags == 12 ? 0 : -1;
+                running = flags == 12 ? 1 : flags == 3 ? 0 : -1;
+                trace << "H " << cycle << ' ' << statusRequest << ' ' << halted << ' ' << running << '\n';
+                statusPending = false;
+            }
             const unsigned operation = shifted & 3;
             const uint32_t data = (shifted >> 2) & 0xffffffffULL;
             const unsigned address = (shifted >> 34) & 0x7f;
-            if (operation == 1 || operation == 2)
+            if (operation == 1 || operation == 2) {
                 trace << "J " << cycle << ' ' << address << ' ' << operation << ' ' << data << '\n';
+                if (operation == 1 && address == 0x11) {
+                    if (!statusPending) statusRequest = cycle;
+                    statusPending = true;
+                } else {
+                    statusPending = false;
+                }
+                if (operation == 2 && address == 0x10 &&
+                    (!(data & 1) || (data & ((1u << 31) | (1u << 30) | 2u))))
+                    invalidateHartState();
+            }
         }
         state = next(state, tms);
         if (state == reset) instruction = 1;
@@ -141,6 +174,12 @@ int main(int argc, char **argv) {
         dut.instruction_response_valid = dut.data_response_valid = 0;
         dut.instruction_response_bits_data = dut.data_response_bits_data = 0;
         dut.instruction_response_bits_fault = dut.data_response_bits_fault = 0;
+#ifdef E2_SYSTEM_BUS
+        dut.systemBus_request_ready = 0;
+        dut.systemBus_response_valid = 0;
+        dut.systemBus_response_bits_data = 0;
+        dut.systemBus_response_bits_fault = 0;
+#endif
         dut.interrupts_software = dut.interrupts_timer = dut.interrupts_external = 0;
         dut.timeValue = 0;
         for (int edge = 0; edge < 4; ++edge) {
@@ -176,6 +215,9 @@ int main(int argc, char **argv) {
 
         TapObserver tap;
         Port instruction, data;
+#ifdef E2_SYSTEM_BUS
+        Port systemBus;
+#endif
         uint64_t cycle = 0, externalResets = 0, debugResets = 0, tdoSamples = 0, tdoEnabledSamples = 0;
         bool previousExternal = true, previousDebug = false, finished = false;
         std::deque<unsigned char> pending;
@@ -199,11 +241,12 @@ int main(int argc, char **argv) {
                 if (value >= '0' && value <= '7') {
                     const unsigned pins = value - '0';
                     const bool rising = !dut.jtag_tck && (pins & 4);
+                    const bool sampledTdo = dut.jtag_tdo;
                     dut.jtag_tck = (pins >> 2) & 1;
                     dut.jtag_tms = (pins >> 1) & 1;
                     dut.jtag_tdi = pins & 1;
                     dut.eval();
-                    if (rising) tap.clock(dut.jtag_tms, dut.jtag_tdi, cycle, std::cout);
+                    if (rising) tap.clock(dut.jtag_tms, dut.jtag_tdi, sampledTdo, cycle, std::cout);
                 } else if (value == 'R') {
                     dut.eval();
                     ++tdoSamples;
@@ -225,16 +268,33 @@ int main(int argc, char **argv) {
 
             dut.clock = 0;
             dut.timeValue = cycle;
+            if (dut.reset) {
+                instruction = data = Port{};
+#ifdef E2_SYSTEM_BUS
+                systemBus = Port{};
+#endif
+                tap.invalidateHartState();
+            }
             dut.instruction_request_ready = !dut.reset && !instruction.active && (!delay || random() % 3 == 0);
             dut.data_request_ready = !dut.reset && !data.active && (!delay || random() % 3 == 0);
             dut.instruction_response_valid = instruction.active && cycle >= instruction.due;
             dut.data_response_valid = data.active && cycle >= data.due;
             dut.instruction_response_bits_data = instruction.data;
             dut.data_response_bits_data = data.data;
-            dut.instruction_response_bits_fault = 0;
-            dut.data_response_bits_fault = 0;
+            dut.instruction_response_bits_fault = instruction.fault;
+            dut.data_response_bits_fault = data.fault;
+#ifdef E2_SYSTEM_BUS
+            dut.systemBus_request_ready = !dut.reset && !systemBus.active && (!delay || random() % 3 == 0);
+            dut.systemBus_response_valid = systemBus.active && cycle >= systemBus.due;
+            dut.systemBus_response_bits_data = systemBus.data;
+            dut.systemBus_response_bits_fault = systemBus.fault;
+#endif
             dut.eval();
-            if (dut.systemReset && (instruction.active || data.active))
+            if (dut.systemReset && (instruction.active || data.active
+#ifdef E2_SYSTEM_BUS
+                                    || systemBus.active
+#endif
+                                    ))
                 throw std::runtime_error("Debug reset crossed an accepted native transfer");
             if (bool(dut.reset) != previousExternal) {
                 externalResets += dut.reset;
@@ -245,17 +305,19 @@ int main(int argc, char **argv) {
                 debugResets += dut.systemReset;
                 std::cout << "Z " << cycle << ' ' << unsigned(dut.reset) << ' ' << unsigned(dut.systemReset) << '\n';
                 previousDebug = dut.systemReset;
+                tap.invalidateHartState();
             }
             if ((dut.instruction_request_valid && dut.instruction_request_bits_operation) ||
                 (dut.data_request_valid && dut.data_request_bits_operation))
                 throw std::runtime_error("Unexpected atomic memory request");
             auto observe = [&](Port &port, char name, bool valid, bool ready, Request request,
                                bool responseValid, bool responseReady) {
-                if (!dut.reset && !dut.systemReset && port.held && (!valid || !(request == port.previous)))
+                const bool reset = dut.reset || (name != 'B' && dut.systemReset);
+                if (!reset && port.held && (!valid || !(request == port.previous)))
                     throw std::runtime_error("Native request changed under backpressure");
                 if (responseValid && responseReady) {
                     if (!port.active) throw std::runtime_error("Unowned native response");
-                    if (port.request.write) {
+                    if (port.request.write && !port.fault) {
                         auto &value = memory[port.request.address & ~3u];
                         for (unsigned lane = 0; lane < 4; ++lane)
                             if (port.request.mask & (1u << lane))
@@ -264,10 +326,10 @@ int main(int argc, char **argv) {
                     }
                     std::cout << "S " << cycle << ' ' << name << ' ' << port.request.address << ' '
                               << port.request.write << ' ' << port.request.data << ' ' << port.request.mask << ' '
-                              << port.request.size << ' ' << port.data << " 0\n";
+                              << port.request.size << ' ' << port.data << ' ' << port.fault << '\n';
                     port.active = false;
                 }
-                port.held = valid && !ready && !dut.reset && !dut.systemReset;
+                port.held = valid && !ready && !reset;
                 port.previous = request;
                 if (valid && ready) {
                     if (port.active) throw std::runtime_error("Multiple outstanding native requests");
@@ -278,7 +340,12 @@ int main(int argc, char **argv) {
                     port.active = true;
                     port.request = request;
                     port.data = memory[request.address & ~3u];
+                    port.fault = request.address >= 0xfffff000u;
                     port.due = cycle + 1 + (delay ? random() % delay : 0);
+                    if (name == 'B')
+                        std::cout << "Q " << cycle << " B " << request.address << ' ' << request.write << ' '
+                                  << request.data << ' ' << request.mask << ' ' << request.size << ' '
+                                  << tap.hartHalted() << ' ' << tap.hartRunning() << '\n';
                 }
             };
             observe(instruction, 'I', dut.instruction_request_valid, dut.instruction_request_ready,
@@ -291,6 +358,15 @@ int main(int argc, char **argv) {
                      dut.data_request_bits_mask, dut.data_request_bits_size,
                      bool(dut.data_request_bits_write), bool(dut.data_request_bits_machine)},
                     dut.data_response_valid, dut.data_response_ready);
+#ifdef E2_SYSTEM_BUS
+            if (dut.systemBus_request_valid && dut.systemBus_request_bits_operation)
+                throw std::runtime_error("Unexpected atomic system-bus request");
+            observe(systemBus, 'B', dut.systemBus_request_valid, dut.systemBus_request_ready,
+                    {dut.systemBus_request_bits_address, dut.systemBus_request_bits_data,
+                     dut.systemBus_request_bits_mask, dut.systemBus_request_bits_size,
+                     bool(dut.systemBus_request_bits_write), bool(dut.systemBus_request_bits_machine)},
+                    dut.systemBus_response_valid, dut.systemBus_response_ready);
+#endif
             if (dut.retire_valid) {
                 if (dut.interrupt_valid) throw std::runtime_error("Unexpected interrupt during host acceptance");
                 std::cout << "R " << cycle << ' ' << dut.retire_pc << ' ' << dut.retire_word << ' '

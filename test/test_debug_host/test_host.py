@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: MIT
 """Check host acceptance configuration and evidence rejection paths."""
 
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,12 +14,16 @@ from test.test_debug_host.verify_host import (
     GDB_ACCEPTED,
     PROGRAM_BUFFER_ONLY,
     READY,
+    SCRATCH,
+    SYSTEM_BUS_FAULT,
+    SYSTEM_BUS_ONLY,
+    abstract_metrics,
     check_abstract_evidence,
     check_execution,
     check_program_buffer_evidence,
+    check_system_bus_evidence,
     check_trigger_evidence,
     check_wrong_idcode,
-    abstract_metrics,
     compare_metrics,
     gdb_commands,
     openocd_configuration,
@@ -41,6 +48,47 @@ def expectations():
 
 def dmi(address, data, cycle=1):
     return f"J {cycle} {address} 2 {data}"
+
+
+def system_bus_trace():
+    records = []
+    cycle = 0
+
+    def add(text):
+        nonlocal cycle
+        records.append(text.format(cycle=cycle))
+        cycle += 1
+
+    def status(halted):
+        request = cycle
+        add("J {cycle} 17 1 0")
+        add("K {cycle} 17 0 " + str(0x300 if halted else 0xC00))
+        records.append(f"H {cycle - 1} {request} {int(halted)} {int(not halted)}")
+
+    def transfer(size, write, value, address, halted, fault=0):
+        data = value << (8 * (address & 3))
+        mask = ((1 << (1 << size)) - 1) << (address & 3) if write else 0
+        add(f"Q {{cycle}} B {address} {write} {data if write else 0} {mask} {size} "
+            f"{int(halted)} {int(not halted)}")
+        add(f"S {{cycle}} B {address} {write} {data if write else 0} {mask} {size} {data} {fault}")
+
+    add("J {cycle} 56 2 262144")
+    for halted in (True, False):
+        if not halted:
+            add("J {cycle} 16 2 1073741825")
+        status(halted)
+        if not halted:
+            add("R {cycle} 0 111 0 0 0 0 0 0 0 0")
+        for size, offset, value in ((0, 1, 0x5A), (1, 2, 0x6B7C), (2, 4, 0x89ABCDEF)):
+            for write in (1, 0):
+                transfer(size, write, value, SCRATCH + offset, halted)
+        status(halted)
+    add("J {cycle} 16 2 2147483649")
+    status(True)
+    transfer(2, 0, 0, SYSTEM_BUS_FAULT, True, 1)
+    transfer(2, 0, 0x89ABCDEF, SCRATCH + 4, True)
+    status(True)
+    return "\n".join(records) + "\n"
 
 
 class HostEvidenceTests(unittest.TestCase):
@@ -127,6 +175,136 @@ class HostEvidenceTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(ValueError):
                 check_program_buffer_evidence(changed if label in ("readiness", "fallback") else log,
                                               changed if label not in ("readiness", "fallback") else trace)
+
+    def test_system_bus_configuration_requires_explicit_feature_and_no_fallback(self):
+        with self.assertRaisesRegex(ValueError, "enableSba"):
+            validate_manifest(manifest(), system_bus=True)
+        selected = manifest()
+        selected["parameters"]["enableSba"] = True
+        self.assertEqual(validate_manifest(selected, system_bus=True), 3)
+        selected["parameters"]["enableSba"] = 1
+        with self.assertRaisesRegex(ValueError, "enableSba"):
+            validate_manifest(selected, system_bus=True)
+        configuration = "\n".join(openocd_configuration(1000, 1001, 3, system_bus=True))
+        self.assertIn("riscv set_mem_access sysbus\n", configuration)
+        self.assertIn(SYSTEM_BUS_ONLY, configuration)
+        self.assertIn("gdb_report_data_abort enable", configuration)
+        self.assertNotIn("set_mem_access abstract", configuration)
+        self.assertNotIn("set_mem_access progbuf", configuration)
+        with self.assertRaisesRegex(ValueError, "one host"):
+            openocd_configuration(1000, 1001, 3, program_buffer=True, system_bus=True)
+        script = gdb_commands(Path("program.elf"), 1234, expectations(), system_bus=True)
+        for token in ("monitor riscv dmi_read 0x11", "monitor resume 0", "bus_probe(True)",
+                      "bus_probe(False)", "inferior.write_memory", "inferior.read_memory",
+                      "monitor wait_halt 10000", hex(SYSTEM_BUS_FAULT), "compare-sections", "stepi"):
+            self.assertIn(token, script)
+
+    def test_system_bus_evidence_requires_actual_owned_halted_running_widths(self):
+        log = (f"{SYSTEM_BUS_ONLY}\n{READY}\n"
+               "Succeeded to read memory via system bus.\n"
+               "Succeeded to write memory via system bus.\n")
+        trace = system_bus_trace()
+        result = check_system_bus_evidence(log, trace)
+        self.assertEqual(result["systemBusIntervals"]["halted"]["retirements"], 0)
+        self.assertEqual(result["systemBusIntervals"]["running"]["retirements"], 1)
+        self.assertEqual(result["systemBusFaults"], 1)
+        self.assertTrue(result["systemBusFaultRecovery"])
+        self.assertEqual(result["abstractMemoryReads"], 0)
+        self.assertEqual(result["programBufferStores"], 0)
+        mutations = {
+            "missing-status": "\n".join(x for x in trace.splitlines() if not x.startswith("K ")),
+            "missing-request": "\n".join(x for x in trace.splitlines() if not x.startswith("Q ")),
+            "missing-response": "\n".join(x for x in trace.splitlines() if not x.startswith("S ")),
+            "no-progress": "\n".join(x for x in trace.splitlines() if not x.startswith("R ")),
+            "wrong-status": trace.replace("17 0 3072", "17 0 768"),
+            "no-halfword": "\n".join(x for x in trace.splitlines()
+                                        if not (x.startswith(("Q ", "S ")) and x.split()[3] == str(SCRATCH + 2))),
+            "bad-lane": trace.replace(f"B {SCRATCH + 1} 1 23040 2 0", f"B {SCRATCH + 1} 1 23040 1 0"),
+            "wrong-data": trace.replace("23040", "23296"),
+            "wrong-owner": trace.replace(f"S 4 B {SCRATCH + 1}", f"S 4 B {SCRATCH + 2}"),
+            "aam": dmi(0x17, 0x02200000, 0) + "\n" + trace,
+            "pb": dmi(0x20, 0x0000A103, 0) + "\n" + dmi(0x17, 1 << 18, 0) + "\n" + trace,
+            "compressed-pb": dmi(0x20, 0x4000, 0) + "\n" + dmi(0x17, 1 << 18, 0) + "\n" + trace,
+        }
+        for label, changed in mutations.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                check_system_bus_evidence(log, changed)
+        for changed in ("", log.replace("Succeeded to read memory via system bus.\n", ""),
+                        log + "Succeeded to read memory via abstract access.\n",
+                        log + "riscv set_mem_access progbuf\n"):
+            with self.subTest(log=changed), self.assertRaises(ValueError):
+                check_system_bus_evidence(changed, trace)
+
+    def test_system_bus_state_windows_reject_controls_and_outside_progress(self):
+        log = (f"{SYSTEM_BUS_ONLY}\n{READY}\n"
+               "Succeeded to read memory via system bus.\nSucceeded to write memory via system bus.\n")
+        lines = system_bus_trace().splitlines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("R "))
+        cycle = int(lines[at].split()[1])
+        for event in (f"J {cycle} 16 2 2147483649", f"Z {cycle} 0 1"):
+            changed = "\n".join(lines[:at] + [event] + lines[at:])
+            with self.subTest(event=event), self.assertRaises(ValueError):
+                check_system_bus_evidence(log, changed)
+        moved = lines[:at] + lines[at + 1:]
+        after = next(i for i, line in enumerate(moved) if line.startswith("J ") and line.endswith("2147483649"))
+        late_cycle = int(moved[after].split()[1])
+        moved.insert(after, f"R {late_cycle} 0 111 0 0 0 0 0 0 0 0")
+        with self.assertRaisesRegex(ValueError, "no native retirements"):
+            check_system_bus_evidence(log, "\n".join(moved))
+
+    def test_tap_observer_decodes_actual_response_and_rejects_stale_state(self):
+        source = (Path(__file__).parent / "jtag_sim.cpp").read_text()
+        observer = source.split("class TapObserver {", 1)[1].split("static void sendByte", 1)[0]
+        program = r'''
+#include <sstream>
+#include <iostream>
+#include <stdexcept>
+#include <cstdint>
+class TapObserver {
+OBSERVER
+int main() {
+    TapObserver tap;
+    std::ostringstream out;
+    uint64_t cycle = 0;
+    auto tick = [&](bool tms, bool tdi = false, bool tdo = false) {
+        tap.clock(tms, tdi, tdo, cycle++, out);
+    };
+    tap.resetNow(); tick(0);
+    tick(1); tick(1); tick(0); tick(0);
+    for (unsigned bit = 0; bit < 5; ++bit) tick(bit == 4, (0x11 >> bit) & 1);
+    tick(1); tick(0);
+    auto scan = [&](uint64_t request, uint64_t response) {
+        tick(1); tick(0); tick(0);
+        for (unsigned bit = 0; bit < 41; ++bit)
+            tick(bit == 40, (request >> bit) & 1, (response >> bit) & 1);
+        tick(1); tick(0);
+    };
+    const uint64_t statusRead = (uint64_t(0x11) << 34) | 1;
+    const uint64_t halted = (uint64_t(0x11) << 34) | (uint64_t(0x300) << 2);
+    const uint64_t running = (uint64_t(0x11) << 34) | (uint64_t(0xc00) << 2);
+    scan(statusRead, 0);
+    scan(0, halted);
+    if (tap.hartHalted() != 1 || tap.hartRunning() != 0) return 1;
+    scan(0, halted);
+    scan((uint64_t(0x10) << 34) | (uint64_t(0x40000001) << 2) | 2, 0);
+    if (tap.hartHalted() != -1) return 2;
+    scan(statusRead, 0);
+    scan(0, running | 3);
+    if (tap.hartRunning() != -1) return 3;
+    scan(0, running);
+    if (tap.hartRunning() != 1 || tap.hartHalted() != 0) return 4;
+    std::cout << out.str();
+}
+'''.replace("OBSERVER", observer)
+        with tempfile.TemporaryDirectory(prefix="ditdah-e2-tap-", dir="/data/tmp") as directory:
+            work = Path(directory)
+            (work / "tap.cpp").write_text(program)
+            subprocess.run([shutil.which("g++") or "g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(work / "tap.cpp"), "-o", str(work / "tap")], check=True, capture_output=True)
+            result = subprocess.run([str(work / "tap")], check=True, capture_output=True, text=True)
+        states = [line.split() for line in result.stdout.splitlines() if line.startswith("H ")]
+        self.assertEqual([row[3:] for row in states], [["1", "0"], ["0", "1"]])
+        self.assertTrue(all(int(row[2]) < int(row[1]) for row in states))
 
     def test_abstract_throughput_requires_postincrement_and_improvement(self):
         trace = ("J 10 23 2 36175872\n"

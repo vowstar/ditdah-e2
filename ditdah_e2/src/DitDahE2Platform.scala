@@ -62,7 +62,15 @@ object DitDahE2Platform extends Generator[PlatformParameters, PlatformLayers, Pl
     timer.io.clock := io.clock
     timer.io.reset := platformReset
     router.io.instruction :<>= core.io.instruction
-    router.io.data :<>= core.io.data
+    if p.core.enableSba then
+      val arbiter = MemoryArbiter.instantiate(p.core)
+      arbiter.io.clock := io.clock
+      arbiter.io.reset := platformReset
+      arbiter.io.first :<>= core.io.data
+      arbiter.io.second :<>= core.io.systemBus.get
+      arbiter.io.firstDebug := false.B
+      router.io.data :<>= arbiter.io.output
+    else router.io.data :<>= core.io.data
     bus.io.instruction :<>= router.io.memoryInstruction
     bus.io.data :<>= router.io.memoryData
     console.io.memory :<>= router.io.console

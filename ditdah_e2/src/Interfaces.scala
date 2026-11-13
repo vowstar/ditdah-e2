@@ -205,6 +205,7 @@ class CoreIO(p: Parameters) extends HWBundle(p):
   val timeValue = Flipped(UInt(64))
   val instruction = Aligned(new MemoryPort)
   val data = Aligned(new MemoryPort)
+  val systemBus = Option.when(p.enableSba)(Aligned(new MemoryPort))
   val retire = Aligned(new Retirement)
   val debugExecution = Option.when(p.enableDebug)(Aligned(new InjectedRetirement))
   val interrupt = Aligned(new InterruptEvent)

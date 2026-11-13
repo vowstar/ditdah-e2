@@ -15,11 +15,13 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     given ClockScope = ClockScope.posedge(io.clock)
     given ResetScope = ResetScope.syncActiveHigh(io.reset)
     val active = RegInit(false.B)
+    val activationPending = Option.when(p.enableSba)(RegInit(false.B))
     val halt = RegInit(false.B)
     val resume = RegInit(false.B)
     val resumeAck = RegInit(false.B)
     val haltOnReset = RegInit(false.B)
     val ndmreset = RegInit(false.B)
+    val deferredNdmReset = Option.when(p.enableSba)(RegInit(false.B))
     val haveReset = RegInit(false.B)
     val data0 = RegInit(0.U(32))
     val data1 = RegInit(0.U(32))
@@ -43,6 +45,16 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val write = accepted & (request.op === 2.U(2))
     val controlWrite = write & (request.address === 0x10.U(7))
     val deactivate = controlWrite & !request.data.asBits.bit(0)
+    val systemBus = Option.when(p.enableSba) {
+      val bus = DebugSystemBus.instantiate(p)
+      bus.io.clock := io.clock
+      bus.io.reset := io.reset
+      bus.io.active := active & !deactivate
+      bus.io.accepted := accepted & !ndmreset & !deferredNdmReset.get & !io.hart.status.resetPending
+      bus.io.request :<= request
+      io.systemBus.get :<>= bus.io.systemBus
+      bus
+    }
     val dataAccess = (request.address === 4.U(7)) | (request.address === 5.U(7))
     val programAccess = (request.address === 0x20.U(7)) | (request.address === 0x21.U(7))
     val autoAccess = dataAccess | programAccess
@@ -55,7 +67,8 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     io.hart.control.active := active
     io.hart.control.halt := active & halt
     io.hart.control.resume := active & resume & !halt
-    io.hart.control.reset := active & ndmreset
+    io.hart.control.reset := (if p.enableSba then active & (ndmreset | deferredNdmReset.get) & systemBus.get.io.idle
+      else active & ndmreset)
     io.hart.control.haltOnReset := active & haltOnReset
     io.hart.request.valid := active & busy & needsHart & !issued
     io.hart.request.bits.memory := command.memory
@@ -75,13 +88,17 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     val readData = Wire(UInt(32))
     readData := 0.U(32)
     when(active) {
+      if p.enableSba then
+        when((request.address === 0x38.U(7)) | (request.address === 0x39.U(7)) |
+          (request.address === 0x3c.U(7))) { readData := systemBus.get.io.readData }
       when(request.address === 4.U(7)) { readData := busy.?(0.U(32), data0) }
       when(request.address === 5.U(7)) { readData := busy.?(0.U(32), data1) }
       when(request.address === 0x20.U(7)) { readData := busy.?(0.U(32), program0) }
       when(request.address === 0x21.U(7)) { readData := busy.?(0.U(32), program1) }
       when(request.address === 0x10.U(7)) { readData := (0.B(30) ## ndmreset.asBits ## active.asBits).asUInt }
       when(request.address === 0x11.U(7)) {
-        readData := (0.B(7) ## (ndmreset | io.hart.status.resetPending).asBits ## 0.B(1) ## 1.B(1) ## 0.B(2) ##
+        readData := (0.B(7) ## (if p.enableSba then ndmreset | deferredNdmReset.get | io.hart.status.resetPending
+          else ndmreset | io.hart.status.resetPending).asBits ## 0.B(1) ## 1.B(1) ## 0.B(2) ##
           haveReset.asBits ## haveReset.asBits ## resumeAck.asBits ## resumeAck.asBits ## 0.B(2) ##
           io.hart.status.unavailable.asBits ## io.hart.status.unavailable.asBits ##
           running.asBits ## running.asBits ## halted.asBits ## halted.asBits ## 0xa3.B(8)).asUInt
@@ -138,9 +155,20 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
       resumeAck := true.B
     }
     when(controlWrite) {
-      active := request.data.asBits.bit(0)
+      if p.enableSba then
+        when(!request.data.asBits.bit(0)) {
+          active := false.B
+          activationPending.get := false.B
+        }
+        when(request.data.asBits.bit(0) & !active) {
+          activationPending.get := !systemBus.get.io.idle
+          when(systemBus.get.io.idle) { active := true.B }
+        }
+      else active := request.data.asBits.bit(0)
       when(active & request.data.asBits.bit(0)) {
         ndmreset := request.data.asBits.bit(1)
+        if p.enableSba then
+          when(request.data.asBits.bit(1)) { deferredNdmReset.get := true.B }
         when(!busy) {
           halt := request.data.asBits.bit(31)
           when(request.data.asBits.bit(31)) { resume := false.B }
@@ -154,6 +182,13 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
         }
       }
     }
+    if p.enableSba then
+      // The Hart latches this request on the same edge, without a combinational acknowledgement.
+      when(io.hart.control.reset) { deferredNdmReset.get := false.B }
+      when(!active & activationPending.get & systemBus.get.io.idle & !deactivate) {
+        active := true.B
+        activationPending.get := false.B
+      }
     when(active & io.hart.status.resetEvent) { haveReset := true.B }
     when(active & write & !busy) {
       when(request.address === 4.U(7)) { data0 := request.data }
@@ -199,6 +234,7 @@ object DebugModule extends Generator[Parameters, UnitLayers, DebugModuleIO, Unit
     when(busyConflict & (error === 0.U(3))) { error := 1.U(3) }
     // DMI response ownership survives dmactive deactivation.
     when(!active | deactivate) {
+      if p.enableSba then deferredNdmReset.get := false.B
       halt := false.B
       resume := false.B
       resumeAck := false.B

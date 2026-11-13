@@ -76,9 +76,9 @@ AAM postincrement updates data1 once after each successful access by its encoded
 `abstractauto` implements data0, data1, progbuf0 and progbuf1. Each accepted automatic access resamples current operands; a data0 read snapshots its old result before starting, and response backpressure cannot repeat execution.
 The two Program Buffer words report `abstractcs.progbufsize=2` and `dmstatus.impebreak=1`, and end with an implicit EBREAK when exhausted. `postexec` executes them once after an optional register transfer, while `transfer=0` leaves data0 unchanged; a successful read remains valid when later buffer execution faults.
 Injected execution keeps the hart halted and suppresses native fetch, interrupts, triggers and retirement. Faults set `cmderr=3` without changing native trap CSRs; DCSR and DPC instructions update the live debug state. Accepted native transfers drain before command completion, deactivation or reset proceeds.
-Compressed halfwords may cross the word boundary; a truncated final halfword faults. Branches, jumps, AUIPC, MRET and FENCE.I are rejected, WFI is a NOP, and explicit or implicit EBREAK completes without a fault. Quick Access and SBA are absent.
+Compressed halfwords may cross the word boundary; a truncated final halfword faults. Branches, jumps, AUIPC, MRET and FENCE.I are rejected, WFI is a NOP, and explicit or implicit EBREAK completes without a fault. Quick Access is absent.
 Single step completes one instruction or exception with interrupts masked, then halts.
-Warm reset drains Core and debug transfers before resetting the hart. The debug module remains available.
+Optional [SBA](debug-system-bus.md) supplies physical 8/16/32-bit accesses independently of hart state. Warm reset drains Core, debug and SBA transfers before resetting the hart; the debug module remains available.
 Already accepted competitor transactions complete across warm reset.
 
 `triggerCount` is zero or two; two requires Debug and zero omits the trigger bank.

@@ -860,6 +860,7 @@ def build(output):
     output = Path(output)
     names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/DebugInterfaces.scala",
              "ditdah_e2/src/DebugTransportInterfaces.scala", "ditdah_e2/src/DebugModule.scala",
+             "ditdah_e2/src/DebugSystemBus.scala",
              "test/test_debug/debug_module.py", "test/test_debug/test_debug_module.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(ROOT)) for path in sorted((ROOT / "nix").glob("*.nix"))]
     contents = {name: (ROOT / name).read_bytes() for name in names}
