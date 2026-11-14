@@ -29,6 +29,27 @@ class AtomicFormalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             wrapper(source.replace("@BASE@", "0"), {"sizeBytes": 4})
 
+    def test_two_cycle_memory_is_explicit_in_reference(self):
+        source = (Path(__file__).resolve().parents[2] / "formal/atomic/atomic_memory_formal.sv").read_text()
+        result = wrapper(source, {"sizeBytes": 12, "readLatency": 2})
+        self.assertIn("READ_LATENCY = 2", result)
+        self.assertIn("wire completing = pending && !read_wait", result)
+        self.assertIn("assert(formalReadData == sampled)", result)
+
+    def test_shared_leaf_observer_tracks_actual_array(self):
+        root = Path(__file__).resolve().parents[2]
+        controller = "module DitDahE2AtomicMemory(input clock\n);\n  DitDahE2AtomicSram #(1) memory (\n" + ",\n".join(
+            "." + name + "(" + name + ")" for name in ("address", "readEnable", "writeMask", "writeData", "readData")) + "\n  );\nendmodule"
+        storage = (root / "ditdah_e2/src/AtomicSram.sv").read_text()
+        primitive = (root / "ditdah_e2/src/Sram.sv").read_text()
+        rtl, ram = observe(controller, storage, {"sizeBytes": 12}, primitive)
+        self.assertIn(".formalMemory(formalMemory)", ram)
+        self.assertIn("assign formalMemory[word*WIDTH +: WIDTH] = memory[word];", ram)
+        self.assertEqual(ram.count("module DitDahE2Sram"), 1)
+        self.assertNotIn("input formal", rtl + ram)
+        with self.assertRaises(ValueError):
+            observe(controller, storage, {"sizeBytes": 12})
+
     def test_observer_adds_only_read_outputs(self):
         controller = "module DitDahE2AtomicMemory(input clock\n);\n  DitDahE2AtomicSram #(1) memory (\n" + ",\n".join(
             "." + name + "(" + value + ")" for name, value in (("address", "index"), ("readEnable", "valid"),

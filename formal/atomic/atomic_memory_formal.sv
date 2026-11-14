@@ -3,6 +3,7 @@
 module atomic_memory_formal(input clock);
   localparam [31:0] BASE = @BASE@;
   localparam integer WORDS = @WORDS@;
+  localparam integer READ_LATENCY = @READ_LATENCY@;
   reg reset = 1;
   always @(posedge clock) reset <= 0;
 `ifdef OWNERSHIP_COVER
@@ -77,6 +78,8 @@ module atomic_memory_formal(input clock);
   reg [127:0] expected_data = 0;
   reg [3:0] expected_fault = 0;
   reg pending = 0;
+  reg read_wait = 0;
+  wire completing = pending && !read_wait;
   reg [1:0] owner = 0, cursor = 0;
   reg [75:0] queued = 0;
   reg reservation = 0;
@@ -135,7 +138,7 @@ module atomic_memory_formal(input clock);
 
   wire permitted = legal(owner, queued);
   wire sc_success = reservation && reservation_address == word_address && !clearReservation;
-  wire commit_write = pending && permitted && write && (operation != 2 || sc_success);
+  wire commit_write = completing && permitted && write && (operation != 2 || sc_success);
   wire [31:0] new_value = atomic_value(operation, sampled, operand);
   wire [31:0] result = !permitted ? 0 : operation == 2 ? (sc_success ? 0 : 1) :
     operation == 0 && write ? 0 : sampled;
@@ -147,13 +150,13 @@ module atomic_memory_formal(input clock);
   wire [21:0] coverGoals;
   assign coverGoals[0] = initialized;
   generate for (genvar op = 1; op <= 11; op = op + 1) begin
-    assign coverGoals[op] = initialized && pending && permitted && operation == op;
+    assign coverGoals[op] = initialized && completing && permitted && operation == op;
   end endgenerate
-  assign coverGoals[12] = initialized && pending && permitted && operation == 2 && sc_success;
-  assign coverGoals[13] = initialized && pending && permitted && operation == 2 && !sc_success;
-  assign coverGoals[14] = initialized && pending && !permitted && operation == 2 && reservation;
-  assign coverGoals[15] = initialized && pending && operation == 1 && clearReservation;
-  assign coverGoals[16] = initialized && pending && operation == 2 && clearReservation;
+  assign coverGoals[12] = initialized && completing && permitted && operation == 2 && sc_success;
+  assign coverGoals[13] = initialized && completing && permitted && operation == 2 && !sc_success;
+  assign coverGoals[14] = initialized && completing && !permitted && operation == 2 && reservation;
+  assign coverGoals[15] = initialized && completing && operation == 1 && clearReservation;
+  assign coverGoals[16] = initialized && completing && operation == 2 && clearReservation;
   generate for (genvar writer = 1; writer < 4; writer = writer + 1) begin
     assign coverGoals[writer+16] = initialized && commit_write && owner == writer && reservation && reservation_address == word_address;
   end endgenerate
@@ -181,6 +184,7 @@ module atomic_memory_formal(input clock);
       owned <= 0;
       expected_valid <= 0;
       pending <= 0;
+      read_wait <= 0;
       cursor <= 0;
       reservation <= 0;
       invalidators <= 0;
@@ -242,6 +246,7 @@ module atomic_memory_formal(input clock);
           owner <= i;
           cursor <= (i + 1) % 4;
           pending <= 1;
+          read_wait <= READ_LATENCY == 2;
           if (legal(i, payload[i*76 +: 76])) begin
             sampled <= memory[(payload[i*76 + 44 +: 32] - BASE) >> 2];
             sampled_known <= known[(payload[i*76 + 44 +: 32] - BASE) >> 2] == 15;
@@ -251,7 +256,8 @@ module atomic_memory_formal(input clock);
           end
         end
       end
-      if (pending) begin
+      if (pending) read_wait <= 0;
+      if (completing) begin
         assert(accepted == 0);
         assert(!expected_valid[owner]);
         assert(owned[owner]);

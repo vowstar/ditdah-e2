@@ -37,6 +37,7 @@ def wrapper(source, parameters):
                      f".{port}_response_valid(response_valid[{index}])", f".{port}_response_ready(response_ready[{index}])",
                      f".{port}_response_bits_data(response_data[{index * 32} +: 32])", f".{port}_response_bits_fault(response_fault[{index}])"]
     replacements = {"@BASE@": f"32'h{parameters['baseAddress']:08x}", "@WORDS@": str(parameters["sizeBytes"] // 4),
+                    "@READ_LATENCY@": str(parameters["readLatency"]),
                     "@INDEX_HIGH@": str(max(1, (parameters["sizeBytes"] // 4 - 1).bit_length()) - 1),
                     "@INSTANCE@": "DitDahE2AtomicMemory dut(\n    " + ",\n    ".join(bindings) + "\n  );"}
     for before, after in replacements.items():
@@ -46,7 +47,7 @@ def wrapper(source, parameters):
     return source
 
 
-def observe(controller, storage, parameters):
+def observe(controller, storage, parameters, primitive=None):
     if "formalMemory" in controller + storage or controller.count(") memory (") != 1:
         raise ValueError("Atomic SRAM observation boundary changed")
     start = controller.index(") memory (")
@@ -73,12 +74,25 @@ def observe(controller, storage, parameters):
                              (("formalRead", "readEnable"), ("formalAddress", "address"), ("formalMask", "writeMask"),
                               ("formalWriteData", "writeData"), ("formalReadData", "readData")))
     controller = controller.replace("endmodule", assignments + "\nendmodule")
-    declaration = "  output reg [31:0] readData\n"
+    declaration = "  output " + ("wire" if primitive is not None else "reg") + " [31:0] readData\n"
     if storage.count(declaration) != 1:
         raise ValueError("Atomic SRAM output declaration changed")
-    storage = storage.replace(declaration, "  output reg [31:0] readData,\n  output wire [WORDS*32-1:0] formalMemory\n")
-    storage = storage.replace("endmodule", "  generate for (genvar word = 0; word < WORDS; word = word + 1) begin\n"
-                              "    assign formalMemory[word*32 +: 32] = memory[word];\n  end endgenerate\nendmodule")
+    storage = storage.replace(declaration, declaration.rstrip() + ",\n  output wire [WORDS*32-1:0] formalMemory\n")
+    if primitive is None:
+        if "DitDahE2Sram" in storage:
+            raise ValueError("Atomic SRAM primitive source is required for observation")
+        storage = storage.replace("endmodule", "  generate for (genvar word = 0; word < WORDS; word = word + 1) begin\n"
+                                  "    assign formalMemory[word*32 +: 32] = memory[word];\n  end endgenerate\nendmodule")
+    else:
+        boundary = ".readData(readData)"
+        output = "  output reg [WIDTH-1:0] readData\n"
+        if storage.count(boundary) != 1 or primitive.count(output) != 1 or primitive.count("endmodule") != 1:
+            raise ValueError("Shared SRAM observation boundary changed")
+        storage = storage.replace(boundary, boundary + ", .formalMemory(formalMemory)")
+        primitive = primitive.replace(output, output.rstrip() + ",\n  output wire [DEPTH*WIDTH-1:0] formalMemory\n")
+        primitive = primitive.replace("endmodule", "  generate for (genvar word = 0; word < DEPTH; word = word + 1) begin\n"
+                                      "    assign formalMemory[word*WIDTH +: WIDTH] = memory[word];\n  end endgenerate\nendmodule")
+        storage += "\n" + primitive
     return controller, storage
 
 
@@ -165,7 +179,7 @@ def main():
         rtl = contents["rtl/DitDahE2AtomicMemory.sv"].decode()
         if mode == "bmc":
             rtl = mutate(rtl, name)
-        rtl, storage = observe(rtl, contents["rtl/AtomicSram.sv"].decode(), build["parameters"])
+        rtl, storage = observe(rtl, contents["rtl/AtomicSram.sv"].decode(), build["parameters"], contents["rtl/Sram.sv"].decode())
         (case / "DitDahE2AtomicMemory.sv").write_text(rtl)
         (case / "AtomicSram.sv").write_text(storage)
         (case / "atomic_memory_formal.sv").write_text(ownership_wrapper(proof, build["parameters"], name == "cover") if mode == "cover" else proof)
@@ -173,7 +187,9 @@ def main():
         define = " -D REACHABILITY" if mode == "cover" else ""
         if name == "ownership-cover":
             define += " -D OWNERSHIP_COVER"
-        settings = (f"[options]\nmode {mode}\ndepth 48\ntimeout 900\naigsmt z3\n[engines]\n{engine}\n"
+        depth = 48 + 16 * (build["parameters"]["readLatency"] - 1)
+        witness_depth = 24 + 8 * (build["parameters"]["readLatency"] - 1)
+        settings = (f"[options]\nmode {mode}\ndepth {depth}\ntimeout 900\naigsmt z3\n[engines]\n{engine}\n"
                     f"[script]\nread -formal -sv{define} DitDahE2AtomicMemory.sv AtomicSram.sv atomic_memory_formal.sv\n"
                     "prep -top atomic_memory_formal\n[files]\nDitDahE2AtomicMemory.sv\nAtomicSram.sv\natomic_memory_formal.sv\n")
         command = ["sby", "-f", "run.sby"]
@@ -182,13 +198,13 @@ def main():
                         "prep -top atomic_memory_formal -flatten\n" + ("chformal -assert -remove\n" if mode == "cover" else "") +
                         "chformal -cover -remove\nasync2sync\nchformal -lower\nmemory_map\nopt_clean\n")
             if name == "ownership-cover":
-                settings += ("sat -seq 48 -timeout 900 -set-assumes -set-at 48 reach 3 "
+                settings += (f"sat -seq {depth} -timeout 900 -set-assumes -set-at {depth} reach 3 "
                              "-show reach,scenario,source_valid,accepted,returned,response_valid,response_ready,coverMemory -dump_vcd trace.vcd\n")
             elif name == "cover":
-                settings += "".join(f"sat -seq 24 -timeout 900 -set-assumes -set-at 24 reach[{index}] 1 "
+                settings += "".join(f"sat -seq {witness_depth} -timeout 900 -set-assumes -set-at {witness_depth} reach[{index}] 1 "
                                     f"-show reach,coverMemory -dump_vcd trace{index}.vcd\n" for index in range(22))
             else:
-                settings += ("sat -seq 24 -timeout 900 -set-assumes -prove-asserts -falsify "
+                settings += (f"sat -seq {witness_depth} -timeout 900 -set-assumes -prove-asserts -falsify "
                              "-show initialized,formalMask,formalWriteData,commit_write,mask,new_value,operation,address,owner,reservation,formalMemory "
                              "-dump_vcd trace.vcd\n")
             (case / "run.ys").write_text(settings)

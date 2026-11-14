@@ -96,7 +96,7 @@ def main():
             if negative:
                 assert any(path.suffix == ".vcd" for path in traces), "Missing semantic counterexample"
             if mode == "cover":
-                assert result.stdout.count("Reached cover statement") == 14, "Missing cover witness"
+                assert result.stdout.count("Reached cover statement") == 20, "Missing cover witness"
         assert all(Path(shutil.which(name)).read_bytes() == value for name, value in tool_inputs.items()), "Tools changed"
     versions = {name: subprocess.check_output(command, text=True).strip() for name, command in (
         ("sby", ["sby", "--version"]), ("yosys", ["yosys", "-V"]),
@@ -113,12 +113,14 @@ def main():
               "covers": ["AW before W", "W before AW", "AW and W together", "instruction response backpressure",
                          "data response backpressure", "instruction error", "data error", "contended alternating grants",
                          "machine instruction", "user instruction", "machine data", "user data",
-                         "rejected instruction operation", "rejected data operation"],
+                         "rejected instruction operation", "rejected data operation", "instruction response bypass",
+                         "write response bypass", "data read response bypass", "same-owner replacement",
+                         "other-owner replacement", "held-response replacement"],
               "negativeControls": ["deliver instruction responses to the data owner", "force privileged instruction attributes",
                                    "send atomic requests to AXI"],
               "excluded": ["CPU integration", "device effects", "liveness", "reset during a transaction"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("PASS: AXI unbounded safety, fourteen covers and three counterexamples")
+    print("PASS: AXI unbounded safety, twenty covers and three counterexamples")
 
 
 if __name__ == "__main__":

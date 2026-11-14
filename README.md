@@ -45,10 +45,13 @@ python3 scripts/build_rtl.py --config result/debug.json --output result/debug-rt
 
 The core exposes separate instruction and data request/response ports, plus a separate system bus master when SBA is enabled.
 `DitDahE2Platform` connects these to console/timer devices and AXI4-Lite memory; it requires A disabled.
+Optional local SRAM banks share storage across instruction, data, Debug and SBA access.
 `DitDahE2AtomicPlatform` requires A enabled and serializes all SRAM writers through the shared atomic endpoint, including SBA and external competitors.
 
 ```sh
 make platform PLATFORM_OUTPUT=result/platform
+python3 scripts/build_platform_block.py --platform-build result/platform/design --output result/block
+make platform PLATFORM_MAP=platform-local.json PLATFORM_OUTPUT=result/local-platform
 printf '%s\n' '{"enableA":true}' > result/atomic.json
 make atomic-platform CONFIG=result/atomic.json PLATFORM_OUTPUT=result/atomic
 make software
@@ -56,10 +59,12 @@ make software
 
 [Integration contracts](doc/microarchitecture.md) define stage ownership, memory completion and reset behavior.
 [System bus access](doc/debug-system-bus.md) describes registers, arbitration, physical addressing and debugger use.
+[Local memory](doc/local-memory.md) describes bank configuration, ROM boot and SRAM binding.
+`DitDahE2PlatformBlock` exports functional integration ports and retains observation signals internally for verification.
 
 <p align="center">
   <a href="https://github.com/vowstar/ditdah-e2/issues/1"><img src="https://github.com/user-attachments/assets/eece6547-fc38-4796-b779-99e6d22d6ff3" alt="DitDah-E2 full layout after routing and parasitic extraction" width="640"></a>
-  <br><sub>Default configuration after routing and parasitic extraction. Physical signoff remains open.</sub>
+  <br><sub>Default core after routing and parasitic extraction. Physical signoff remains open.</sub>
 </p>
 
 ## Verify
@@ -71,6 +76,7 @@ make verify-signoff
 
 Signoff combines independent architectural models, protocol checks, bounded formal checks and real OpenOCD/GDB sessions.
 `make verify-sba` runs SBA register, DMI, arbiter, platform and sysbus-only debugger checks; `SBA_OUTPUT` selects a fresh output directory.
+`make verify-local-memory` checks bank controllers; `make verify-local-platform` executes ROM boot against the independent instruction model.
 `make verify-trigger-host` checks GDB hardware breakpoints; `make verify-program-host` selects Program Buffer memory access.
 [Architectural tests](test/test_isa/README.md) document ISA profiles and signature comparisons. `make verify-sail` checks instruction events and signatures with the independent Sail model.
 

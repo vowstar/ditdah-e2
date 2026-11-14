@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+from pathlib import Path
+import tempfile
 import unittest
 
 from test.test_platform import verify_platform as platform
@@ -30,6 +32,28 @@ def device_groups():
 
 
 class PlatformTests(unittest.TestCase):
+    def test_observer_uses_the_selected_block_top(self):
+        with tempfile.TemporaryDirectory(prefix="ditdah-e2-observer-",
+                dir="/data/tmp" if Path("/data/tmp").is_dir() else None) as directory:
+            rtl = Path(directory)
+            top = "module DitDahE2PlatformTop(input clock, reset, output sleeping, output [31:0] retire_pc); DitDahE2Platform platform(); endmodule\n"
+            (rtl / "DitDahE2PlatformTop.sv").write_text(top)
+            (rtl / "DitDahE2Platform.sv").write_text("module DitDahE2Platform; DitDahE2 core(); DitDahE2Console console(); DitDahE2MachineTimer timer(); endmodule\n")
+            block = platform.emit_wrapper(top)[0]
+            (rtl / "DitDahE2PlatformBlock.sv").write_text(block)
+            self.assertIn("DitDahE2PlatformTop dut(.*);", platform.observer(rtl))
+            wrapper = platform.observer(rtl, "DitDahE2PlatformBlock")
+            self.assertIn("DitDahE2PlatformBlock dut(", wrapper)
+            self.assertNotIn("DitDahE2PlatformTop dut(", wrapper)
+            self.assertIn("assign retire_pc = dut.fullTop.retire_pc;", wrapper)
+            self.assertIn("dut.fullTop.platform.core.instruction_request_valid", wrapper)
+            self.assertNotIn(".retire_pc(", wrapper)
+            (rtl / "DitDahE2PlatformBlock.sv").write_text(block.replace(".clock(clock)", ".clock(reset)"))
+            with self.assertRaisesRegex(ValueError, "projection"):
+                platform.observer(rtl, "DitDahE2PlatformBlock")
+            with self.assertRaisesRegex(ValueError, "Unsupported"):
+                platform.observer(rtl, "UnsupportedTop")
+
     def test_fixed_device_timing_and_snapshot(self):
         states, responses, timer, console = platform.device_expectations(device_groups())
         self.assertEqual(states[90][5:], (0, 0, 0))

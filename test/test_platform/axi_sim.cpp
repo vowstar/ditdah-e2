@@ -63,9 +63,9 @@ int main(int argc, char **argv) {
         dut.data_request_bits_machine = d.machine;
         dut.data_request_bits_operation = d.operation;
         dut.instruction_response_ready = !active || current.owner != 0 ||
-            (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
+            !current.nativeDelay || (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
         dut.data_response_ready = !active || current.owner != 1 ||
-            (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
+            !current.nativeDelay || (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
         dut.axi_aw_ready = active && cycle - started > current.awDelay;
         dut.axi_w_ready = active && cycle - started > current.wDelay;
         dut.axi_ar_ready = active && cycle - started > current.arDelay;
@@ -76,6 +76,31 @@ int main(int argc, char **argv) {
         dut.axi_r_bits_response = active ? current.response : 0;
         dut.axi_r_bits_data = readData;
         dut.eval();
+        if (active && (current.owner ? dut.data_response_valid && dut.data_response_ready :
+                                      dut.instruction_response_valid && dut.instruction_response_ready) &&
+            next[current.owner] < queues[current.owner].size()) {
+            const Request replacement = queues[current.owner][next[current.owner]];
+            if (current.owner) {
+                dut.data_request_valid = 1;
+                dut.data_request_bits_address = replacement.address;
+                dut.data_request_bits_write = replacement.write;
+                dut.data_request_bits_data = replacement.data;
+                dut.data_request_bits_mask = replacement.mask;
+                dut.data_request_bits_size = replacement.size;
+                dut.data_request_bits_machine = replacement.machine;
+                dut.data_request_bits_operation = replacement.operation;
+            } else {
+                dut.instruction_request_valid = 1;
+                dut.instruction_request_bits_address = replacement.address;
+                dut.instruction_request_bits_write = replacement.write;
+                dut.instruction_request_bits_data = replacement.data;
+                dut.instruction_request_bits_mask = replacement.mask;
+                dut.instruction_request_bits_size = replacement.size;
+                dut.instruction_request_bits_machine = replacement.machine;
+                dut.instruction_request_bits_operation = replacement.operation;
+            }
+            dut.eval();
+        }
 #define P(signal) std::cout << ' ' << uint64_t(dut.signal)
         std::cout << cycle;
         P(reset);

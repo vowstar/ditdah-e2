@@ -27,7 +27,10 @@
           trap 'rm -rf "$work"' EXIT
           ${pkgs.scala-cli}/bin/scala-cli run --power --offline ${arguments} \
             --workspace "$work" --main-class "ditdah_e2.''${DITDAH_E2_GENERATOR:-DitDahE2}" \
-            "$DITDAH_E2_SOURCE" -- "$@"
+            "$DITDAH_E2_SOURCE" \
+            ${zaozi}/stdlib/src/TypeUtils.scala \
+            ${zaozi}/stdlib/src/Decoupled.scala \
+            ${zaozi}/stdlib/src/default/Decoupled.scala -- "$@"
         '';
         maven = pkgs.mkMavenRepository { lockFile = "${zaozi}/mtf.lock.json"; };
         crossCompiler = pkgs.pkgsCross.riscv32-embedded.stdenv.cc;

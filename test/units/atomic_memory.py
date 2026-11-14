@@ -54,14 +54,17 @@ object DitDahE2 extends Generator[AtomicParameters, AtomicLayers, AtomicMemoryIO
 
 
 def configuration(value):
-    if not isinstance(value, dict) or value.keys() - {"baseAddress", "sizeBytes"}:
+    if not isinstance(value, dict) or value.keys() - {"baseAddress", "sizeBytes", "readLatency"}:
         raise ValueError("Invalid atomic memory configuration fields")
-    result = {"baseAddress": value.get("baseAddress", 0), "sizeBytes": value.get("sizeBytes", 4096)}
+    result = {"baseAddress": value.get("baseAddress", 0), "sizeBytes": value.get("sizeBytes", 4096),
+              "readLatency": value.get("readLatency", 1)}
     base, size = result["baseAddress"], result["sizeBytes"]
     if type(base) is not int or base < 0 or base > MASK or base % 4:
         raise ValueError("Atomic base must be an aligned RV32 address")
     if type(size) is not int or size < 4 or size >= 1 << 31 or size % 4 or base + size > 1 << 32:
         raise ValueError("Atomic size must contain complete RV32 words")
+    if type(result["readLatency"]) is not int or result["readLatency"] not in (1, 2):
+        raise ValueError("Atomic read latency must be one or two cycles")
     return result
 
 
@@ -223,12 +226,13 @@ class Reference:
             self.reservation = None
             self.counts["clears"] += 1
         if self.pending is not None:
-            self.apply(self.pending, cycle, clear)
-            event = self.history[-1]
-            if event["writeValue"] is not None:
-                address = (event["request"][0] - self.parameters["baseAddress"]) // 4
-                write_mask, write_data = event["request"][4], event["writeValue"]
-            self.pending = None
+            if cycle - self.pending[2] == self.parameters["readLatency"]:
+                self.apply(self.pending, cycle, clear)
+                event = self.history[-1]
+                if event["writeValue"] is not None:
+                    address = (event["request"][0] - self.parameters["baseAddress"]) // 4
+                    write_mask, write_data = event["request"][4], event["writeValue"]
+                self.pending = None
         elif selected is not None:
             self.pending = selected, requests[selected], cycle
             self.cursor = (selected + 1) % 4
@@ -368,6 +372,8 @@ def vectors(parameters, seed=1):
     for operation in (1, 2):
         driver.command(1, request(base, operation=1))
         driver.issue(1, request(base, operation=operation, write=operation == 2, data=9))
+        for _ in range(driver.reference.parameters["readLatency"] - 1):
+            driver.tick()
         driver.tick(clear=1)
         outputs = driver.tick()
         assert outputs[1][1:] == (1, 1 if operation == 2 else 77, 0)
@@ -457,8 +463,9 @@ def digest(path):
 
 def build(output, parameters):
     output = Path(output).resolve()
-    names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/AtomicInterfaces.scala",
-             "ditdah_e2/src/AtomicMemory.scala", "ditdah_e2/src/AtomicSram.sv", "test/units/atomic_memory.py", "test/test_atomic/test_atomic_memory.py",
+    names = ["ditdah_e2/src/Parameters.scala", "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/DebugTransportInterfaces.scala", "ditdah_e2/src/AtomicInterfaces.scala",
+             "ditdah_e2/src/AtomicMemory.scala", "ditdah_e2/src/AtomicSram.sv", "ditdah_e2/src/SramInterfaces.scala",
+             "ditdah_e2/src/Sram.scala", "ditdah_e2/src/Sram.sv", "test/units/atomic_memory.py", "test/test_atomic/test_atomic_memory.py",
              "platform.json", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(ROOT)) for path in sorted((ROOT / "nix").glob("*.nix"))]
     contents = {name: (ROOT / name).read_bytes() for name in names}
@@ -495,6 +502,7 @@ def build(output, parameters):
                 raise RuntimeError(f"Atomic generation failed in command {number}")
         shutil.copytree(work / "rtl", output / "rtl")
     shutil.copyfile(output / "inputs/ditdah_e2/src/AtomicSram.sv", output / "rtl/AtomicSram.sv")
+    shutil.copyfile(output / "inputs/ditdah_e2/src/Sram.sv", output / "rtl/Sram.sv")
     report = {"exitStatus": 0, "parameters": parameters, "commands": commands,
               "inputHashes": {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()},
               "generatedHashes": {str(path.relative_to(output / "inputs")): digest(path) for path in (output / "inputs/generated").rglob("*") if path.is_file()},
@@ -550,7 +558,7 @@ def simulate(directory, rows, rtl, commands, mutant=None):
     (directory / "vectors.txt").write_text("".join(" ".join(f"{value:x}" for value in values) + "\n" for values in rows))
     local_commands = []
     for command in (["iverilog", "-g2012", "-s", "AtomicMemoryBench", "-o", "atomic-sim", "atomic_tb.sv",
-                     "DitDahE2AtomicMemory.sv", "AtomicSram.sv"], ["vvp", "atomic-sim"]):
+                     "DitDahE2AtomicMemory.sv", "AtomicSram.sv", "Sram.sv"], ["vvp", "atomic-sim"]):
         result = subprocess.run(command, cwd=directory, capture_output=True, text=True)
         item = {"directory": directory.name, "argv": command, "exitStatus": result.returncode}
         commands.append(item)

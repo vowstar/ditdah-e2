@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 from build_rtl import digest
+from build_platform_block import BLOCK, TOP, emit_wrapper
 from build_software import tool
 from test.test_platform.console import Reference as ConsoleReference
 from test.common.elf import Region, load_elf
@@ -25,7 +26,9 @@ from test.common.model import Model
 from test.test_platform.timer import expected as timer_expected
 
 
-def observer(rtl):
+def observer(rtl, selected_top=TOP):
+    if selected_top not in (TOP, BLOCK):
+        raise ValueError("Unsupported platform verification top")
     top = (rtl / "DitDahE2PlatformTop.sv").read_text()
     platform = (rtl / "DitDahE2Platform.sv").read_text()
     ports = re.search(r"module DitDahE2PlatformTop\((.*?)\);", top, re.S)
@@ -48,9 +51,19 @@ def observer(rtl):
     notice = """// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
 """
-    return (notice + "module PlatformBench(" + ports[1] + ",\n" +
+    wrapper = (notice + "module PlatformBench(" + ports[1] + ",\n" +
             ",\n".join(declarations) + ");\nDitDahE2PlatformTop dut(.*);\n" +
             "\n".join(assignments) + "\nendmodule\n")
+    if selected_top == BLOCK:
+        expected, functional, hidden = emit_wrapper(top)
+        if (rtl / f"{BLOCK}.sv").read_text() != expected:
+            raise ValueError("Block RTL differs from the functional interface projection")
+        connections = ",\n".join(f".{port['name']}({port['name']})" for port in functional)
+        wrapper = wrapper.replace(f"{TOP} dut(.*);", f"{BLOCK} dut(\n{connections}\n);")
+        wrapper = wrapper.replace("dut.platform.", "dut.fullTop.platform.")
+        observations = "\n".join(f"assign {port['name']} = dut.fullTop.{port['name']};" for port in hidden)
+        wrapper = wrapper.replace("\nendmodule\n", "\n" + observations + "\nendmodule\n")
+    return wrapper
 
 
 def workload(destination, generated, parameters, regions, selected="timer"):
@@ -164,9 +177,10 @@ def device_expectations(groups, output=b"E23\n"):
     return timer, expected_responses, timer_counts, console.counts
 
 
-def check(image, parameters, regions, trace, selected="timer"):
+def check(image, parameters, regions, trace, selected="timer", *, expected_output=None):
     groups, observed = cycles(trace)
-    timer, device_results, timer_counts, console_counts = device_expectations(groups, b"E23\n" if selected == "timer" else b"U\n")
+    output = expected_output if expected_output is not None else (b"E23\n" if selected == "timer" else b"U\n")
+    timer, device_results, timer_counts, console_counts = device_expectations(groups, output)
     model = Model(image.words(), image.entry, enable_m=parameters["enableM"], enable_c=parameters["enableC"],
                   protected_mode=parameters.get("protectedMode", False), enable_a=parameters.get("enableA", False),
                   enable_zba=parameters.get("enableZba", False), enable_zbb=parameters.get("enableZbb", False),
@@ -182,12 +196,19 @@ def check(image, parameters, regions, trace, selected="timer"):
         return next((name for name, entry in regions.items()
                      if entry["base"] <= address < entry["base"] + entry["size"]), None)
 
+    memory_regions = ("rom", "sram", "itcm", "dtcm")
+
+    def external(name):
+        return name in memory_regions and regions[name].get("backend", "axi") == "axi"
+
     for cycle, group in enumerate(groups):
         assert int(group[0][7]) == int(model.sleeping), "Sleep state differs from retired WFI"
         sleep += model.sleeping
         model.clock(cycle, timer[cycle][7] | (timer[cycle][6] << 1))
         model.time = timer[cycle][5]
-        for fields in group[1:]:
+        # Bus completion supplies the old response before a replacement takes ownership.
+        order = {"A": 0, "S": 1, "P": 2, "Q": 3, "X": 4, "R": 5, "N": 6}
+        for fields in sorted(group[1:], key=lambda fields: order[fields[0]]):
             kind = fields[0]
             if kind == "P":
                 port, request = fields[2], tuple(map(int, fields[3:]))
@@ -214,13 +235,13 @@ def check(image, parameters, regions, trace, selected="timer"):
                     assert region_at(original[0]) == name and request == (
                         original[0] - regions[name]["base"], *original[1:]), "Device route differs"
                 elif port == "I":
-                    assert region_at(request[0]) in ("rom", "sram")
+                    assert region_at(request[0]) in memory_regions
                     assert request[1:5] == (0, 0, 0, 2) and request[0] % 4 == 0
                 else:
                     address, write, data, mask, size, machine = request
                     assert size <= 2 and not address % (1 << size)
                     assert mask == (((1 << (1 << size)) - 1) << (address % 4) if write else 0)
-                    assert region_at(address) in ("sram", "console", "timer", "rom")
+                    assert region_at(address) in (*memory_regions, "console", "timer")
                     assert not write or region_at(address) != "rom"
                     assert region_at(address) not in ("console", "timer") or size == 2
             elif kind == "S":
@@ -229,8 +250,10 @@ def check(image, parameters, regions, trace, selected="timer"):
                 assert start < cycle, "Native response preceded acceptance"
                 if port in ("I", "D"):
                     name = region_at(request[0])
-                    if name in ("rom", "sram"):
+                    if external(name):
                         assert external_results.pop(port) == response, "Native response differs from AXI"
+                    elif name in ("itcm", "dtcm"):
+                        assert response == (0 if request[1] else model.word(request[0] & ~3), 0), "Local SRAM response differs"
                     else:
                         endpoint = "C" if name == "console" else "T"
                         assert device_results[cycle, endpoint] == response, "Native response differs from device"
@@ -251,12 +274,12 @@ def check(image, parameters, regions, trace, selected="timer"):
                     request = outstanding[port][1]
                     assert protection == ((4 if port == "I" else 0) | request[5]), "AXI privilege differs"
                     assert not request[1] and address == request[0] & ~3
-                    assert region_at(address) in ("rom", "sram")
+                    assert external(region_at(address)), "Local access reached AXI"
                     issued[port] = ("read", address)
                 elif channel in ("AW", "W"):
                     assert channel not in writes and "D" in outstanding
                     request = outstanding["D"][1]
-                    assert request[1] and region_at(request[0]) == "sram"
+                    assert request[1] and region_at(request[0]) != "rom" and external(region_at(request[0]))
                     assert value == ((request[0] & ~3, request[5]) if channel == "AW" else (request[2], request[3])), "AXI write attributes differ"
                     writes[channel] = value
                     if channel == "AW":
@@ -321,7 +344,7 @@ def check(image, parameters, regions, trace, selected="timer"):
         assert observed[image.symbols["timer_events"]] == 3 and observed[image.symbols["timer_errors"]] == 0
         signature = [observed[image.symbols["timer_observations"] + 4 * index] for index in range(3)]
         assert all(later >= earlier + 20 for earlier, later in zip(signature, signature[1:])), "Timer interrupt interval is too short"
-    else:
+    elif selected == "protected":
         assert parameters.get("protectedMode") and interrupts == 0 and sleep == 0
         assert instructions["mret"] == 2 and modes["user"] > 0 and modes["machine"] > 0
         assert traps == [(image.symbols["denied_store"], 7, image.symbols["protected_word"]),
@@ -331,6 +354,10 @@ def check(image, parameters, regions, trace, selected="timer"):
                              0x13579BDF, 8, 0x2468ACE0], "Protected workload signature differs"
         assert observed[image.symbols["protected_word"]] == 0x13579BDF, "Denied store changed memory"
         assert observed[image.symbols["allowed_word"]] == 0x2468ACE0, "Allowed store did not complete"
+    else:
+        assert selected == "local" and interrupts == 0 and not traps
+        assert instructions["fence.i"] >= 2, "Local code update was not synchronized"
+        signature = []
     return {"cycles": len(groups), "interrupts": interrupts, "sleepCycles": sleep,
             "memoryInstructions": memory_count, "instructions": dict(sorted(instructions.items())),
             "timer": timer_counts, "console": console_counts, "observations": signature,
@@ -389,7 +416,7 @@ def main():
     copied_inputs = verify_platform_inputs(args.output / "platform", manifest)
     source_names = ("test/test_platform/verify_platform.py", "test/test_platform/test_platform.py", "test/test_platform/platform_sim.cpp", "test/common/rvfi_trace.hpp", "test/common/inactive_debug.hpp", "test/common/model.py", "test/common/bit_model.py", "test/common/compressed_model.py",
                     "test/units/compressed_unit.py", "test/test_platform/console.py", "test/test_platform/timer.py", "test/units/pmp.py", "test/common/elf.py",
-                    "scripts/build_software.py", "scripts/build_rtl.py", "software/start.S", "software/link.ld",
+                    "scripts/build_software.py", "scripts/build_rtl.py", "scripts/build_platform_block.py", "software/start.S", "software/link.ld",
                     "software/timer.c", "software/protected.S")
     inputs = {name: (ROOT / name).read_bytes() for name in source_names}
     for name, value in inputs.items():
@@ -409,7 +436,7 @@ def main():
         def diagnostic(value):
             return value.replace(str(work), "<workspace>").replace(str(args.output.resolve()), "<output>").replace(str(ROOT), "<source>")
 
-        wrapper = observer(args.output / "platform/rtl")
+        wrapper = observer(args.output / "platform/rtl", manifest["top"])
         (work / "PlatformBench.sv").write_text(wrapper)
         (args.output / "PlatformBench.sv").write_text(wrapper)
         command = ["verilator", "--cc", "--exe", "--build", "-j", "2", "--top-module", "PlatformBench",

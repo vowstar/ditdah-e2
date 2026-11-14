@@ -1,0 +1,8 @@
+{
+  "rom": {"base": 0, "size": 65536},
+  "sram": {"base": 536870912, "size": 65536},
+  "console": {"base": 268435456, "size": 4096},
+  "timer": {"base": 268439552, "size": 4096},
+  "itcm": {"base": 65536, "size": 16384, "readLatency": 1, "backend": "sram"},
+  "dtcm": {"base": 536936448, "size": 32768, "readLatency": 1, "backend": "sram"}
+}

@@ -4,7 +4,7 @@
 
 import unittest
 
-from test.test_platform.axi import CHANNELS, READY, FIELDS, check, parse_trace, vectors
+from test.test_platform.axi import CHANNELS, READY, FIELDS, check, check_axi_structure, expected_ports, parse_trace, vectors
 from formal.axi.axi_formal import mutate_owner
 
 
@@ -26,7 +26,74 @@ def transaction():
     return [request], [0] * 256, samples
 
 
+def replacement():
+    first = dict.fromkeys(FIELDS, 0)
+    first.update(owner=0, address=0x20000000, size=2, machine=1, response=2)
+    second = dict.fromkeys(FIELDS, 0)
+    second.update(owner=1, address=0x20000004, write=1, data=0x12345678, mask=15, size=2, machine=1)
+    rows = [sample(0, reset=1), sample(1, iv=1, ir=1, ia=first["address"], iz=2, ip=1),
+            sample(2, rv=1, ry=1, ra=first["address"], rp=5),
+            sample(3, qv=1, qy=1, qr=2, ov=1, **{"or": 1}, of=1,
+                   dv=1, dr=1, da=second["address"], dw=1, dd=second["data"], dm=15, dz=2, dp=1),
+            sample(4, av=1, ay=1, aa=second["address"], ap=1, wv=1, wy=1, wd=second["data"], wm=15),
+            sample(5, bv=1, by=1, pv=1, pr=1), sample(6)]
+    return [first, second], [0] * 256, rows
+
+
 class AxiTests(unittest.TestCase):
+    def test_bypass_and_replacement(self):
+        counts = check(*replacement())
+        self.assertEqual(counts["responses"], 2)
+        self.assertEqual(counts["bypassResponses"], 2)
+        self.assertEqual(counts["faultBypassResponses"], 1)
+        self.assertEqual(counts["otherOwnerReplacements"], 1)
+
+    def test_stalled_bypass_then_replacement(self):
+        requests, memory, rows = replacement()
+        stalled = dict(rows[3], dr=0, **{"or": 0})
+        held = dict(rows[3], qv=0, qy=0, qr=0)
+        rows[3:4] = [stalled, held]
+        for index, row in enumerate(rows):
+            row["cycle"] = index
+        counts = check(requests, memory, rows)
+        self.assertEqual(counts["nativeResponseStalls"], 1)
+        rows[4]["of"] = 0
+        with self.assertRaisesRegex(AssertionError, "Unstable o"):
+            check(requests, memory, rows)
+
+    def test_replacement_uses_old_response_owner(self):
+        requests, memory, rows = replacement()
+        rows[3].update(ov=0, pv=1, pr=1, pf=1)
+        with self.assertRaisesRegex(AssertionError, "wrong owner"):
+            check(requests, memory, rows)
+
+    def test_no_replacement_before_completion(self):
+        requests, memory, rows = replacement()
+        rows[2].update(dv=1, dr=1)
+        with self.assertRaisesRegex(AssertionError, "before native completion"):
+            check(requests, memory, rows)
+
+    def test_axi_structure_rejects_combination_and_abi_changes(self):
+        ports = {}
+        bit = 2
+        for name, (direction, width) in expected_ports().items():
+            ports[name] = {"direction": direction, "bits": list(range(bit, bit + width))}
+            bit += width
+        module = {"ports": ports, "cells": {}}
+        design = {"modules": {"DitDahE2AxiLite": module}}
+        self.assertEqual(check_axi_structure(design)["axiInputToOutputCombinationalPaths"], 0)
+        cell = {"type": "$dff", "port_directions": {"D": "input", "Q": "output"},
+                "connections": {"D": ports["axi_r_valid"]["bits"], "Q": ports["axi_ar_valid"]["bits"]}}
+        module["cells"]["path"] = cell
+        check_axi_structure(design)
+        cell["type"] = "$not"
+        with self.assertRaisesRegex(AssertionError, "combinational input-to-output"):
+            check_axi_structure(design)
+        module["cells"].clear()
+        ports["axi_w_bits_strobe"]["bits"].append(bit)
+        with self.assertRaisesRegex(AssertionError, "ABI changed"):
+            check_axi_structure(design)
+
     def test_atomic_request_fails_without_bus_access(self):
         for owner in (0, 1):
             for operation in range(1, 16):

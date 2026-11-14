@@ -42,6 +42,40 @@ class PlatformMapTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 platform_map.validate(value)
 
+    def test_local_banks_and_backend_selection(self):
+        value = {**self.regions, "itcm": {"base": 0x10000, "size": 16384},
+                 "dtcm": {"base": 0x20010000, "size": 32768, "readLatency": 2, "backend": "axi"}}
+        regions = platform_map.validate(value)
+        self.assertEqual(regions["itcm"], {"base": 0x10000, "size": 16384, "readLatency": 1, "backend": "sram"})
+        params = platform_map.parameters(regions, {})
+        self.assertEqual(params["itcm"], {"baseAddress": 0x10000, "sizeBytes": 16384,
+                                         "readLatency": 1, "useSram": True})
+        self.assertFalse(params["dtcm"]["useSram"])
+        self.assertEqual(params["dtcm"]["readLatency"], 2)
+        files = platform_map.artifacts(value)
+        self.assertIn("ITCM (rwx) : ORIGIN = 0x00010000, LENGTH = 0x4000", files["memory.ld"])
+        self.assertIn("#define DITDAH_DTCM_LOCAL 0", files["platform.h"])
+        self.assertEqual(json.loads(files["map.json"]), regions)
+        with self.assertRaisesRegex(ValueError, "ordinary platform"):
+            platform_map.parameters(value, {"enableA": True})
+
+    def test_local_bank_rejections(self):
+        for fields in ({"base": 0, "size": 16}, {"base": 0x10000, "size": 0x80000000},
+                       {"base": 0x10000, "size": 16, "readLatency": True},
+                       {"base": 0x10000, "size": 16, "readLatency": 0},
+                       {"base": 0x10000, "size": 16, "readLatency": 3},
+                       {"base": 0x10000, "size": 16, "backend": "cache"}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                platform_map.validate({**self.regions, "itcm": fields})
+
+    def test_local_gate_configuration_is_separate_from_core_gate(self):
+        command = ["make", "--no-print-directory", "-n", "verify-local-platform", "CONFIG=core-options.json"]
+        result = subprocess.run(command, cwd=platform_map.ROOT, check=True, capture_output=True, text=True)
+        self.assertNotIn("core-options.json", result.stdout)
+        result = subprocess.run([*command, "LOCAL_MEMORY_CONFIG=local-options.json"], cwd=platform_map.ROOT,
+                                check=True, capture_output=True, text=True)
+        self.assertIn('--config "local-options.json"', result.stdout)
+
     def test_region_bounds_and_alignment(self):
         for base, size in ((-4, 4), (0x100000000, 4), (0, 0), (0, -4), (2, 4), (0, 6),
                            (0xFFFFFFFC, 8), (False, 8), (0, True), ("0", 8), (0, 8.0)):

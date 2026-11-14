@@ -4,6 +4,10 @@
 export PYTHONDONTWRITEBYTECODE = 1
 CONFIG ?=
 PLATFORM_OUTPUT ?= result/platform
+PLATFORM_MAP ?= platform.json
+LOCAL_MEMORY_OUTPUT ?= result/local-memory
+LOCAL_MEMORY_MAP ?= platform-local.json
+LOCAL_MEMORY_CONFIG ?=
 GENERIC_OUTPUT ?= result/generic
 DEBUG_LATENCY_OUTPUT ?= result/debug-latency
 ISA_MENVCFG_OUTPUT ?= result/isa-menvcfg
@@ -47,10 +51,24 @@ rtl:
 	python3 scripts/build_rtl.py $(if $(CONFIG),--config "$(CONFIG)")
 
 platform:
-	python3 scripts/build_platform.py $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
+	python3 scripts/build_platform.py --platform "$(PLATFORM_MAP)" $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
 
 atomic-platform:
-	python3 scripts/build_atomic_platform.py $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
+	python3 scripts/build_atomic_platform.py --platform "$(PLATFORM_MAP)" $(if $(CONFIG),--config "$(CONFIG)") --output "$(PLATFORM_OUTPUT)/design"
+
+.PHONY: verify-local-memory verify-local-platform verify-local-sba
+verify-local-memory:
+	python3 test/units/local_memory.py --output "$(LOCAL_MEMORY_OUTPUT)/unit"
+
+verify-local-platform:
+	python3 scripts/build_platform.py --platform "$(LOCAL_MEMORY_MAP)" $(if $(LOCAL_MEMORY_CONFIG),--config "$(LOCAL_MEMORY_CONFIG)") --output "$(LOCAL_MEMORY_OUTPUT)/platform"
+	python3 test/test_local_memory/platform.py --platform-build "$(LOCAL_MEMORY_OUTPUT)/platform" --output "$(LOCAL_MEMORY_OUTPUT)/boot"
+
+verify-local-sba:
+	mkdir -p "$(LOCAL_MEMORY_OUTPUT)/sba"
+	printf '%s\n' '{"enableDebug":true,"enableSba":true}' > "$(LOCAL_MEMORY_OUTPUT)/sba/core.json"
+	python3 scripts/build_platform.py --platform "$(LOCAL_MEMORY_MAP)" --config "$(LOCAL_MEMORY_OUTPUT)/sba/core.json" --output "$(LOCAL_MEMORY_OUTPUT)/sba/platform"
+	python3 -m test.test_sba.local --platform "$(LOCAL_MEMORY_OUTPUT)/sba/platform" --output "$(LOCAL_MEMORY_OUTPUT)/sba/check"
 
 software:
 	python3 scripts/build_software.py
@@ -253,7 +271,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module verify-sba
+verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module verify-sba verify-local-memory verify-local-platform
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py

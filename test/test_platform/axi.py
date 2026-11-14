@@ -57,6 +57,9 @@ def vectors(seed, count=1024):
                                          (7, 0, 3)[index % 3] if index < 32 else rng.randrange(20),
                                          rng.randrange(12), rng.randrange(12), rng.randrange(12),
                                          (0, 2, 3)[index % 3])), strict=True))
+    for index in range(4):
+        rows.append(dict(zip(FIELDS, (0, 0, 0x20000000 + 4 * index, 0, 0, 2, 1, 0,
+                                     0, 0, 0, 0, 0, (0, 2, 3, 0)[index]), strict=True)))
     return rows, [rng.getrandbits(32) for _ in range(256)]
 
 
@@ -97,29 +100,12 @@ def check(vectors, initial, samples, complete=True):
                 if previous[channel + "v"] and not previous[READY[channel]]:
                     assert sample[channel + "v"], f"Withdrawn {channel} at cycle {cycle}"
                     assert all(sample[field] == previous[field] for field in payload), f"Unstable {channel} at cycle {cycle}"
-        if active:
+        old_owner = active["request"]["owner"] if active else None
+        native_complete = any(sample[channel + "v"] and sample[READY[channel]] for channel in ("o", "p"))
+        if active and not native_complete:
             assert not sample["ir"] and not sample["dr"], "Request accepted before native completion"
-        else:
+        if active is None:
             assert not any(sample[name] for name in ("av", "wv", "rv", "by", "qy", "ov", "pv")), "Unowned output"
-        accepted = [owner for owner, channel in enumerate(("i", "d"))
-                    if sample[channel + "v"] and sample[READY[channel]]]
-        assert len(accepted) <= 1, "Two native requests accepted"
-        if accepted:
-            assert active is None, "Second outstanding native request"
-            owner = accepted[0]
-            assert positions[owner] < len(queues[owner]), "Extra native request"
-            row = queues[owner][positions[owner]]
-            prefix = "d" if owner else "i"
-            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p", "x")) == tuple(
-                row[field] for field in ("address", "write", "data", "mask", "size", "machine", "operation")), "Changed native request"
-            if sample["iv"] and sample["dv"]:
-                assert owner == prefer, "Arbitration did not alternate"
-                counts["contendedGrants"] += 1
-            prefer = 1 - owner
-            positions[owner] += 1
-            active = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None, "response": (cycle, 0, 1) if row["operation"] else None}
-            counts["requests"] += 1
-            offsets.add(row["address"] % 4)
         if active:
             request = active["request"]
             if request["operation"]:
@@ -173,8 +159,12 @@ def check(vectors, initial, samples, complete=True):
                 assert owner == request["owner"], "Response delivered to wrong owner"
                 assert active["response"] is not None, "Native response before AXI response"
                 responded, value, fault = active["response"]
-                assert responded < cycle, "Native response before captured result"
+                assert active["accepted"] < cycle, "Native response before request ownership"
+                assert responded <= cycle, "Native response before AXI result"
                 assert (sample[channel + "d"], sample[channel + "f"]) == (value, fault), "Wrong native response"
+                if responded == cycle:
+                    counts["bypassResponses"] += 1
+                    counts["faultBypassResponses"] += fault
                 if sample[READY[channel]]:
                     counts["responses"] += 1
                     if request["operation"]:
@@ -184,12 +174,86 @@ def check(vectors, initial, samples, complete=True):
                     active = None
                 else:
                     counts["nativeResponseStalls"] += 1
+        accepted = [owner for owner, channel in enumerate(("i", "d"))
+                    if sample[channel + "v"] and sample[READY[channel]]]
+        assert len(accepted) <= 1, "Two native requests accepted"
+        if accepted:
+            assert active is None, "Second outstanding native request"
+            owner = accepted[0]
+            assert positions[owner] < len(queues[owner]), "Extra native request"
+            row = queues[owner][positions[owner]]
+            prefix = "d" if owner else "i"
+            assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p", "x")) == tuple(
+                row[field] for field in ("address", "write", "data", "mask", "size", "machine", "operation")), "Changed native request"
+            if sample["iv"] and sample["dv"]:
+                assert owner == prefer, "Arbitration did not alternate"
+                counts["contendedGrants"] += 1
+            if old_owner is not None:
+                assert native_complete, "Replacement without old completion"
+                counts["replacementTransfers"] += 1
+                counts["sameOwnerReplacements" if old_owner == owner else "otherOwnerReplacements"] += 1
+            prefer = 1 - owner
+            positions[owner] += 1
+            active = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None,
+                      "response": (cycle, 0, 1) if row["operation"] else None}
+            counts["requests"] += 1
+            offsets.add(row["address"] % 4)
         previous = sample
     if complete:
         assert active is None, "Unfinished native request"
         assert positions == list(map(len, queues)), "Unaccepted test requests"
         assert counts["responses"] == len(vectors), "Missing native completion"
     return {**counts, "writeMasks": sorted(masks), "addressOffsets": sorted(offsets), "cycles": len(samples)}
+
+
+def expected_ports():
+    expected = {"clock": ("input", 1), "reset": ("input", 1)}
+    for port in ("instruction", "data"):
+        for name, direction, width in (("request_valid", "input", 1), ("request_ready", "output", 1),
+                                       ("response_valid", "output", 1), ("response_ready", "input", 1),
+                                       ("response_bits_data", "output", 32), ("response_bits_fault", "output", 1)):
+            expected[port + "_" + name] = direction, width
+        for name, width in (("address", 32), ("machine", 1), ("write", 1), ("data", 32),
+                            ("mask", 4), ("size", 2), ("operation", 4)):
+            expected[port + "_request_bits_" + name] = "input", width
+    for channel, master, payload in (("aw", True, (("address", 32), ("protection", 3))),
+                                     ("w", True, (("data", 32), ("strobe", 4))),
+                                     ("b", False, (("response", 2),)),
+                                     ("ar", True, (("address", 32), ("protection", 3))),
+                                     ("r", False, (("data", 32), ("response", 2)))):
+        direction = "output" if master else "input"
+        expected[f"axi_{channel}_valid"] = direction, 1
+        expected[f"axi_{channel}_ready"] = "input" if master else "output", 1
+        for name, width in payload:
+            expected[f"axi_{channel}_bits_{name}"] = direction, width
+    return expected
+
+
+def check_axi_structure(design):
+    module = design["modules"]["DitDahE2AxiLite"]
+    ports = module["ports"]
+    expected = expected_ports()
+    assert {name: (port["direction"], len(port["bits"])) for name, port in ports.items()} == expected, "Flattened AXI ABI changed"
+    reached = {bit for name, port in ports.items() if name.startswith("axi_") and port["direction"] == "input"
+               for bit in port["bits"] if isinstance(bit, int)}
+    sequential = ("$dff", "$adff", "$sdff", "$dlatch", "$aldff")
+    changed = True
+    while changed:
+        changed = False
+        for cell in module["cells"].values():
+            if cell["type"].startswith(sequential):
+                continue
+            inputs = {bit for name, bits in cell["connections"].items() if cell["port_directions"][name] == "input" for bit in bits}
+            if not reached.intersection(inputs):
+                continue
+            outputs = {bit for name, bits in cell["connections"].items() if cell["port_directions"][name] == "output" for bit in bits if isinstance(bit, int)}
+            if outputs - reached:
+                reached.update(outputs)
+                changed = True
+    for name, port in ports.items():
+        if name.startswith("axi_") and port["direction"] == "output":
+            assert not reached.intersection(port["bits"]), f"AXI combinational input-to-output path reaches {name}"
+    return {"portCount": len(ports), "axiInputToOutputCombinationalPaths": 0}
 
 
 def negative_controls(rows, initial, samples):
@@ -218,8 +282,9 @@ def sha(value):
 
 
 def freeze(root, destination):
-    names = ["ditdah_e2/src/" + name for name in ("AxiLite.scala", "AxiLiteInterfaces.scala", "Interfaces.scala", "Parameters.scala")]
-    names += ["test/test_platform/axi.py", "test/test_platform/axi_sim.cpp", "flake.nix", "flake.lock"]
+    names = ["ditdah_e2/src/" + name for name in ("AxiLite.scala", "AxiLiteInterfaces.scala", "Interfaces.scala",
+                                               "Parameters.scala", "DebugTransportInterfaces.scala")]
+    names += ["test/test_platform/axi.py", "test/test_platform/axi_sim.cpp", "test/test_platform/test_axi.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(root)) for path in sorted((root / "nix").glob("*.nix"))]
     contents = {name: (root / name).read_bytes() for name in names}
     for name, value in contents.items():
@@ -262,6 +327,10 @@ def main():
         rtl = sorted((work / "rtl").glob("*.sv"))
         for path in rtl:
             shutil.copyfile(path, output / path.name)
+        run(["yosys", "-Q", "-T", "-p", "read_verilog -sv " + " ".join(str(path.relative_to(work)) for path in rtl) +
+             "; hierarchy -check -top DitDahE2AxiLite; proc; opt_clean; write_json structure.json"])
+        structure = check_axi_structure(json.loads((work / "structure.json").read_text()))
+        shutil.copyfile(work / "structure.json", output / "structure.json")
         run(["verilator", "--cc", "--exe", "--build", "-j", "2", "--top-module", "DitDahE2AxiLite",
              "-Wno-fatal", *[str(path.relative_to(work)) for path in rtl], "inputs/test/test_platform/axi_sim.cpp"])
         outcomes = []
@@ -282,20 +351,24 @@ def main():
                 assert counts[name] > 0, f"Unreached scenario {name}"
             assert counts["writeMasks"] == list(range(16)), "Missing write mask"
             assert counts["addressOffsets"] == list(range(4)), "Missing address offset"
-            assert counts["contendedGrants"] == len(rows) - 1, "Missing sustained contention"
+            assert counts["contendedGrants"] == len(rows) - 4, "Missing sustained contention"
+            for name in ("bypassResponses", "faultBypassResponses", "replacementTransfers", "sameOwnerReplacements", "otherOwnerReplacements"):
+                assert counts[name] > 0, f"Unreached scenario {name}"
             assert all(counts[f"owner{owner}Code{code}"] > 0 for owner in (0, 1) for code in (0, 2, 3)), "Missing response class"
             assert all(counts[f"owner{owner}Rejected{op}"] > 0 for owner in (0, 1) for op in range(1, 16)), "Missing rejected operation"
             outcomes.append({"seed": seed, **counts, "negativeControls": controls,
                              "vectorHash": sha(vector_text.encode()), "memoryHash": sha(memory_text.encode()), "traceHash": sha(trace.encode())})
         assert all((work / "inputs" / name).read_bytes() == value for name, value in contents.items()), "Frozen inputs changed"
         tools = {name: run(command).strip() for name, command in (("firtool", ["firtool", "--version"]),
-                 ("firld", ["firld", "--version"]), ("verilator", ["verilator", "--version"]), ("cxx", ["c++", "--version"]))}
+                 ("firld", ["firld", "--version"]), ("verilator", ["verilator", "--version"]),
+                 ("yosys", ["yosys", "-V"]), ("cxx", ["c++", "--version"]))}
         tools["cxx"] = tools["cxx"].splitlines()[0]
         report = {"scope": "standalone dual native port to AXI4-Lite adapter", "parameters": {"resetVector": 0},
                   "inputHashes": {name: sha(value) for name, value in contents.items()},
                   "rtlHashes": {path.name: sha(path.read_bytes()) for path in rtl}, "wrapperHash": sha(WRAPPER.encode()),
                   "tools": tools, "elaboratorHash": sha(Path(shutil.which("elaborate-ditdah-e2")).read_bytes()),
                   "commands": commands, "command": "python3 test/test_platform/axi.py", "exitStatus": 0, "outcomes": outcomes,
+                  "structure": structure,
                   "environment": ["cold reset before offered requests", "one outstanding native request per port",
                                   "AXI4-Lite responses are OKAY, SLVERR or DECERR", "failed writes have no memory effect"],
                   "excluded": ["CPU integration", "platform endpoints", "atomic memory execution", "warm reset", "memory liveness"]}

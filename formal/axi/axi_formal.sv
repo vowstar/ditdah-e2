@@ -93,30 +93,7 @@ module axi_formal(input clock);
       end
       assert (!(iq && dq));
       assert (!(instruction_response_valid && data_response_valid));
-      if (outstanding) assert (!instruction_request_ready && !data_request_ready);
-      if (iq || dq) begin
-        assert (!outstanding);
-        if (instruction_request_valid && data_request_valid) assert (dq == prefer_data);
-        outstanding <= 1;
-        owner <= dq;
-        machine <= dq ? data_request_bits_machine : instruction_request_bits_machine;
-        prefer_data <= !dq;
-        write <= dq ? data_request_bits_write : instruction_request_bits_write;
-        address <= dq ? data_request_bits_address : instruction_request_bits_address;
-        data <= dq ? data_request_bits_data : instruction_request_bits_data;
-        mask <= dq ? data_request_bits_mask : instruction_request_bits_mask;
-        aw_seen <= 0;
-        w_seen <= 0;
-        ar_seen <= 0;
-        bus_done <= (dq ? data_request_bits_operation : instruction_request_bits_operation) != 0;
-        rejected <= (dq ? data_request_bits_operation : instruction_request_bits_operation) != 0;
-        result <= 0;
-        fault <= 1;
-        aw_first <= 0;
-        w_first <= 0;
-        together <= 0;
-        held <= 0;
-      end
+      if (outstanding && !(ir || dr)) assert (!instruction_request_ready && !data_request_ready);
       if (axi_aw_valid) begin
         assert (outstanding && write && !aw_seen && !bus_done);
         assert (axi_aw_bits_address == {address[31:2], 2'b00});
@@ -150,10 +127,12 @@ module axi_formal(input clock);
         fault <= br ? axi_b_bits_response != 0 : axi_r_bits_response != 0;
       end
       if (instruction_response_valid || data_response_valid) begin
-        assert (outstanding && bus_done);
+        assert (outstanding && (bus_done || br || rr));
         assert (data_response_valid == owner);
-        assert ((owner ? data_response_bits_data : instruction_response_bits_data) == result);
-        assert ((owner ? data_response_bits_fault : instruction_response_bits_fault) == fault);
+        assert ((owner ? data_response_bits_data : instruction_response_bits_data) ==
+                (bus_done ? result : br ? 32'd0 : axi_r_bits_data));
+        assert ((owner ? data_response_bits_fault : instruction_response_bits_fault) ==
+                (bus_done ? fault : br ? axi_b_bits_response != 0 : axi_r_bits_response != 0));
         if (!(ir || dr)) held <= 1;
       end
       if (outstanding && rejected) begin
@@ -164,6 +143,29 @@ module axi_formal(input clock);
         outstanding <= 0;
         if (ir) saw_instruction <= 1;
         if (dr) saw_data <= 1;
+      end
+      if (iq || dq) begin
+        assert (!outstanding || ir || dr);
+        if (instruction_request_valid && data_request_valid) assert (dq == prefer_data);
+        outstanding <= 1;
+        owner <= dq;
+        machine <= dq ? data_request_bits_machine : instruction_request_bits_machine;
+        prefer_data <= !dq;
+        write <= dq ? data_request_bits_write : instruction_request_bits_write;
+        address <= dq ? data_request_bits_address : instruction_request_bits_address;
+        data <= dq ? data_request_bits_data : instruction_request_bits_data;
+        mask <= dq ? data_request_bits_mask : instruction_request_bits_mask;
+        aw_seen <= 0;
+        w_seen <= 0;
+        ar_seen <= 0;
+        bus_done <= (dq ? data_request_bits_operation : instruction_request_bits_operation) != 0;
+        rejected <= (dq ? data_request_bits_operation : instruction_request_bits_operation) != 0;
+        result <= 0;
+        fault <= 1;
+        aw_first <= 0;
+        w_first <= 0;
+        together <= 0;
+        held <= 0;
       end
       cover (ir && machine);
       cover (ir && !machine);
@@ -179,6 +181,12 @@ module axi_formal(input clock);
       cover (ir && fault);
       cover (dr && fault);
       cover (saw_instruction && saw_data && instruction_request_valid && data_request_valid && iq);
+      cover (ir && rr);
+      cover (dr && br);
+      cover (dr && rr);
+      cover ((ir || dr) && (iq || dq) && owner == dq);
+      cover ((ir || dr) && (iq || dq) && owner != dq);
+      cover ((ir || dr) && held && (iq || dq));
     end
   end
 endmodule

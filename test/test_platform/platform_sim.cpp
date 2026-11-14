@@ -12,6 +12,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 struct Transfer {
     bool active = false, held = false;
@@ -20,7 +21,8 @@ struct Transfer {
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 5) throw std::runtime_error("Expected image seed delay completion-pc");
+        if (argc != 5 && argc != 6)
+            throw std::runtime_error("Expected image seed delay completion-pc [bank-map]");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VPlatformBench dut{&context};
@@ -38,6 +40,14 @@ int main(int argc, char **argv) {
         uint64_t rom, romSize, ram, ramSize;
         if (!(file >> std::hex >> rom >> romSize >> ram >> ramSize))
             throw std::runtime_error("Missing platform memory bounds");
+        std::vector<std::array<uint64_t, 3>> banks;
+        if (argc == 6) {
+            std::ifstream bankFile(argv[5]);
+            if (!bankFile) throw std::runtime_error("Cannot open bank map");
+            std::array<uint64_t, 3> bank;
+            while (bankFile >> std::hex >> bank[0] >> bank[1] >> bank[2]) banks.push_back(bank);
+            if (!bankFile.eof()) throw std::runtime_error("Malformed bank map");
+        }
         std::map<uint32_t, uint32_t> memory;
         uint32_t address, word;
         while (file >> std::hex >> address >> word) memory[address] = word;
@@ -47,6 +57,9 @@ int main(int argc, char **argv) {
         const uint32_t done = std::stoul(argv[4]);
         auto random = [&]() { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state; };
         auto allows = [&](uint32_t at, bool write) {
+            for (const auto &bank : banks)
+                if (at >= bank[0] && uint64_t(at) + 4 <= bank[0] + bank[1])
+                    return !(at & 3) && bank[2];
             return !(at & 3) && ((at >= ram && uint64_t(at) + 4 <= ram + ramSize) ||
                 (!write && at >= rom && uint64_t(at) + 4 <= rom + romSize));
         };
@@ -65,7 +78,7 @@ int main(int argc, char **argv) {
         dut.reset = 0;
         bool completed = false, finished = false;
         uint64_t completionCycle = 0;
-        for (uint64_t cycle = 0; cycle < 200000; ++cycle) {
+        for (uint64_t cycle = 0; cycle < 2000000; ++cycle) {
             dut.clock = 0;
             dut.tick = cycle % 100 == 99;
             dut.transmit_ready = !delay || random() % 7 == 0;

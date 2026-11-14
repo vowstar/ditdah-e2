@@ -8,13 +8,12 @@ import me.jiuyang.zaozi.reftpe.*
 import me.jiuyang.zaozi.valuetpe.*
 
 @upickle.implicits.serializeDefaults(true)
-case class AtomicParameters(baseAddress: Long = 0, sizeBytes: Int = 4096) extends Parameter:
+case class AtomicParameters(baseAddress: Long = 0, sizeBytes: Int = 4096, readLatency: Int = 1) extends Parameter:
   require(baseAddress >= 0 && baseAddress <= 0xffffffffL && (baseAddress & 3) == 0,
     "Atomic memory base must be an aligned RV32 address")
   require(sizeBytes >= 4 && (sizeBytes & 3) == 0 && baseAddress + sizeBytes <= 0x100000000L,
     "Atomic memory must contain complete words within RV32")
-  val words = sizeBytes / 4
-  val addressWidth = math.max(1, 32 - Integer.numberOfLeadingZeros(words - 1))
+  val storage = SramParameters(depth = sizeBytes / 4, readLatency = readLatency)
 
 given upickle.default.ReadWriter[AtomicParameters] = upickle.default.macroRW
 
@@ -23,38 +22,32 @@ class AtomicLayers(p: AtomicParameters) extends LayerInterface(p):
 class AtomicProbe(p: AtomicParameters) extends DVBundle[AtomicParameters, AtomicLayers](p)
 
 class AtomicRequest extends Bundle:
-  val address = Aligned(UInt(32))
-  val machine = Aligned(Bool())
-  val write = Aligned(Bool())
-  val data = Aligned(UInt(32))
-  val mask = Aligned(UInt(4))
-  val size = Aligned(UInt(2))
-  val operation = Aligned(UInt(4))
+  val address: BundleField[UInt] = Aligned(UInt(32))
+  val machine: BundleField[Bool] = Aligned(Bool())
+  val write: BundleField[Bool] = Aligned(Bool())
+  val data: BundleField[UInt] = Aligned(UInt(32))
+  val mask: BundleField[UInt] = Aligned(UInt(4))
+  val size: BundleField[UInt] = Aligned(UInt(2))
+  val operation: BundleField[UInt] = Aligned(UInt(4))
 
 class AtomicPort extends Bundle:
-  val request = Aligned(new Channel(new AtomicRequest))
-  val response = Flipped(new Channel(new MemoryResponse))
+  val request: BundleField[Channel[AtomicRequest]] = Aligned(new Channel(new AtomicRequest))
+  val response: BundleField[Channel[MemoryResponse]] = Flipped(new Channel(new MemoryResponse))
 
 class AtomicMemoryIO(p: AtomicParameters) extends HWBundle(p):
-  val clock = Flipped(Clock())
-  val reset = Flipped(Reset())
-  val clearReservation = Flipped(Bool())
-  val instruction = Flipped(new AtomicPort)
-  val data = Flipped(new AtomicPort)
-  val debug = Flipped(new AtomicPort)
-  val competitor = Flipped(new AtomicPort)
+  val clock: BundleField[Clock] = Flipped(Clock())
+  val reset: BundleField[Reset] = Flipped(Reset())
+  val clearReservation: BundleField[Bool] = Flipped(Bool())
+  val instruction: BundleField[AtomicPort] = Flipped(new AtomicPort)
+  val data: BundleField[AtomicPort] = Flipped(new AtomicPort)
+  val debug: BundleField[AtomicPort] = Flipped(new AtomicPort)
+  val competitor: BundleField[AtomicPort] = Flipped(new AtomicPort)
 
-class AtomicSramIO(p: AtomicParameters) extends HWBundle(p):
-  val clock = Flipped(Clock())
-  val address = Flipped(UInt(p.addressWidth))
-  val readEnable = Flipped(Bool())
-  val writeMask = Flipped(UInt(4))
-  val writeData = Flipped(UInt(32))
-  val readData = Aligned(UInt(32))
-
-case class AtomicSramParameters(WORDS: Int, ADDRESS_WIDTH: Int) extends VerilogParameter
+case class AtomicSramParameters(WORDS: Int, ADDRESS_WIDTH: Int, READ_LATENCY: Int) extends VerilogParameter
 
 @generator
-object AtomicSram extends VerilogWrapper[AtomicParameters, AtomicLayers, AtomicSramIO, AtomicProbe, AtomicSramParameters]:
-  def verilogModuleName(p: AtomicParameters): String = "DitDahE2AtomicSram"
-  def verilogParameter(p: AtomicParameters) = AtomicSramParameters(p.words, p.addressWidth)
+object AtomicSram extends VerilogWrapper[SramParameters, SramLayers, SramIO, SramProbe, AtomicSramParameters]:
+  def verilogModuleName(p: SramParameters): String = "DitDahE2AtomicSram"
+  def verilogParameter(p: SramParameters) =
+    require(p.width == 32 && p.maskGranularity == 8, "Atomic storage requires four byte lanes")
+    AtomicSramParameters(p.depth, p.addressWidth, p.readLatency)

@@ -11,16 +11,26 @@ given mainargs.TokensReader.Simple[Parameters] with
       case Seq(value) => scala.util.Try(upickle.default.read[Parameters](value)).toEither.left.map(_.getMessage)
       case _ => Left("Expected one core configuration object")
 
+given mainargs.TokensReader.Simple[Option[LocalMemoryParameters]] with
+  def shortName: String = "local-memory-json"
+  def read(tokens: Seq[String]): Either[String, Option[LocalMemoryParameters]] =
+    tokens match
+      case Seq(value) => scala.util.Try(upickle.default.read[Option[LocalMemoryParameters]](value)).toEither.left.map(_.getMessage)
+      case _ => Left("Expected a local memory configuration object or null")
+
 @upickle.implicits.serializeDefaults(true)
 case class PlatformParameters(
   core: Parameters,
   romBase: Long, romSize: Long,
   ramBase: Long, ramSize: Long,
   consoleBase: Long, consoleSize: Long,
-  timerBase: Long, timerSize: Long
+  timerBase: Long, timerSize: Long,
+  itcm: Option[LocalMemoryParameters] = None,
+  dtcm: Option[LocalMemoryParameters] = None
 ) extends Parameter:
   private val regions = Seq((romBase, romSize), (ramBase, ramSize),
-    (consoleBase, consoleSize), (timerBase, timerSize))
+    (consoleBase, consoleSize), (timerBase, timerSize)) ++
+    Seq(itcm, dtcm).flatten.map(p => (p.baseAddress, p.sizeBytes.toLong))
   require(regions.forall { case (base, size) =>
     base >= 0 && base <= 0xffffffffL && size >= 4 && size <= 0x100000000L &&
       (base & 3) == 0 && (size & 3) == 0 &&
@@ -33,6 +43,8 @@ case class PlatformParameters(
   require(consoleSize >= 8 && timerSize >= 20, "Device regions must contain their registers")
   require(core.resetVector >= romBase && core.resetVector < romBase + romSize,
     "Platform reset vector must be inside ROM")
+  require(!core.enableA || (itcm.isEmpty && dtcm.isEmpty),
+    "Local banks require the ordinary platform")
 
 given upickle.default.ReadWriter[PlatformParameters] = upickle.default.macroRW
 

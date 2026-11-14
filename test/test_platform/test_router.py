@@ -7,19 +7,19 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from test.test_platform.router import FIELDS, REQUEST, check, digest, mutate, parse_trace, route, vectors, verify_hashes
+from test.test_platform.router import FIELDS, REQUEST, check, digest, mutate, parse_trace, port_names, route, trace_fields, vectors, verify_hashes
 
 
 REGIONS = {"rom": {"base": 0, "size": 64}, "sram": {"base": 256, "size": 64},
            "console": {"base": 512, "size": 8}, "timer": {"base": 1024, "size": 20}}
 
 
-def sample(cycle, **fields):
-    return {**dict.fromkeys(FIELDS, 0), "cycle": cycle, **fields}
+def sample(cycle, *, regions=REGIONS, **fields):
+    return {**dict.fromkeys(trace_fields(port_names(regions)), 0), "cycle": cycle, **fields}
 
 
-def request(address=256, write=0, mask=0, size=2, owner=1):
-    return dict(owner=owner, address=address, write=write, data=0x12345678, mask=mask, size=size, machine=1)
+def request(address=256, write=0, mask=0, size=2, owner=1, operation=0):
+    return dict(owner=owner, address=address, write=write, data=0x12345678, mask=mask, size=size, machine=1, operation=operation)
 
 
 def transaction():
@@ -35,6 +35,45 @@ def transaction():
 
 
 class RouterTests(unittest.TestCase):
+    def test_local_and_external_backends_preserve_addresses(self):
+        for backend in ("sram", "axi"):
+            regions = {**REGIONS, "itcm": {"base": 2048, "size": 64, "backend": backend},
+                       "dtcm": {"base": 4096, "size": 64, "backend": backend}}
+            for name in ("itcm", "dtcm"):
+                for owner, suffix in ((0, "Instruction"), (1, "Data")):
+                    for offset in (0, 60):
+                        address = regions[name]["base"] + offset
+                        expected = name + suffix if backend == "sram" else "memory" + suffix
+                        self.assertEqual(route(regions, owner, request(address)), (expected, address))
+                    self.assertIsNone(route(regions, owner, request(regions[name]["base"], operation=1)))
+            self.assertEqual(len(port_names(regions)), 10 if backend == "sram" else 6)
+
+    def test_local_turnover_keeps_old_response_destination(self):
+        regions = {**REGIONS, "itcm": {"base": 2048, "size": 64, "backend": "sram"},
+                   "dtcm": {"base": 4096, "size": 64, "backend": "sram"}}
+        first, second = request(2048), request(4096)
+        offer = sample(1, regions=regions, data_request_valid=1, data_request_ready=1,
+                       itcmData_request_valid=1, itcmData_request_ready=1)
+        replace = sample(2, regions=regions, data_response_valid=1, data_response_ready=1,
+                         data_response_data=0x11111111, itcmData_response_valid=1,
+                         itcmData_response_ready=1, itcmData_response_data=0x11111111,
+                         data_request_valid=1, data_request_ready=1,
+                         dtcmData_request_valid=1, dtcmData_request_ready=1)
+        for port in ("data", "itcmData"):
+            offer.update({f"{port}_request_{key}": first[key] for key in REQUEST})
+        for port in ("data", "dtcmData"):
+            replace.update({f"{port}_request_{key}": second[key] for key in REQUEST})
+        done = sample(3, regions=regions, data_response_valid=1, data_response_ready=1,
+                      data_response_data=0x22222222, dtcmData_response_valid=1,
+                      dtcmData_response_ready=1, dtcmData_response_data=0x22222222)
+        samples = [sample(0, regions=regions, reset=1), offer, replace, done]
+        result = check(regions, [first, second], samples)
+        self.assertEqual(result["turnover"], 1)
+        self.assertEqual(result["destinationChanges"], 1)
+        samples[2]["data_response_data"] = 0x22222222
+        with self.assertRaisesRegex(AssertionError, "Wrong data response payload"):
+            check(regions, [first, second], samples)
+
     def test_region_boundaries_and_relative_address(self):
         for name, endpoint in (("rom", "memoryData"), ("sram", "memoryData"),
                                ("console", "console"), ("timer", "timer")):
@@ -114,8 +153,8 @@ class RouterTests(unittest.TestCase):
 
     def test_mutations_match_once(self):
         forms = {"direction": "wire allowed = region & ~instruction_request_bits_write;",
-                 "duplicate": "assign memoryData_request_valid = ~dataActive & data_request_valid & memory;",
-                 "endpoint": "assign timer_request_valid = ~dataActive & data_request_valid & timer_0;"}
+                 "duplicate": "wire dataCapacity = ~dataActive | dataComplete;",
+                 "endpoint": "assign timer_request_valid = _GEN_87 & timer_0;"}
         for name, text in forms.items():
             self.assertNotEqual(mutate(text, name), text)
             with self.assertRaisesRegex(AssertionError, "no longer matches"):

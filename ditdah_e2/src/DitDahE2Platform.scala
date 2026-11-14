@@ -73,6 +73,18 @@ object DitDahE2Platform extends Generator[PlatformParameters, PlatformLayers, Pl
     else router.io.data :<>= core.io.data
     bus.io.instruction :<>= router.io.memoryInstruction
     bus.io.data :<>= router.io.memoryData
+    if p.itcm.exists(_.useSram) then
+      val itcm = LocalMemory.instantiate(p.itcm.get)
+      itcm.io.clock := io.clock
+      itcm.io.reset := platformReset
+      itcm.io.instruction :<>= router.io.itcmInstruction.get
+      itcm.io.data :<>= router.io.itcmData.get
+    if p.dtcm.exists(_.useSram) then
+      val dtcm = LocalMemory.instantiate(p.dtcm.get)
+      dtcm.io.clock := io.clock
+      dtcm.io.reset := platformReset
+      dtcm.io.instruction :<>= router.io.dtcmInstruction.get
+      dtcm.io.data :<>= router.io.dtcmData.get
     console.io.memory :<>= router.io.console
     timer.io.memory :<>= router.io.timer
     io.axi :<>= bus.io.axi

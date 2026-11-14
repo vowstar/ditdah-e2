@@ -88,11 +88,12 @@ def build(output, platform_path=ROOT / "platform.json", core=None, *, atomic=Fal
     if params["core"]["enableA"] != atomic:
         raise ValueError("A instructions require the atomic platform")
     top = "DitDahE2AtomicPlatformTop" if atomic else TOP
-    paths = sorted((ROOT / "ditdah_e2/src").glob("*.scala")) + sorted((ROOT / "nix").glob("*.nix"))
+    leaves = sorted((ROOT / "ditdah_e2/src").glob("*.sv"))
+    paths = sorted((ROOT / "ditdah_e2/src").glob("*.scala")) + leaves + sorted((ROOT / "nix").glob("*.nix"))
     paths += [ROOT / name for name in ("flake.nix", "flake.lock", "scripts/build_rtl.py",
                                       "scripts/build_platform.py", "scripts/platform_map.py", "test/test_scripts/test_platform_map.py")]
     if atomic:
-        paths += [ROOT / "ditdah_e2/src/AtomicSram.sv", ROOT / "scripts/build_atomic_platform.py"]
+        paths += [ROOT / "scripts/build_atomic_platform.py"]
     originals = {str(path.relative_to(ROOT)): path.read_bytes() for path in paths}
     compiled = compilation_sources({path.name: originals[str(path.relative_to(ROOT))].decode()
                                     for path in paths if path.suffix == ".scala"}, atomic)
@@ -147,8 +148,8 @@ def build(output, platform_path=ROOT / "platform.json", core=None, *, atomic=Fal
              "--no-mangle", "--emit-bytecode", "-o", "linked.mlirbc"])
         run(["firtool", "linked.mlirbc", "--split-verilog", "-disable-all-randomization",
              "--lowering-options=noAlwaysComb,disallowLocalVariables,locationInfoStyle=none", "-o", "rtl"])
-        if atomic:
-            (work / "rtl/AtomicSram.sv").write_bytes(originals["ditdah_e2/src/AtomicSram.sv"])
+        for leaf in leaves:
+            (work / "rtl" / leaf.name).write_bytes(originals[str(leaf.relative_to(ROOT))])
         if not (work / "rtl" / f"{top}.sv").is_file() or not (work / "rtl/DitDahE2.sv").is_file():
             raise RuntimeError("Missing generated platform or core RTL")
         shutil.copytree(work / "rtl", output / "rtl")

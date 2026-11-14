@@ -19,6 +19,8 @@ object AtomicMemory extends Generator[AtomicParameters, AtomicLayers, AtomicMemo
     val responses = Seq.fill(4)(Reg(new MemoryResponse))
     val next = RegInit(0.U(2))
     val busy = RegInit(false.B)
+    val waiting = RegInit(false.B)
+    val complete = busy & !waiting
     val owner = Reg(UInt(2))
     val request = Reg(new AtomicRequest)
     val fault = Reg(Bool())
@@ -63,16 +65,18 @@ object AtomicMemory extends Generator[AtomicParameters, AtomicLayers, AtomicMemo
     val incomingFault = !shape | !portAllowed | !inRange
     when(accepted) {
       busy := true.B
+      waiting := (p.readLatency == 2).B
       owner := selected
       request :<= incoming
       fault := incomingFault
       next := (selected + 1.U(2)).asBits.bits(1, 0).asUInt
     }
-    val memory = AtomicSram.instantiate(p)
+    when(busy) { waiting := false.B }
+    val memory = AtomicSram.instantiate(p.storage)
     memory.io.clock := io.clock
     val address = busy.?(request.address, incoming.address)
     val offset = (address - BigInt(p.baseAddress).U(32)).asBits
-    memory.io.address := offset.bits(p.addressWidth + 1, 2).asUInt
+    memory.io.address := offset.bits(p.storage.addressWidth + 1, 2).asUInt
     memory.io.readEnable := accepted & !incomingFault & !io.reset.asBool
     val oldValue = memory.io.readData
     val result = Wire(UInt(32))
@@ -90,10 +94,10 @@ object AtomicMemory extends Generator[AtomicParameters, AtomicLayers, AtomicMemo
     val sc = requestedOperation === 2.U(4)
     val wordAddress = request.address.asBits.bits(31, 2).asUInt
     val success = reserved & (reservedAddress === wordAddress) & !io.clearReservation
-    val write = busy & !fault & request.write & (!sc | success)
+    val write = complete & !fault & request.write & (!sc | success)
     memory.io.writeMask := (write & !io.reset.asBool).?(request.mask, 0.U(4))
     memory.io.writeData := result
-    when(busy) {
+    when(complete) {
       busy := false.B
       for index <- 0 until 4 do
         when(owner === index.U(2)) {

@@ -11,9 +11,25 @@ class AtomicMemoryTests(unittest.TestCase):
     def test_configuration(self):
         self.assertEqual(configuration({"baseAddress": 0xFFFFFFFC, "sizeBytes": 4})["sizeBytes"], 4)
         for value in ({"baseAddress": 1}, {"baseAddress": -4}, {"sizeBytes": 3}, {"sizeBytes": True},
-                      {"baseAddress": 0xFFFFFFFC, "sizeBytes": 8}, {"extra": 1}):
+                      {"baseAddress": 0xFFFFFFFC, "sizeBytes": 8}, {"readLatency": 0}, {"readLatency": 3},
+                      {"readLatency": True}, {"extra": 1}):
             with self.assertRaises(ValueError):
                 configuration(value)
+
+    def test_two_cycle_read_waits_before_side_effect_and_response(self):
+        driver = Driver({"sizeBytes": 12, "readLatency": 2})
+        driver.command(2, request(0, write=True, data=7))
+        driver.issue(1, request(0, operation=1))
+        self.assertEqual(driver.tick()[1][1], 0)
+        self.assertEqual(driver.tick()[1][1], 0)
+        self.assertEqual(driver.tick()[1][1:], (1, 7, 0))
+        driver.issue(1, request(0, operation=2, write=True, data=9))
+        driver.tick(clear=1)
+        driver.tick()
+        self.assertEqual(driver.tick()[1][1:], (1, 1, 0))
+        driver.command(0, request(0), expected_result=(7, 0))
+        counts, _ = check(driver.rows, render(expected(driver.rows, driver.reference.parameters)[0]), driver.reference.parameters)
+        self.assertEqual(counts["pending"], 0)
 
     def test_signed_unsigned_operations(self):
         values = {3: 1, 4: 0x80000001, 5: 0x80000001, 6: 0, 7: 0x80000001,
@@ -130,14 +146,16 @@ class AtomicMemoryTests(unittest.TestCase):
             check(driver.rows, render(damaged), parameters)
 
     def test_random_arbitration_history_drains(self):
-        parameters = configuration({"sizeBytes": 12})
-        rows = vectors(parameters)
-        samples, counts, history = expected(rows, parameters)
-        self.assertGreater(counts["requests"], 3000)
-        self.assertEqual(counts["requests"], counts["responses"])
-        self.assertEqual(counts["pending"], 0)
-        self.assertTrue(all(item["memoryCycle"] == item["acceptedCycle"] + 1 for item in history))
-        check(rows, render(samples), parameters)
+        for latency in (1, 2):
+            with self.subTest(latency=latency):
+                parameters = configuration({"sizeBytes": 12, "readLatency": latency})
+                rows = vectors(parameters)
+                samples, counts, history = expected(rows, parameters)
+                self.assertGreater(counts["requests"], 3000 if latency == 1 else 2000)
+                self.assertEqual(counts["requests"], counts["responses"])
+                self.assertEqual(counts["pending"], 0)
+                self.assertTrue(all(item["memoryCycle"] == item["acceptedCycle"] + latency for item in history))
+                check(rows, render(samples), parameters)
 
     def test_mutations_require_unique_sites(self):
         self.assertEqual(mutate("~(write & success)", "stale-reservation"), "1'h1")
