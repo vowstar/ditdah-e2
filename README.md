@@ -57,6 +57,11 @@ make software
 [Integration contracts](doc/microarchitecture.md) define stage ownership, memory completion and reset behavior.
 [System bus access](doc/debug-system-bus.md) describes registers, arbitration, physical addressing and debugger use.
 
+<p align="center">
+  <a href="https://github.com/vowstar/ditdah-e2/issues/1"><img src="https://github.com/user-attachments/assets/eece6547-fc38-4796-b779-99e6d22d6ff3" alt="DitDah-E2 full layout after routing and parasitic extraction" width="640"></a>
+  <br><sub>Default configuration after routing and parasitic extraction. Physical signoff remains open.</sub>
+</p>
+
 ## Verify
 
 ```sh
