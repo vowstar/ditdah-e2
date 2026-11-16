@@ -1,8 +1,19 @@
 # DitDah-E2
 
 DitDah-E2 is a configurable 32-bit RISC-V processor for embedded control.
-Its three-stage F / X / M pipeline is single issue and executes in program order.
-It includes precise traps, machine interrupts, counters, MRET and WFI, with optional memory protection, atomics and JTAG debugging.
+Its three-stage pipeline combines branch prediction, accelerated multiplication and concurrent AXI access.
+
+<p align="center">
+  <a href="https://github.com/vowstar/ditdah-e2/issues/1"><img src="https://github.com/user-attachments/assets/8af32b8f-4c40-4cd1-82a4-8c76f8294a3b" alt="DitDah-E2 layout with 16 KiB instruction SRAM and 32 KiB data SRAM" width="640"></a>
+</p>
+
+| Metric | Result |
+| --- | --- |
+| CoreMark workload | 2.84 iterations/s/MHz |
+| TSMC 7 nm post-route STA frequency | 729.93 MHz |
+| Block area, including 48 KiB SRAM | 0.03369 mm² |
+
+Nominal STA: TT, 0.75 V, 25 °C, extracted RC, SI off. CoreMark: GCC 15.3 `-O3`, ten RTL iterations, one-cycle local SRAM.
 
 | Instruction configuration | ISA string |
 | --- | --- |
@@ -15,6 +26,9 @@ Privilege modes, PMP and Debug are configured separately from the ISA string.
 | Option | Default | Capability |
 | --- | --- | --- |
 | `enableM`, `enableC` | `true` | Integer multiplication/division and compressed instructions |
+| `multiplyBitsPerCycle` | `4` | One, two or four iterative bits, early termination and a narrow MUL path |
+| `branchPrediction` | `true` | One learned backward branch target with execution-time recovery |
+| `axiConcurrent` | `true` | Two ordered AXI reads and independent write progress |
 | `enableZba`, `enableZbb`, `enableZbs` | `false` | Address, basic and single-bit operations |
 | `enableA` | `false` | Word LR/SC and AMOs with a shared atomic memory endpoint |
 | `protectedMode` | `false` | M/U privilege modes, counter permissions and 16 PMP entries |
@@ -23,8 +37,7 @@ Privilege modes, PMP and Debug are configured separately from the ISA string.
 | `triggerCount` | `0` | Zero or two execute-address triggers; two requires Debug |
 | `enableSba` | `false` | 32-bit system bus addressing with 8/16/32-bit accesses; requires Debug |
 
-The default privilege mode is M. Protected configurations add U; S mode and an MMU are absent.
-Debug supports synchronous DMI or JTAG. SBA accesses memory while the hart runs or is halted.
+The default privilege mode is M. Protected configurations add U; S mode and an MMU are absent. Debug supports synchronous DMI or JTAG. SBA accesses memory while the hart runs or is halted.
 
 ## Build and integrate
 
@@ -39,8 +52,8 @@ The Nix lock pins Zaozi, CIRCT and software tools. Generated RTL and its configu
 Supply options in a JSON file; `resetVector` defaults to zero and requires halfword alignment with C, otherwise word alignment.
 
 ```sh
-printf '%s\n' '{"enableDebug":true,"enableSba":true}' > result/debug.json
-python3 scripts/build_rtl.py --config result/debug.json --output result/debug-rtl
+printf '%s\n' '{"branchPrediction":false}' > result/no-prediction.json
+python3 scripts/build_rtl.py --config result/no-prediction.json --output result/no-prediction-rtl
 ```
 
 The core exposes separate instruction and data request/response ports, plus a separate system bus master when SBA is enabled.
@@ -57,15 +70,8 @@ make atomic-platform CONFIG=result/atomic.json PLATFORM_OUTPUT=result/atomic
 make software
 ```
 
-[Integration contracts](doc/microarchitecture.md) define stage ownership, memory completion and reset behavior.
-[System bus access](doc/debug-system-bus.md) describes registers, arbitration, physical addressing and debugger use.
-[Local memory](doc/local-memory.md) describes bank configuration, ROM boot and SRAM binding.
+[Integration contracts](doc/microarchitecture.md) define stage ownership, memory completion and reset behavior. [System bus access](doc/debug-system-bus.md) covers debugger use. [Local memory](doc/local-memory.md) covers bank configuration, ROM boot and SRAM binding.
 `DitDahE2PlatformBlock` exports functional integration ports and retains observation signals internally for verification.
-
-<p align="center">
-  <a href="https://github.com/vowstar/ditdah-e2/issues/1"><img src="https://github.com/user-attachments/assets/eece6547-fc38-4796-b779-99e6d22d6ff3" alt="DitDah-E2 full layout after routing and parasitic extraction" width="640"></a>
-  <br><sub>Default core after routing and parasitic extraction. Physical signoff remains open.</sub>
-</p>
 
 ## Verify
 
@@ -74,17 +80,11 @@ make verify-compliance
 make verify-signoff
 ```
 
-Signoff combines independent architectural models, protocol checks, bounded formal checks and real OpenOCD/GDB sessions.
-`make verify-sba` runs SBA register, DMI, arbiter, platform and sysbus-only debugger checks; `SBA_OUTPUT` selects a fresh output directory.
-`make verify-local-memory` checks bank controllers; `make verify-local-platform` executes ROM boot against the independent instruction model.
-`make verify-trigger-host` checks GDB hardware breakpoints; `make verify-program-host` selects Program Buffer memory access.
-[Architectural tests](test/test_isa/README.md) document ISA profiles and signature comparisons. `make verify-sail` checks instruction events and signatures with the independent Sail model.
-
-Commercial proofs have separate targets: `verify-arithmetic`, `verify-debug-commercial`, `verify-debug-abstract-commercial`, `verify-program-commercial`, `verify-trigger-commercial` and `verify-sba-commercial`.
-They require licensed tools and input-bound reports. Open-source formal runs provide reference evidence; accepted commercial verdicts govern the declared proof scope.
-Unit proofs, bounded core witnesses and fixed-program trigger proofs do not establish a full-core proof, complete ISA certification or physical signoff.
-See [verification scope](doc/microarchitecture.md#verification-scope) and the SBA contract for assumptions and exclusions.
-Reports record the selected configuration, source and RTL hashes, tools, commands and results under the chosen output directory.
+Verification combines independent instruction models, protocol checks, formal checks and OpenOCD/GDB sessions.
+`make verify-axi-ordering` checks faults and FENCE.I under concurrent AXI traffic.
+`make verify-sba`, `make verify-local-memory` and `make verify-local-platform` cover Debug and local memory.
+[Architectural tests](test/test_isa/README.md) describe ISA profiles; `make verify-sail` checks instruction events and signatures.
+[Verification scope](doc/microarchitecture.md#verification-scope) records assumptions and commercial proof targets.
 
 ## License
 
