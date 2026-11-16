@@ -28,8 +28,13 @@ def replace_once(text, pattern, replacement):
 
 
 def mutate_cancel(text):
-    text = replace_once(text, r"active <= ~\(cancel \| (\w+)\) & ([^;]+);", r"active <= ~\1 & \2;")
-    return replace_once(text, r"valid <= ~cancel & (\([^;]+\));", r"valid <= \1;")
+    direct = r"(active\s*<=\s*)~cancel\s*&\s*"
+    combined = r"active\s*<=\s*~\(cancel \| (\w+)\) & ([^;]+);"
+    assert len(re.findall(direct, text)) + len(re.findall(combined, text)) == 1, \
+        "Arithmetic mutation no longer matches RTL"
+    text = replace_once(text, direct, r"\1") if re.search(direct, text) else \
+        replace_once(text, combined, r"active <= ~\1 & \2;")
+    return replace_once(text, r"(valid\s*<=\s*)~cancel\s*&\s*(\([^;]+\));", r"\1\2;")
 
 
 def mutate_duplicate(text):
@@ -49,7 +54,7 @@ def configuration(mode, engine, stability=False):
 
 
 def freeze(root, destination):
-    names = ["ditdah_e2/src/" + name for name in ("MultiplyDivide.scala", "Parameters.scala", "Interfaces.scala")]
+    names = ["ditdah_e2/src/" + name for name in ("MultiplyDivide.scala", "Parameters.scala", "Interfaces.scala", "DebugTransportInterfaces.scala")]
     names += ["formal/arithmetic/multiply_divide_formal.py", "formal/arithmetic/multiply_divide_formal.sv", "test/units/multiply_divide_unit.py",
               "flake.nix", "flake.lock"]
     names += [str(path.relative_to(root)) for path in sorted((root / "nix").glob("*.nix"))]

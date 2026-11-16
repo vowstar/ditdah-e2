@@ -28,6 +28,40 @@ class ProgramCompatibilityTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Mutation anchor differs"):
                 run.mutate({run.CORE_RTL: text.encode()}, "negative-multiply-start")
 
+    def test_native_trap_mutation_preserves_actual_alignment_and_other_faults(self):
+        for alignment in ("badData", "badData_0", "alignmentFault"):
+            with self.subTest(alignment=alignment):
+                tail = ("x_fault | xTruncated | injectedControl | ~legal | " + alignment)
+                definition = "wire fault = _csr_trigger_nativeAction | " + tail + ";\n"
+                source = definition + "wire redirect = advance & ~fault;\nalways @(posedge clock) m_trap <= fault;\n"
+                changed = run.mutate({run.CORE_RTL: source.encode()}, "negative-native-trap")
+                expected = definition + "wire redirect = advance & ~fault;\nalways @(posedge clock) m_trap <= " + tail + ";\n"
+                self.assertEqual(changed[run.CORE_RTL], expected.encode())
+
+    def test_local_native_trap_control_uses_the_identical_actual_mutant(self):
+        from test.test_trigger.verify_trigger import mutate_copy
+        source = ("wire fault = _csr_trigger_nativeAction | x_fault | xTruncated | alignmentFault;\n"
+                  "always @(posedge clock) m_trap <= fault;\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'source').mkdir()
+            (root / 'source' / run.CORE_RTL).write_text(source)
+            actual = mutate_copy(root / 'source', root / 'changed', 'native-trap')
+            self.assertEqual(actual.read_bytes(),
+                             run.mutate({run.CORE_RTL: source.encode()}, 'negative-native-trap')[run.CORE_RTL])
+
+    def test_native_trap_mutation_rejects_missing_ambiguous_or_nested_terms(self):
+        definition = "wire fault = _csr_trigger_nativeAction | x_fault | alignmentFault;\n"
+        driver = "always @(posedge clock) m_trap <= fault;\n"
+        sources = (driver, definition + definition + driver, definition,
+                   definition + driver + driver,
+                   definition.replace("_csr_trigger_nativeAction | ", "") + driver,
+                   definition.replace("x_fault", "_csr_trigger_nativeAction") + driver,
+                   definition.replace("_csr_trigger_nativeAction |", "enable & _csr_trigger_nativeAction |") + driver)
+        for source in sources:
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "Mutation anchor differs"):
+                run.mutate({run.CORE_RTL: source.encode()}, "negative-native-trap")
+
     def test_older_mutation_preserves_the_renumbered_flush_wire(self):
         for number in (466, 479):
             with self.subTest(number=number):

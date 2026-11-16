@@ -4,6 +4,7 @@
 #include "verilated.h"
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -13,6 +14,9 @@ struct Request {
     uint32_t owner, write, address, data, mask, size, machine, operation;
     uint32_t awDelay, wDelay, arDelay, responseDelay, nativeDelay, response;
 };
+struct Address { uint32_t owner, address; };
+struct WriteData { uint32_t data, mask; };
+struct Reply { uint32_t readyCycle, owner, data, response; };
 
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
@@ -27,80 +31,72 @@ int main(int argc, char **argv) {
         queues[row.owner].push_back(row);
     }
     std::array<uint32_t, 256> memory{};
-    for (auto &word : memory) {
-        if (!(initial >> word)) throw std::runtime_error("Incomplete memory");
-    }
+    for (auto &word : memory) if (!(initial >> word)) throw std::runtime_error("Incomplete memory");
     VDitDahE2AxiLite dut;
     std::array<size_t, 2> next{};
-    bool active = false, aw = false, w = false, ar = false, responseDone = false;
-    uint32_t started = 0, busDone = 0, nativeSeen = 0, readData = 0;
-    uint32_t busAddress = 0, busData = 0, busMask = 0;
-    Request current{};
+    std::array<bool, 2> active{};
+    std::array<uint32_t, 2> started{}, nativeSeen{};
+    std::array<Request, 2> current{};
+    std::deque<Address> addresses;
+    std::deque<WriteData> writes;
+    std::deque<Reply> readReplies, writeReplies;
     unsigned idle = 0;
+    auto drive = [&](unsigned owner, const Request &request, bool valid) {
+        if (owner) {
+            dut.data_request_valid = valid;
+            dut.data_request_bits_address = request.address;
+            dut.data_request_bits_write = request.write;
+            dut.data_request_bits_data = request.data;
+            dut.data_request_bits_mask = request.mask;
+            dut.data_request_bits_size = request.size;
+            dut.data_request_bits_machine = request.machine;
+            dut.data_request_bits_operation = request.operation;
+        } else {
+            dut.instruction_request_valid = valid;
+            dut.instruction_request_bits_address = request.address;
+            dut.instruction_request_bits_write = request.write;
+            dut.instruction_request_bits_data = request.data;
+            dut.instruction_request_bits_mask = request.mask;
+            dut.instruction_request_bits_size = request.size;
+            dut.instruction_request_bits_machine = request.machine;
+            dut.instruction_request_bits_operation = request.operation;
+        }
+    };
     std::cout << "cycle reset iv ir ia iw id im iz ip ix ov or od of dv dr da dw dd dm dz dp dx pv pr pd pf "
                  "av ay aa ap wv wy wd wm bv by br rv ry ra rp qv qy qd qr\n";
     for (uint32_t cycle = 0; cycle < 1000000; ++cycle) {
         dut.clock = 0;
         dut.reset = cycle < 2;
-        const bool offerI = cycle >= 2 && (!active || current.owner != 0) && next[0] < queues[0].size();
-        const bool offerD = cycle >= 2 && (!active || current.owner != 1) && next[1] < queues[1].size();
-        const Request i = offerI ? queues[0][next[0]] : Request{};
-        const Request d = offerD ? queues[1][next[1]] : Request{};
-        dut.instruction_request_valid = offerI;
-        dut.instruction_request_bits_address = i.address;
-        dut.instruction_request_bits_write = i.write;
-        dut.instruction_request_bits_data = i.data;
-        dut.instruction_request_bits_mask = i.mask;
-        dut.instruction_request_bits_size = i.size;
-        dut.instruction_request_bits_machine = i.machine;
-        dut.instruction_request_bits_operation = i.operation;
-        dut.data_request_valid = offerD;
-        dut.data_request_bits_address = d.address;
-        dut.data_request_bits_write = d.write;
-        dut.data_request_bits_data = d.data;
-        dut.data_request_bits_mask = d.mask;
-        dut.data_request_bits_size = d.size;
-        dut.data_request_bits_machine = d.machine;
-        dut.data_request_bits_operation = d.operation;
-        dut.instruction_response_ready = !active || current.owner != 0 ||
-            !current.nativeDelay || (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
-        dut.data_response_ready = !active || current.owner != 1 ||
-            !current.nativeDelay || (nativeSeen && cycle - nativeSeen >= current.nativeDelay);
-        dut.axi_aw_ready = active && cycle - started > current.awDelay;
-        dut.axi_w_ready = active && cycle - started > current.wDelay;
-        dut.axi_ar_ready = active && cycle - started > current.arDelay;
-        const bool reply = active && busDone && !responseDone && cycle - busDone > current.responseDelay;
-        dut.axi_b_valid = reply && current.write;
-        dut.axi_b_bits_response = active ? current.response : 0;
-        dut.axi_r_valid = reply && !current.write;
-        dut.axi_r_bits_response = active ? current.response : 0;
-        dut.axi_r_bits_data = readData;
-        dut.eval();
-        if (active && (current.owner ? dut.data_response_valid && dut.data_response_ready :
-                                      dut.instruction_response_valid && dut.instruction_response_ready) &&
-            next[current.owner] < queues[current.owner].size()) {
-            const Request replacement = queues[current.owner][next[current.owner]];
-            if (current.owner) {
-                dut.data_request_valid = 1;
-                dut.data_request_bits_address = replacement.address;
-                dut.data_request_bits_write = replacement.write;
-                dut.data_request_bits_data = replacement.data;
-                dut.data_request_bits_mask = replacement.mask;
-                dut.data_request_bits_size = replacement.size;
-                dut.data_request_bits_machine = replacement.machine;
-                dut.data_request_bits_operation = replacement.operation;
-            } else {
-                dut.instruction_request_valid = 1;
-                dut.instruction_request_bits_address = replacement.address;
-                dut.instruction_request_bits_write = replacement.write;
-                dut.instruction_request_bits_data = replacement.data;
-                dut.instruction_request_bits_mask = replacement.mask;
-                dut.instruction_request_bits_size = replacement.size;
-                dut.instruction_request_bits_machine = replacement.machine;
-                dut.instruction_request_bits_operation = replacement.operation;
-            }
-            dut.eval();
+        for (unsigned owner = 0; owner < 2; ++owner) {
+            bool valid = cycle >= 2 && !active[owner] && next[owner] < queues[owner].size();
+            drive(owner, valid ? queues[owner][next[owner]] : Request{}, valid);
         }
+        dut.instruction_response_ready = !active[0] || !current[0].nativeDelay ||
+            (nativeSeen[0] && cycle - nativeSeen[0] >= current[0].nativeDelay);
+        dut.data_response_ready = !active[1] || !current[1].nativeDelay ||
+            (nativeSeen[1] && cycle - nativeSeen[1] >= current[1].nativeDelay);
+        dut.axi_aw_ready = dut.axi_w_ready = dut.axi_ar_ready = 0;
+        dut.axi_b_valid = !writeReplies.empty() && cycle >= writeReplies.front().readyCycle;
+        dut.axi_b_bits_response = writeReplies.empty() ? 0 : writeReplies.front().response;
+        dut.axi_r_valid = !readReplies.empty() && cycle >= readReplies.front().readyCycle;
+        dut.axi_r_bits_response = readReplies.empty() ? 0 : readReplies.front().response;
+        dut.axi_r_bits_data = readReplies.empty() ? 0 : readReplies.front().data;
+        dut.eval();
+        const unsigned awOwner = !(dut.axi_aw_bits_protection & 4);
+        const unsigned arOwner = !(dut.axi_ar_bits_protection & 4);
+        dut.axi_aw_ready = active[awOwner] && cycle - started[awOwner] > current[awOwner].awDelay;
+        unsigned writeOwner = !addresses.empty() ? addresses.front().owner : awOwner;
+        dut.axi_w_ready = active[writeOwner] && cycle - started[writeOwner] > current[writeOwner].wDelay;
+        dut.axi_ar_ready = readReplies.size() < 2 && active[arOwner] &&
+            cycle - started[arOwner] > current[arOwner].arDelay;
+        dut.eval();
+        for (unsigned owner = 0; owner < 2; ++owner) {
+            const bool completed = owner ? dut.data_response_valid && dut.data_response_ready :
+                                           dut.instruction_response_valid && dut.instruction_response_ready;
+            if (active[owner] && completed && next[owner] < queues[owner].size())
+                drive(owner, queues[owner][next[owner]], true);
+        }
+        dut.eval();
 #define P(signal) std::cout << ' ' << uint64_t(dut.signal)
         std::cout << cycle;
         P(reset);
@@ -120,51 +116,50 @@ int main(int argc, char **argv) {
         std::cout << '\n';
 #undef P
         if (!dut.reset) {
-            if (dut.axi_aw_valid && dut.axi_aw_ready) {
-                aw = true;
-                busAddress = dut.axi_aw_bits_address;
-            }
-            if (dut.axi_w_valid && dut.axi_w_ready) {
-                w = true;
-                busData = dut.axi_w_bits_data;
-                busMask = dut.axi_w_bits_strobe;
-            }
-            if (dut.axi_ar_valid && dut.axi_ar_ready) {
-                ar = true;
-                busAddress = dut.axi_ar_bits_address;
-                readData = memory[(busAddress >> 2) & 255];
-            }
-            if (!busDone && active && (current.write ? aw && w : ar)) {
-                busDone = cycle;
-                if (current.write && current.response == 0) {
-                    auto &word = memory[(busAddress >> 2) & 255];
-                    for (unsigned lane = 0; lane < 4; ++lane) {
-                        if (busMask & (1u << lane)) {
-                            const uint32_t mask = 255u << (8 * lane);
-                            word = (word & ~mask) | (busData & mask);
-                        }
+            if (dut.axi_aw_valid && dut.axi_aw_ready)
+                addresses.push_back({awOwner, dut.axi_aw_bits_address});
+            if (dut.axi_w_valid && dut.axi_w_ready)
+                writes.push_back({dut.axi_w_bits_data, dut.axi_w_bits_strobe});
+            while (!addresses.empty() && !writes.empty()) {
+                const auto address = addresses.front(); addresses.pop_front();
+                const auto data = writes.front(); writes.pop_front();
+                const Request &request = current[address.owner];
+                if (request.response == 0) {
+                    auto &word = memory[(address.address >> 2) & 255];
+                    for (unsigned lane = 0; lane < 4; ++lane) if (data.mask & (1u << lane)) {
+                        const uint32_t mask = 255u << (8 * lane);
+                        word = (word & ~mask) | (data.data & mask);
                     }
                 }
+                writeReplies.push_back({cycle + request.responseDelay + 1, address.owner, 0, request.response});
             }
-            if ((dut.axi_b_valid && dut.axi_b_ready) || (dut.axi_r_valid && dut.axi_r_ready))
-                responseDone = true;
-            if ((dut.instruction_response_valid || dut.data_response_valid) && !nativeSeen)
-                nativeSeen = cycle;
-            if ((dut.instruction_response_valid && dut.instruction_response_ready) ||
-                (dut.data_response_valid && dut.data_response_ready)) active = false;
-            if ((dut.instruction_request_valid && dut.instruction_request_ready) ||
-                (dut.data_request_valid && dut.data_request_ready)) {
-                const unsigned owner = dut.data_request_valid && dut.data_request_ready;
-                current = queues[owner][next[owner]++];
-                active = true;
-                started = cycle;
-                aw = w = ar = responseDone = false;
-                busDone = nativeSeen = 0;
+            if (dut.axi_ar_valid && dut.axi_ar_ready) {
+                const Request &request = current[arOwner];
+                readReplies.push_back({cycle + request.responseDelay + 1, arOwner,
+                                       memory[(dut.axi_ar_bits_address >> 2) & 255], request.response});
+            }
+            if (dut.axi_b_valid && dut.axi_b_ready) writeReplies.pop_front();
+            if (dut.axi_r_valid && dut.axi_r_ready) readReplies.pop_front();
+            for (unsigned owner = 0; owner < 2; ++owner) {
+                const bool visible = owner ? dut.data_response_valid : dut.instruction_response_valid;
+                const bool completed = owner ? dut.data_response_valid && dut.data_response_ready :
+                                               dut.instruction_response_valid && dut.instruction_response_ready;
+                if (visible && !nativeSeen[owner]) nativeSeen[owner] = cycle;
+                if (completed) active[owner] = false;
+            }
+            const std::array<bool, 2> accepted{dut.instruction_request_valid && dut.instruction_request_ready,
+                                              dut.data_request_valid && dut.data_request_ready};
+            for (unsigned owner = 0; owner < 2; ++owner) if (accepted[owner]) {
+                current[owner] = queues[owner][next[owner]++];
+                active[owner] = true;
+                started[owner] = cycle;
+                nativeSeen[owner] = 0;
             }
         }
         dut.clock = 1;
         dut.eval();
-        if (!active && next[0] == queues[0].size() && next[1] == queues[1].size()) {
+        if (!active[0] && !active[1] && next[0] == queues[0].size() && next[1] == queues[1].size() &&
+            readReplies.empty() && writeReplies.empty() && addresses.empty() && writes.empty()) {
             if (++idle == 8) return 0;
         } else idle = 0;
     }

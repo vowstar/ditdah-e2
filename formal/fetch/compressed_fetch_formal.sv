@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
-module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESET_PC = 0)(input clock);
+module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESET_PC = 0, parameter PREDICTION = 0)(input clock);
   reg reset = 1;
   always @(posedge clock) reset <= 0;
-  (* anyseq *) reg redirect, pause, memory_request_ready, memory_response_valid, output_ready;
+  (* anyseq *) reg redirect, redirectRequest, pause, memory_request_ready, memory_response_valid, output_ready;
+  (* anyseq *) reg predict;
+  (* anyseq *) reg [31:0] predictedTarget;
   (* anyseq *) reg [31:0] target, memory_response_bits_data;
   (* anyseq *) reg memory_response_bits_fault;
   (* anyseq *) reg machine;
@@ -18,7 +20,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
   wire formal_outstanding, formal_held, formal_held_discarded, formal_discarded, formal_first_valid, formal_second_valid;
   wire formal_first_fault, formal_second_fault;
   wire [31:0] formal_assembly_pc, formal_next_word, formal_first_word, formal_second_word;
-  wire [31:0] formal_first_address, formal_second_address, formal_address, formal_held_address;
+  wire [31:0] formal_held_address;
   DitDahE2Fetch dut (.*);
 
   reg outstanding = 0, poisoned = 0, canceled_offer = 0, offered = 0;
@@ -28,43 +30,57 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
   reg [15:0] parcel [0:5], next_parcel [0:5];
   reg [31:0] parcel_address [0:5], next_address [0:5];
   reg parcel_fault [0:5], next_fault [0:5];
+  reg [15:0] visible_parcel [0:7];
+  reg [31:0] visible_address [0:7];
+  reg visible_fault [0:7];
   wire flush = redirect || pause;
   wire request = memory_request_valid && memory_request_ready;
   wire response = memory_response_valid && memory_response_ready;
   wire transfer = output_valid && output_ready;
+  wire predict_jump = PREDICTION && predict && transfer;
+  wire stream_jump = redirect || predict_jump;
+  wire [31:0] selected_target = redirect ? target : predictedTarget;
+  wire redirect_offer = ((redirect && redirectRequest && !pause) || predict_jump) &&
+                        !offered && (!outstanding || response);
   wire append = response && !poisoned && !flush;
-  wire [3:0] instruction_parcels = COMPRESSED && (parcel_fault[0] || parcel[0][1:0] != 3) ? 1 : 2;
-  wire available = count >= instruction_parcels && count != 0;
-  wire expected_fault = parcel_fault[0] || (instruction_parcels == 2 && parcel_fault[1]);
-  wire [31:0] expected_word = COMPRESSED && expected_fault ? 0 : instruction_parcels == 1 ?
-                              {16'b0, parcel[0]} : {parcel[1], parcel[0]};
-  wire [31:0] expected_fault_address = parcel_fault[0] ? parcel_address[0] :
-                                     expected_fault ? parcel_address[1] : expected_pc;
-  wire [3:0] consumed = transfer ? instruction_parcels : 0;
-  wire [3:0] remaining = count - consumed;
   wire [3:0] appended = append ? (skip_lower ? 1 : 2) : 0;
-  wire [3:0] pending = output_valid ? instruction_parcels : 0;
+  wire [3:0] visible_count = count + appended;
+  wire [3:0] instruction_parcels = COMPRESSED && (visible_fault[0] || visible_parcel[0][1:0] != 3) ? 1 : 2;
+  wire available = visible_count >= instruction_parcels && visible_count != 0;
+  wire expected_fault = visible_fault[0] || (instruction_parcels == 2 && visible_fault[1]);
+  wire [31:0] expected_word = COMPRESSED && expected_fault ? 0 : instruction_parcels == 1 ?
+                              {16'b0, visible_parcel[0]} : {visible_parcel[1], visible_parcel[0]};
+  wire [31:0] expected_fault_address = visible_fault[0] ? visible_address[0] :
+                                     expected_fault ? visible_address[1] : expected_pc;
+  wire [3:0] consumed = transfer ? instruction_parcels : 0;
+  wire [3:0] remaining = visible_count - consumed;
+  wire [3:0] pending = 0;
   wire [31:0] assembly_pc = expected_pc + {27'b0, pending, 1'b0};
   wire [3:0] first_parcels = formal_first_valid ? (assembly_pc[1] ? 1 : 2) : 0;
   wire [3:0] second_index = pending + first_parcels;
   integer i, j;
 
-  // Responses add parcels. Only output transfers consume them.
+  // A response is visible before this edge's output transfer consumes parcels.
   always @* begin
-    for (i = 0; i < 6; i = i + 1) begin
-      next_parcel[i] = i + consumed < 6 ? parcel[i + consumed] : 0;
-      next_address[i] = i + consumed < 6 ? parcel_address[i + consumed] : 0;
-      next_fault[i] = i + consumed < 6 ? parcel_fault[i + consumed] : 0;
+    for (i = 0; i < 8; i = i + 1) begin
+      visible_parcel[i] = i < 6 ? parcel[i] : 0;
+      visible_address[i] = i < 6 ? parcel_address[i] : 0;
+      visible_fault[i] = i < 6 ? parcel_fault[i] : 0;
     end
-    if (append && remaining < 6) begin
-      next_parcel[remaining] = skip_lower ? memory_response_bits_data[31:16] : memory_response_bits_data[15:0];
-      next_address[remaining] = accepted_address + (skip_lower ? 2 : 0);
-      next_fault[remaining] = memory_response_bits_fault;
-      if (!skip_lower && remaining + 1 < 6) begin
-        next_parcel[remaining + 1] = memory_response_bits_data[31:16];
-        next_address[remaining + 1] = accepted_address + 2;
-        next_fault[remaining + 1] = memory_response_bits_fault;
+    if (append && count < 8) begin
+      visible_parcel[count] = skip_lower ? memory_response_bits_data[31:16] : memory_response_bits_data[15:0];
+      visible_address[count] = accepted_address + (skip_lower ? 2 : 0);
+      visible_fault[count] = memory_response_bits_fault;
+      if (!skip_lower && count + 1 < 8) begin
+        visible_parcel[count + 1] = memory_response_bits_data[31:16];
+        visible_address[count + 1] = accepted_address + 2;
+        visible_fault[count + 1] = memory_response_bits_fault;
       end
+    end
+    for (i = 0; i < 6; i = i + 1) begin
+      next_parcel[i] = i + consumed < 8 ? visible_parcel[i + consumed] : 0;
+      next_address[i] = i + consumed < 8 ? visible_address[i + consumed] : 0;
+      next_fault[i] = i + consumed < 8 ? visible_fault[i + consumed] : 0;
     end
   end
 
@@ -73,6 +89,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
   always @(posedge clock) begin
     past_valid <= 1;
     assume(COMPRESSED ? target[0] == 0 : target[1:0] == 0);
+    if (PREDICTION && predict) assume(COMPRESSED ? predictedTarget[0] == 0 : predictedTarget[1:0] == 0);
     assume(!memory_response_valid || outstanding);
     if (past_valid && !$past(reset)) begin
       if ($past(pause) && !pause) assume(redirect || $past(redirect));
@@ -101,10 +118,11 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
         parcel_fault[j] <= 0;
       end
     end else begin
-      assert(count <= 6);
+      assert(count <= 4);
       assert(!output_valid || (!flush && stream_valid && available));
       assert(!memory_request_valid || !outstanding || response);
       assert(memory_response_ready == outstanding);
+      if (redirect_offer) assert(memory_request_valid);
       assert(idle == (!offered && !outstanding && count == 0));
       if (idle && pause) assert(!memory_request_valid && !outstanding && !output_valid);
       assert(memory_request_valid || !canceled_offer);
@@ -114,7 +132,8 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
         assert(!memory_request_bits_write && memory_request_bits_data == 0);
         assert(memory_request_bits_mask == 0 && memory_request_bits_size == 2);
         assert(memory_request_bits_operation == 0);
-        if (!canceled_offer && stream_valid) assert(memory_request_bits_address == expected_request);
+        if (redirect_offer) assert(memory_request_bits_address == {selected_target[31:2], 2'b0});
+        else if (!canceled_offer && stream_valid) assert(memory_request_bits_address == expected_request);
       end
       if (output_valid) begin
         assert(output_bits_pc == expected_pc);
@@ -138,28 +157,27 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
           assert($stable({output_bits_pc, output_bits_word, output_bits_length,
                           output_bits_fault, output_bits_faultAddress}));
         end
-        if ($past(stream_valid && available && !output_valid && !flush) && !flush)
-          assert(output_valid);
       end
-      if (memory_request_valid && flush) canceled_offer <= 1;
+      if (stream_valid && available && !flush) assert(output_valid);
+      if (memory_request_valid && (flush || predict_jump) && !redirect_offer) canceled_offer <= 1;
       if (memory_request_valid && !memory_request_ready) offered <= 1;
       if (response) begin
         assert(outstanding);
         outstanding <= 0;
         if (poisoned) saw_discard <= 1;
       end
-      if (flush && outstanding) poisoned <= 1;
+      if ((flush || predict_jump) && outstanding) poisoned <= 1;
       if (request) begin
         assert(!outstanding || response);
         outstanding <= 1;
         accepted_address <= memory_request_bits_address;
-        poisoned <= canceled_offer || flush;
+        poisoned <= !redirect_offer && (canceled_offer || flush || predict_jump);
         canceled_offer <= 0;
         offered <= 0;
         if (!canceled_offer && !flush && stream_valid) expected_request <= expected_request + 4;
       end
-      assert(!append || remaining + appended <= 6);
-      count <= remaining + appended;
+      assert(remaining <= 4);
+      count <= remaining;
       for (j = 0; j < 6; j = j + 1) begin
         parcel[j] <= next_parcel[j];
         parcel_address[j] <= next_address[j];
@@ -173,16 +191,16 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
         prior_pc <= output_bits_pc;
       end
       if (redirect && memory_request_valid && !memory_request_ready) saw_blocked_redirect <= 1;
-      if (flush) begin
+      if (flush || predict_jump) begin
         count <= 0;
         stream_valid <= 0;
         saw_short_lower <= 0;
         saw_fault_lower <= 0;
       end
-      if (redirect) begin
-        expected_request <= {target[31:2], 2'b0};
-        expected_pc <= target;
-        skip_lower <= COMPRESSED && target[1];
+      if (stream_jump) begin
+        expected_request <= {selected_target[31:2], 2'b0} + (request && redirect_offer ? 32'd4 : 0);
+        expected_pc <= selected_target;
+        skip_lower <= COMPRESSED && selected_target[1];
         stream_valid <= 1;
       end
 
@@ -201,7 +219,6 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
       assert(canceled_offer == (formal_held && formal_held_discarded));
       if (outstanding) begin
         assert(poisoned == formal_discarded);
-        assert(formal_address == accepted_address);
       end
       if (canceled_offer || (outstanding && poisoned)) assert(count == 0);
       if (stream_valid && !flush) begin
@@ -215,7 +232,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
         if (formal_held && !canceled_offer) assert(formal_held_address == expected_request);
         assert(count == pending + first_parcels + (formal_second_valid ? 2 : 0));
         if (formal_first_valid) begin
-          assert(formal_first_address == {assembly_pc[31:2], 2'b0});
+          assert(parcel_address[pending] == assembly_pc);
           assert(formal_first_fault == parcel_fault[pending]);
           if (assembly_pc[1]) assert(formal_first_word[31:16] == parcel[pending]);
           else begin
@@ -225,7 +242,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
           end
         end
         if (formal_second_valid) begin
-          assert(formal_second_address == {assembly_pc[31:2], 2'b0} + 4);
+          assert(parcel_address[second_index] == {assembly_pc[31:2], 2'b0} + 32'd4);
           assert(formal_second_word == {parcel[second_index + 1], parcel[second_index]});
           assert(formal_second_fault == parcel_fault[second_index]);
           assert(formal_second_fault == parcel_fault[second_index + 1]);
@@ -244,7 +261,7 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
       end
       cover(transfer && !output_bits_pc[1] && output_bits_length == 4 && !output_bits_fault);
       cover(transfer && saw_blocked_redirect && saw_discard && !output_bits_fault);
-      cover(count == 6 && output_valid && !output_ready);
+      cover(count == 4 && output_valid && !output_ready);
       cover(transfer && output_bits_pc == (COMPRESSED ? 32'hfffffffe : 32'hfffffffc) && output_bits_length == 4 && !output_bits_fault);
       cover(request && response);
       cover(memory_request_valid && !memory_request_ready && response);
@@ -252,6 +269,17 @@ module compressed_fetch_formal #(parameter COMPRESSED = 1, parameter [31:0] RESE
       cover(idle && !flush && memory_request_valid);
       cover(idle && pause && !memory_request_valid);
       cover(idle && redirect && !memory_request_valid);
+      cover(redirect_offer && request);
+      cover(redirect_offer && !memory_request_ready);
+      cover(redirect_offer && request && response);
+      cover(count == 0 && append && transfer);
+      cover(append && output_valid && !output_ready);
+      if (PREDICTION) begin
+        cover(predict_jump && request && redirect_offer);
+        cover(predict_jump && outstanding && !response);
+        cover(predict_jump && offered && request);
+        cover(predict_jump && request && response);
+      end
     end
   end
 endmodule

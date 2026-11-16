@@ -177,7 +177,22 @@ def device_expectations(groups, output=b"E23\n"):
     return timer, expected_responses, timer_counts, console.counts
 
 
-def check(image, parameters, regions, trace, selected="timer", *, expected_output=None):
+def instruction_tail(trace):
+    """Separate the post-F instruction-frontier witness from ordinary trace events."""
+    lines = trace.splitlines()
+    records = [(index, line.split()) for index, line in enumerate(lines) if line.startswith("J ")]
+    assert len(records) == 1, "Missing instruction completion frontier"
+    index, fields = records[0]
+    assert len(fields) == 28 and index and lines[index - 1].startswith("F "), "Invalid instruction frontier record"
+    values = tuple(map(int, fields[1:]))
+    assert all(value >= 0 for value in values), "Negative instruction frontier value"
+    return "\n".join(lines[:index] + lines[index + 1:]) + "\n", values
+
+
+def check(image, parameters, regions, trace, selected="timer", *, expected_output=None, allow_instruction_tail=False):
+    tail = None
+    if allow_instruction_tail:
+        trace, tail = instruction_tail(trace)
     groups, observed = cycles(trace)
     output = expected_output if expected_output is not None else (b"E23\n" if selected == "timer" else b"U\n")
     timer, device_results, timer_counts, console_counts = device_expectations(groups, output)
@@ -191,6 +206,9 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
     memory_addresses = set(image.words())
     interrupts, completion, memory_count, sleep = 0, None, 0, 0
     writes, traps, modes = {}, [], Counter()
+    instruction_offers = instruction_accepted = instruction_completed = 0
+    instruction_offer_id = instruction_active_id = 0
+    completion_frontier = None
 
     def region_at(address):
         return next((name for name, entry in regions.items()
@@ -220,6 +238,11 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
                 if model.protected_mode:
                     assert model.pmp.allowed((request[0], request[4], int(machine), 2 if port == "I" else request[1])), "Denied request reached external memory"
                 offered[port] = request
+                if port == "I":
+                    instruction_offers += 1
+                    instruction_offer_id = instruction_offers
+                elif completion is not None:
+                    raise AssertionError("Data offer after terminal retirement")
             elif kind == "Q":
                 port, request = fields[2], tuple(map(int, fields[3:]))
                 assert len(request) == 6 and request[5] in (0, 1), "Invalid request privilege"
@@ -228,6 +251,12 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
                 if port in ("I", "D"):
                     assert offered.pop(port) == request, "Accepted request differs from its first offer"
                 outstanding[port] = (cycle, request)
+                if port == "I":
+                    instruction_accepted += 1
+                    assert instruction_offer_id == instruction_accepted, "Instruction acceptance skipped an offer"
+                    instruction_active_id, instruction_offer_id = instruction_offer_id, 0
+                elif completion is not None:
+                    raise AssertionError("Data acceptance after terminal retirement")
                 if port in ("C", "T"):
                     assert "D" in outstanding and outstanding["D"][0] == cycle
                     original = outstanding["D"][1]
@@ -247,6 +276,10 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
             elif kind == "S":
                 port, response = fields[2], tuple(map(int, fields[3:]))
                 start, request = outstanding.pop(port)
+                if port == "I":
+                    instruction_completed += 1
+                    assert instruction_active_id == instruction_completed, "Instruction response order differs"
+                    instruction_active_id = 0
                 assert start < cycle, "Native response preceded acceptance"
                 if port in ("I", "D"):
                     name = region_at(request[0])
@@ -326,6 +359,8 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
                     assert not completed, "Data response lacks a memory instruction"
                 if pc == image.symbols["software_done"]:
                     assert word == 0x6F and next_pc == pc
+                    if completion is None:
+                        completion_frontier = instruction_offers
                     completion = cycle if completion is None else completion
             elif kind == "N":
                 assert "D" not in outstanding and not completed
@@ -335,7 +370,39 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
             elif kind != "X":
                 raise AssertionError("Unknown platform event")
     assert completion is not None and len(groups) > completion + 8
-    assert not outstanding and not completed and not issued and not external_results and not writes and "D" not in offered
+    if tail is None:
+        assert not outstanding and not completed and not issued and not external_results and not writes and "D" not in offered
+    else:
+        (terminal_pc, terminal_cycle, frontier, offers, accepted, responses,
+         active_id, active_cycle, *owner) = tail
+        active_request, held_id, held_request = tuple(owner[:6]), owner[6], tuple(owner[7:13])
+        ar, ar_address, ar_protection, ar_held, held_address, held_protection = owner[13:]
+        assert (terminal_pc, terminal_cycle, frontier) == (image.symbols["software_done"], completion, completion_frontier), "Instruction frontier differs from terminal retirement"
+        assert (offers, accepted, responses) == (instruction_offers, instruction_accepted, instruction_completed), "Instruction frontier accounting differs"
+        assert responses >= frontier, "Preterminal instruction offer did not drain"
+        assert not completed and not writes and set(outstanding) <= {"I"} and set(issued) <= {"I"} and set(external_results) <= {"I"} and set(offered) <= {"I"}, "Noninstruction debt at completion"
+        assert (active_id, held_id) == (instruction_active_id, instruction_offer_id), "Instruction tail owner differs"
+        assert not active_id or active_id > frontier, "Preterminal accepted instruction remains"
+        assert not held_id or held_id > frontier, "Preterminal offered instruction remains"
+        if active_id:
+            assert outstanding["I"] == (active_cycle, active_request), "Accepted instruction tail payload differs"
+            assert active_request[1:5] == (0, 0, 0, 2), "Instruction tail is not read-only"
+        else:
+            assert "I" not in outstanding and (active_cycle, *active_request) == (0,) * 7, "Unowned instruction tail payload"
+        if held_id:
+            assert offered["I"] == held_request, "Held instruction tail payload differs"
+            assert held_request[1:5] == (0, 0, 0, 2), "Held instruction tail is not read-only"
+        else:
+            assert "I" not in offered and held_request == (0,) * 6, "Unowned held instruction tail payload"
+        assert ar in (0, 1) and ar_held in (0, 1) and ar == int("I" in issued), "External instruction tail owner differs"
+        if ar:
+            assert issued["I"] == ("read", ar_address) and active_id and ar_protection == (4 | active_request[5]), "External instruction tail payload differs"
+        else:
+            assert (ar_address, ar_protection) == (0, 0)
+        if ar_held:
+            assert active_id and not ar and held_address == (active_request[0] & ~3) and held_protection == (4 | active_request[5]), "Held AXI instruction address differs"
+        else:
+            assert (held_address, held_protection) == (0, 0)
     assert observed.keys() == memory_addresses, "Final memory snapshot is incomplete or has extra words"
     for address, value in observed.items():
         assert value == model.word(address), "Final platform memory differs"
@@ -358,10 +425,16 @@ def check(image, parameters, regions, trace, selected="timer", *, expected_outpu
         assert selected == "local" and interrupts == 0 and not traps
         assert instructions["fence.i"] >= 2, "Local code update was not synchronized"
         signature = []
-    return {"cycles": len(groups), "interrupts": interrupts, "sleepCycles": sleep,
+    result = {"cycles": len(groups), "interrupts": interrupts, "sleepCycles": sleep,
             "memoryInstructions": memory_count, "instructions": dict(sorted(instructions.items())),
             "timer": timer_counts, "console": console_counts, "observations": signature,
             "traps": traps, "privilegeRetirements": dict(modes)}
+    if tail is not None:
+        result["completion"] = {"policy": "preterminal instruction frontier drained; finite postterminal read-only instruction cut",
+                                "terminalPc": terminal_pc, "terminalCycle": terminal_cycle, "instructionOfferFrontier": frontier,
+                                "instructionOffers": offers, "instructionAccepted": accepted, "instructionResponses": responses,
+                                "pendingInstructionId": active_id, "heldInstructionId": held_id}
+    return result
 
 
 def rejected(action):
@@ -385,9 +458,11 @@ def data_permission_mutant(content):
 
 
 def axi_privilege_mutant(content):
-    before = "wire [2:0]  protection = {~dataOwner, 1'h0, request_machine};"
-    assert content.count(before) == 1, "AXI privilege mutation no longer matches RTL"
-    return content.replace(before, "wire [2:0]  protection = {~dataOwner, 1'h0, 1'h1};")
+    for channel in ("aw", "ar"):
+        pattern = rf"(assign\s+axi_{channel}_bits_protection\s*=\s*)([^;]+);"
+        content, count = re.subn(pattern, lambda match: f"{match[1]}({match[2].strip()} | 3'h1);", content)
+        assert count == 1, "AXI privilege mutation no longer matches RTL"
+    return content
 
 
 def verify_platform_inputs(directory, manifest):

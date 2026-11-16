@@ -98,6 +98,22 @@ class CompleteSetupTests(unittest.TestCase):
                 old_config = staged.PROGRAM_STATE_CONFIG if complete_program else staged.STORE_STATE_CONFIG
                 previous, old = payload.definition(name, old_config['name'])
                 changed = name in ('core-store-safety', 'core-dpc-safety') or complete_program and name in ('core-multiply-safety', 'core-illegal-safety')
+                if complete_program and name == 'core-older-safety':
+                    expected = payload.definition(name, staged.PAYLOAD_CONFIG['name'])
+                    self.assertEqual((plan, contents), expected)
+                    template = (run.HERE / 'payload_helpers.sv').read_bytes()
+                    projected = contents[run.CORE_WRAPPER].replace(
+                        staged.older_command_payload_fragment(template), template, 1)
+                    self.assertEqual(projected, old[run.CORE_WRAPPER])
+                    self.assertEqual([n for n in plan['inputs'] if contents[n] != old[n]],
+                                     ['collect.tcl', 'plan.tcl', run.CORE_WRAPPER])
+                    for field in ('goals', 'sources', 'targetBounds', 'initialState', 'dutInitialState',
+                                  'assumptions', 'helperGoals', 'nativeCovers', 'payloadParameters'):
+                        self.assertEqual(plan[field], previous[field])
+                    self.assertEqual(staged.budgets(plan['stagedConfiguration']['name']), (960, 1080))
+                    self.assertEqual(plan['querySchedule'][-2]['kind'], 'dpc')
+                    self.assertEqual(plan['querySchedule'][-1]['timeLimit'], 360)
+                    continue
                 if not changed:
                     self.assertEqual((plan, contents), (previous, old))
                     continue

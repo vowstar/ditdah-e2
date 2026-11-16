@@ -16,28 +16,28 @@ STRATEGY = {"profile": PROFILE, "configuration": "injection"}
 FILES = ("staged.py", "collect_staged.tcl", "staged_helpers.sv", "collect_semantic.tcl", "semantic_helpers.sv", "collect_payload.tcl", "payload_helpers.sv", "collect_joint.tcl", "collect_store_state.tcl", "store_state_helpers.sv", "program_state_helpers.sv", "complete_setup_helpers.sv", "complete_state_helpers.sv", "complete_protocol_helpers.sv", "complete_cluster_helpers.sv", "complete_multiply_helpers.sv", "complete_illegal_helpers.sv")
 ORIGINALS = ('no_external_event', 'native_epc_metadata', 'native_cause_metadata', 'native_tval_metadata', 'native_control_metadata', 'native_hit_metadata', 'older_fault_cause', 'target_first_event_is_breakpoint', 'target_retry_has_no_trap', 'target_has_no_writeback_on_trap', 'target_single_retry', 'illegal_single_breakpoint', 'older_load_retires_first', 'older_fault_blocks_target', 'no_store_before_breakpoint', 'older_fault_blocks_store', 'no_multiply_before_breakpoint', 'multiply_has_target_identity', 'initial_dpc_zero', 'abstract_dpc_value', 'resume_pc_matches')
 HELPERS = ('rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode')
-INJECTION_CONFIG = {'coldExpressionSha256': 'cddf44ae6e073813e60ded592a417e0110e7f0b4161dd629a3eb975937faf6cc', 'coldFacts': 123, 'collectorSha256': '02d3a9efc913bc2bf2049bff6e54449d57f84d1e1ee247fc7032d082c9f197e8', 'dutColdExpressionSha256': '8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0', 'dutColdFacts': 122, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode'], 'helperSha256': '749262b3273f28caec4338b579d61b8ad48986275e09b15af78d52497c528694', 'name': 'injection', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
+INJECTION_CONFIG = {'coldExpressionSha256': '68d378968116af7a65b8a2667fb5f54114a9f02acd5a8ca580ce53740583f139', 'coldFacts': 122, 'collectorSha256': '619ef8d7fc9a688451224c954062298a457866db4d215ded472963ee84409f77', 'dutColdExpressionSha256': 'b286cb142b863800fd8a29303793e4563502e5c5930e27b22ee3699e325de183', 'dutColdFacts': 121, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode'], 'helperSha256': 'f6da71aa307a0648532d8cf6ca5bf6ccaff906e8711971ca3c4f10b63e78e9c0', 'name': 'injection', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
 
 HINT_GROUPS = (('initial_dpc_zero',), ('no_external_event',), ('native_epc_metadata', 'native_cause_metadata'), ('native_tval_metadata', 'native_control_metadata', 'native_hit_metadata'), ('target_retry_has_no_trap', 'target_single_retry', 'illegal_single_breakpoint', 'older_load_retires_first'), ('target_has_no_writeback_on_trap', 'no_store_before_breakpoint', 'no_multiply_before_breakpoint', 'multiply_has_target_identity'))
 
 
 SEMANTIC_HELPERS = ('core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata')
-SEMANTIC_CONFIG = {'coldExpressionSha256': 'cddf44ae6e073813e60ded592a417e0110e7f0b4161dd629a3eb975937faf6cc', 'coldFacts': 123, 'collectorSha256': 'b484c1639fdf0bcd7f0a1728048afe0bb987ddbfc009459e6f55d0d0f548ed59', 'dutColdExpressionSha256': '8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0', 'dutColdFacts': 122, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode', 'core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata'], 'helperSha256': '356dfe265c8eec191f6102c263d6d66f8baa779a12e140589c84f2d2650f2240', 'name': 'injection-semantic', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
+SEMANTIC_CONFIG = {'coldExpressionSha256': '68d378968116af7a65b8a2667fb5f54114a9f02acd5a8ca580ce53740583f139', 'coldFacts': 122, 'collectorSha256': '615514ecffdb59f2918d4d1ed8e1dfa392e3122432057343b4d9845c9f34c5e1', 'dutColdExpressionSha256': 'b286cb142b863800fd8a29303793e4563502e5c5930e27b22ee3699e325de183', 'dutColdFacts': 121, 'helperGoals': ['rom_local_response_class', 'rom_local_valid_word_class', 'rom_local_fetch_rom_consistent', 'core_geom_rom_packet_consistent', 'rom_local_fetch_fault_free', 'core_frontend_stage_rom_consistent', 'core_base_zero_memory_decode', 'core_data_owner_control_consistent', 'core_fetch_execute_fault_free', 'core_program_no_injection', 'core_reverse_memory_system_decode', 'core_native_pipeline_pc_owner', 'core_native_semantic_metadata', 'core_debug_command_register_domain', 'core_native_trap_metadata'], 'helperSha256': 'dd4610fab6a7cd8e55aaf5d76d9cd268644242f2346c5e6b46e1bb858cdbeca0', 'name': 'injection-semantic', 'wrapperSha256': '5d9fb4c2e2ef2e1e8445df2a99bb68050cb6ba6602293cf191ac2d19357332a6'}
 
 
 PAYLOAD_HELPERS = ('core_setup_transaction_payload_metadata', 'core_setup_exact_command_payload')
 PAYLOAD_COVERS = ('cover_target_breakpoint', 'cover_older_fault_event', 'cover_older_load_accepted', 'cover_native_epc', 'cover_native_cause', 'cover_native_tval', 'cover_native_control', 'cover_native_hit', 'cover_multiply_start', 'cover_multiply_done', 'cover_target_normal', 'cover_target_retry', 'cover_multiply_value', 'cover_completion', 'cover_metadata_complete', 'cover_store_finish', 'cover_multiply_finish', 'cover_illegal_finish', 'cover_older_fault', 'cover_resume_dpc', 'cover_first_dmi', 'cover_cold_reset', 'cover_setup_guard_07a2', 'cover_setup_guard_07a1', 'cover_setup_guard_0305')
 PAYLOAD_CONFIG = {**SEMANTIC_CONFIG, "name": 'injection-payload-semantic', "helperGoals": [*SEMANTIC_CONFIG["helperGoals"], *PAYLOAD_HELPERS],
-                  "helperSha256": '0f8835965ae765431d67cbb271369e38034b664a4d9995db286b1b555a23f4e5', "collectorSha256": '1b04615808145084779ea2e16c897885ef518701d804b007f3c46acf7ff3cf38'}
+                  "helperSha256": '0f8835965ae765431d67cbb271369e38034b664a4d9995db286b1b555a23f4e5', "collectorSha256": 'a832a829a4bf90e021210a922b41fa917da7c830420946d81eb96cff719f57be'}
 
 
-JOINT_CONFIG = {**PAYLOAD_CONFIG, "name": 'injection-payload-joint', "collectorSha256": 'caefbe8c9a3c1409055d261174135f09af924111a76dfd93080e3e831a1ca9ab'}
+JOINT_CONFIG = {**PAYLOAD_CONFIG, "name": 'injection-payload-joint', "collectorSha256": '0183550682e734a9491ff8c2b33cdb1d3710def8945540c0fbeed2dfffb95505'}
 
 
 STORE_STATE_HELPERS = ("core_store_source_state", "core_armed_target_capture", "core_store_value_owner_metadata", "core_store_configuration_history")
 STORE_STATE_CONFIG = {**JOINT_CONFIG, "name": 'injection-store-state',
     "helperGoals": [*JOINT_CONFIG["helperGoals"], *STORE_STATE_HELPERS],
-    "collectorSha256": 'ef60ea4bc60c543040b4718a5f3c5b5d902da8cec5eb16b6f8acaac355da863d', "helperSha256": 'd2639d2f1a602a2672af733b1a98181a41810bef1ac8df1bbefe85022ccb92ae'}
+    "collectorSha256": '7d4ef8ac79ccc0e6cf85aa65c2c99e1a631eced7d708f2b623902f9a514b3564', "helperSha256": 'd2639d2f1a602a2672af733b1a98181a41810bef1ac8df1bbefe85022ccb92ae'}
 STORE_EVENT_PRIORITY = ("target_first_event_is_breakpoint", "target_retry_has_no_trap", "target_single_retry",
                         "older_load_retires_first", "no_store_before_breakpoint")
 
@@ -45,7 +45,7 @@ STORE_EVENT_PRIORITY = ("target_first_event_is_breakpoint", "target_retry_has_no
 PROGRAM_STATE_HELPERS = ("core_store_source_state", "core_armed_target_capture", "core_store_value_owner_metadata", "core_program_configuration_history")
 PROGRAM_STATE_CONFIG = {**JOINT_CONFIG, "name": 'injection-program-state',
     "helperGoals": [*JOINT_CONFIG["helperGoals"], *PROGRAM_STATE_HELPERS],
-    "collectorSha256": 'ef60ea4bc60c543040b4718a5f3c5b5d902da8cec5eb16b6f8acaac355da863d', "helperSha256": '0b698cbda65b828346ddf86df8103b74436637100f2a98822dffa4e761aca59c'}
+    "collectorSha256": '7d4ef8ac79ccc0e6cf85aa65c2c99e1a631eced7d708f2b623902f9a514b3564', "helperSha256": '0b698cbda65b828346ddf86df8103b74436637100f2a98822dffa4e761aca59c'}
 
 
 def program_state_schedule():
@@ -293,6 +293,19 @@ def payload_fragment(template, scenario):
     return fragment
 
 
+
+def older_command_payload_fragment(template):
+    fragment = payload_fragment(template, 3)
+    matches = list(re.finditer(rb"\bcore_setup_exact_command_payload:\s*assert\((.*?)\);", fragment, re.DOTALL))
+    require(len(matches) == 1, "Older exact command assertion differs")
+    match = matches[0]
+    extension = (b" &&\n        (!dut.dm.commandValid || dut.dm.command_register != 16'h07b1 ||\n"
+                 b"         dut.dm.operands_data == 32'd0) &&\n"
+                 b"        (!dut.dm.commandValid || dut.dm.command_register != 16'h07a5 ||\n"
+                 b"         dut.dm.operands_data == 32'd8)")
+    return fragment[:match.end(1)] + extension + fragment[match.end(1):]
+
+
 def payload_schedule(helpers):
     entries = [{"kind": "metadata", "labels": [PAYLOAD_HELPERS[0], *helpers], "engines": ["Mp", "N", "Hp"],
                 "timeLimit": 120, "propertyGuard": 7680, "jobs": 4, "withProven": True},
@@ -313,7 +326,8 @@ def build_payload(plan, contents, collector, template, config):
     plan, contents = build_semantic(plan, contents, (HERE / "collect_semantic.tcl").read_bytes(),
                                     (HERE / "semantic_helpers.sv").read_bytes(), configuration(SEMANTIC_CONFIG["name"]))
     original = contents["trigger_core_formal.sv"]
-    fragment = payload_fragment(template, plan["scenario"])
+    command_operands = plan["scenario"] == 3 and config["name"] == PAYLOAD_CONFIG["name"]
+    fragment = older_command_payload_fragment(template) if command_operands else payload_fragment(template, plan["scenario"])
     require(not re.search(rb"\b(reg|initial|assume|force)\b", fragment), "Payload observer changes state or environment")
     names = re.findall(rb"\bwire\s*(?:\[[^]]+\]\s*)?(\w+)", fragment)
     require(len(names) == len(set(names)) and not set(names).intersection(re.findall(rb"\b\w+\b", original)), "Payload observer name collision")
@@ -327,6 +341,10 @@ def build_payload(plan, contents, collector, template, config):
                 helperGoals=list(config["helperGoals"]), allAssertions=[*ORIGINALS, *config["helperGoals"]],
                 queryGoals=[*config["helperGoals"], *ORIGINALS], querySchedule=query_schedule(config["helperGoals"], config["name"]),
                 allCovers=list(PAYLOAD_COVERS), nativeCovers=payload_native_covers(), payloadParameters=payload_parameters(plan["scenario"]))
+    if command_operands:
+        plan.update(commandOperandObligations={"07b1": 0, "07a5": 8},
+                    requiredUnboundedHelpers=["core_setup_exact_command_payload"],
+                    caseSuccessUsesOriginalGoalsOnly=False)
     contents["plan.tcl"] = plan_tcl(plan, config)
     return plan, contents
 
@@ -487,6 +505,9 @@ def build(plan, contents, collector, fragment, source_configuration="injection")
             return build_complete(plan, contents, configuration(STORE_COMPLETE_CONFIG["name"]), fragment)
         if source_configuration == PROGRAM_COMPLETE_CONFIG["name"] and plan["scenario"] in (1, 2):
             return build_complete(plan, contents, config, fragment)
+        if source_configuration == PROGRAM_COMPLETE_CONFIG["name"] and plan["scenario"] == 3:
+            return build(plan, contents, (HERE / "collect_payload.tcl").read_bytes(),
+                         (HERE / "payload_helpers.sv").read_bytes(), PAYLOAD_CONFIG["name"])
         return build(plan, contents, (HERE / "collect_store_state.tcl").read_bytes(),
                      (HERE / "store_state_helpers.sv").read_bytes(), STORE_STATE_CONFIG["name"])
     if source_configuration == PROGRAM_STATE_CONFIG["name"]:
@@ -534,7 +555,7 @@ def build(plan, contents, collector, fragment, source_configuration="injection")
     plan["initialState"] = {**plan["dutInitialState"], "profile": "implemented_cold_reset_with_geometry_observer",
         "resetFacts": config["coldFacts"], "dutResetFacts": config["dutColdFacts"], "observerResetFacts": 1,
         "previousResetExpressionSha256": config["dutColdExpressionSha256"], "addedResetFacts": 1,
-        "scopeChange": "DUT cold122 unchanged; one read-only epoch is1 after implemented cold reset",
+        "scopeChange": "DUT cold121 omits removed packet state; one read-only epoch is1 after cold reset",
         "dutResetExpressionSha256": config["dutColdExpressionSha256"], "resetExpressionSha256": config["coldExpressionSha256"]}
     contents["plan.tcl"] = plan_tcl(plan, config)
     plan["inputs"] = sorted(contents)
@@ -590,7 +611,8 @@ def check_resources(receipt, plan=None):
 
 def check_native_records(records, plan):
     result = validate_protocol(records, plan)
-    require(result["caseAccepted"], "Native staged proof is incomplete: " + " ".join(result["unresolvedOriginals"]))
+    require(result["caseAccepted"], "Native staged proof is incomplete: " +
+            " ".join([*result["unresolvedOriginals"], *result.get("unresolvedHelpers", [])]))
     evidence = result["originalProperties"]
     unbounded = sum(item["validity_status"] == "proven" for item in evidence.values())
     properties = {
@@ -638,10 +660,14 @@ def validate_protocol(records, plan):
     expected_schedule = query_schedule(helpers, config["name"])
     search_budget, outer_timeout = budgets(config["name"])
     require(plan["proofStrategy"] == strategy(config["name"]) and plan["proofMode"] == "bounded_commercial" and plan["cpuCount"] == 16 and plan["targetBounds"] == declared_bounds(plan["scenario"]), "Original bounds or strategy differs")
+    required_helpers = ["core_setup_exact_command_payload"] if plan["scenario"] == 3 and config["name"] == PAYLOAD_CONFIG["name"] else []
+    require(plan.get("requiredUnboundedHelpers", []) == required_helpers and
+            plan.get("commandOperandObligations") == ({"07b1": 0, "07a5": 8} if required_helpers else None),
+            "Required command payload obligations differ")
     original, labels, schedule = plan["originalGoals"], plan["allAssertions"], plan["querySchedule"]
     require(len(original) == len(set(original)) == 21 and original == list(ORIGINALS) and labels == [*original, *helpers] and
             len(labels) == len(set(labels)) == len(original) + len(helpers) and plan["goals"] == original and plan["helperGoals"] == helpers and
-            plan["queryGoals"] == [*helpers, *original] and plan["caseSuccessUsesOriginalGoalsOnly"] is True,
+            plan["queryGoals"] == [*helpers, *original] and plan["caseSuccessUsesOriginalGoalsOnly"] is (not required_helpers),
             "Original or auxiliary scope differs")
     require(schedule == expected_schedule and len(schedule) == len(expected_schedule) and plan["maximumSearchSeconds"] == search_budget and
             plan["outerTimeoutSeconds"] == outer_timeout, "Staged schedule or budget differs")
@@ -813,7 +839,11 @@ def validate_protocol(records, plan):
     require({tag for tag, _ in records if tag.startswith("bounded.")} == {"bounded." + label for label in converted}, "Unexpected bounded metadata")
     require(records.get(("run", "converted")) == " ".join(converted) and records.get(("run", "incomplete")) == " ".join(incomplete) and
             records.get(("run", "fatal_errors")) == "" and records.get(("run", "state")) == ("failed" if incomplete else "complete"), "Terminal qualification differs")
-    return {"caseAccepted": not incomplete, "full21Passed": not incomplete, "full17Passed": False, "executedQueries": executed,
+    unresolved_helpers = [label for label in required_helpers if not infinite("final." + label)]
+    result = {"caseAccepted": not incomplete and not unresolved_helpers, "full21Passed": not incomplete, "full17Passed": False, "executedQueries": executed,
             "allocatedSearchSeconds": allocated, "queries": query_evidence, "originalProperties": evidence, "unresolvedOriginals": incomplete,
             "unboundedHelpers": [label for label in helpers if infinite("final." + label)],
             "auxiliaryFinalStates": {label: {key: records.get(("final." + label, key)) for key in ("validity_status", "run_status", "engine", "min_length", "target_bound")} for label in helpers}}
+    if required_helpers:
+        result.update(requiredUnboundedHelpers=required_helpers, unresolvedHelpers=unresolved_helpers)
+    return result

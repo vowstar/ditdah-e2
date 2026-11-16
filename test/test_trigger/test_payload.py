@@ -5,6 +5,7 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -70,7 +71,8 @@ class PayloadTests(unittest.TestCase):
         for name in run.SAFETY_RETRY_CASES:
             plan, contents = definition(name)
             previous, old = definition(name, staged.SEMANTIC_CONFIG['name'])
-            fragment = staged.payload_fragment(template, plan['scenario'])
+            fragment = (staged.older_command_payload_fragment(template) if plan['scenario'] == 3 else
+                        staged.payload_fragment(template, plan['scenario']))
             self.assertEqual(contents[run.CORE_WRAPPER].replace(fragment + b'\n', b'', 1), old[run.CORE_WRAPPER])
             for key in ('goals', 'sources', 'targetBounds', 'initialState', 'dutInitialState', 'assumptions'):
                 self.assertEqual(plan[key], previous[key])
@@ -114,12 +116,67 @@ class PayloadTests(unittest.TestCase):
             for mode, typed in [('new_unknown', True), ('pass', False), ('skip_remaining', True)]:
                 process, records, plan = self.execute(Path(directory) / mode, mode=mode, typed=typed)
                 self.assertEqual(process.returncode, 0, process.stderr)
-                self.assertTrue(staged.validate_protocol(records, plan)['caseAccepted'])
+                checked = staged.validate_protocol(records, plan)
+                self.assertEqual(checked['caseAccepted'], mode != 'new_unknown')
                 if mode == 'new_unknown':
                     self.assertEqual(records['query1', 'fact_labels'], '')
-                    self.assertEqual(staged.validate_protocol(records, plan)['unboundedHelpers'], [])
+                    self.assertEqual(checked['unboundedHelpers'], [])
+                    self.assertTrue(checked['full21Passed'])
+                    self.assertEqual(checked['unresolvedHelpers'], ['core_setup_exact_command_payload'])
+                    with self.assertRaisesRegex(ValueError, 'core_setup_exact_command_payload'):
+                        staged.check_native_records(records, plan)
                 if mode == 'skip_remaining':
                     self.assertEqual(records['query9', 'executed'], '0')
+
+    def test_older_command_obligations_preserve_old_body_and_target_scope(self):
+        template = (run.HERE / 'payload_helpers.sv').read_bytes()
+        result = staged.older_command_payload_fragment(template)
+        pattern = rb'core_setup_exact_command_payload:\s*assert\((.*?)\);'
+        before = re.search(pattern, template, re.DOTALL)
+        after = re.search(pattern, result, re.DOTALL)
+        extension = (b" &&\n        (!dut.dm.commandValid || dut.dm.command_register != 16'h07b1 ||\n"
+                     b"         dut.dm.operands_data == 32'd0) &&\n"
+                     b"        (!dut.dm.commandValid || dut.dm.command_register != 16'h07a5 ||\n"
+                     b"         dut.dm.operands_data == 32'd8)")
+        self.assertEqual(after[1], before[1] + extension)
+        self.assertEqual(result.replace(extension, b'', 1), template)
+        self.assertNotRegex(result, rb'\b(reg|initial|assume|force)\b')
+        plan, _ = definition()
+        self.assertEqual(plan['commandOperandObligations'], {'07b1': 0, '07a5': 8})
+        self.assertEqual(plan['requiredUnboundedHelpers'], ['core_setup_exact_command_payload'])
+        self.assertFalse(plan['caseSuccessUsesOriginalGoalsOnly'])
+        self.assertEqual(plan['goals'], list(staged.ORIGINALS))
+        self.assertEqual(len(plan['helperGoals']), 17)
+
+    def test_older_command_extension_rejects_changed_missing_and_duplicate_templates(self):
+        template = (run.HERE / 'payload_helpers.sv').read_bytes()
+        with self.assertRaises(ValueError):
+            staged.older_command_payload_fragment(template + b' ')
+        missing = template.replace(b'core_setup_exact_command_payload:', b'other_command_payload:')
+        duplicate = template + b'\ncore_setup_exact_command_payload: assert(1);\n'
+        for changed in (missing, duplicate):
+            with self.subTest(changed=changed), patch.dict(staged.PAYLOAD_CONFIG,
+                    {'helperSha256': hashlib.sha256(changed).hexdigest()}), self.assertRaises(ValueError):
+                staged.older_command_payload_fragment(changed)
+
+    def test_older_obligations_cannot_be_removed_or_weakened_in_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, records, plan = self.execute(Path(directory) / 'pass')
+            self.assertTrue(staged.check_native_records(records, plan)['stagedEvidence']['caseAccepted'])
+            changed_plans = []
+            for key in ('commandOperandObligations', 'requiredUnboundedHelpers'):
+                changed = copy.deepcopy(plan);del changed[key];changed_plans.append(changed)
+            for register, wrong in (('07b1', 1), ('07a5', 9)):
+                changed = copy.deepcopy(plan);changed['commandOperandObligations'][register] = wrong
+                changed_plans.append(changed)
+            changed = copy.deepcopy(plan);changed['caseSuccessUsesOriginalGoalsOnly'] = True
+            changed_plans.append(changed)
+            for changed in changed_plans:
+                with self.subTest(plan=changed), self.assertRaises(ValueError):
+                    staged.validate_protocol(records, changed)
+            _, records, plan = self.execute(Path(directory) / 'other', 'new_unknown', name='core-store-safety')
+            self.assertTrue(staged.validate_protocol(records, plan)['caseAccepted'])
+            self.assertNotIn('requiredUnboundedHelpers', plan)
 
     def test_actual_tcl_bad_cover_inventory_rejects_before_proof(self):
         with tempfile.TemporaryDirectory() as directory:

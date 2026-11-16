@@ -37,7 +37,7 @@ GENERATORS = {"DitDahE2DebugModule": "DebugModule", "DitDahE2DebugSystemBus": "D
 
 def configuration(value):
     fields = {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA",
-              "enableZba", "enableZbb", "enableZbs", "enableJtag", "jtagIdcode", "triggerCount", "enableSba"}
+              "enableZba", "enableZbb", "enableZbs", "enableJtag", "jtagIdcode", "triggerCount", "enableSba", "multiplyBitsPerCycle", "axiConcurrent", "branchPrediction"}
     if not isinstance(value, dict) or value.keys() - fields:
         raise ValueError("Unknown core configuration field")
     enable_c = value.get("enableC", True)
@@ -49,6 +49,9 @@ def configuration(value):
     enable_m = value.get("enableM", True)
     if type(enable_m) is not bool:
         raise ValueError("enableM must be a Boolean")
+    multiply_bits = value.get("multiplyBitsPerCycle", 4)
+    if type(multiply_bits) is not int or multiply_bits not in (1, 2, 4):
+        raise ValueError("multiplyBitsPerCycle must be one, two or four")
     protected = value.get("protectedMode", False)
     if type(protected) is not bool:
         raise ValueError("protectedMode must be a Boolean")
@@ -60,6 +63,12 @@ def configuration(value):
         raise ValueError("enableSba must be a Boolean")
     if sba and not debug:
         raise ValueError("enableSba requires enableDebug")
+    axi_concurrent = value.get("axiConcurrent", True)
+    if type(axi_concurrent) is not bool:
+        raise ValueError("axiConcurrent must be a Boolean")
+    branch_prediction = value.get("branchPrediction", True)
+    if type(branch_prediction) is not bool:
+        raise ValueError("branchPrediction must be a Boolean")
     trigger_count = value.get("triggerCount", 0)
     if type(trigger_count) is not int or trigger_count not in (0, 2):
         raise ValueError("triggerCount must be zero or two")
@@ -82,7 +91,8 @@ def configuration(value):
     if jtag and idcode is None:
         raise ValueError("enableJtag requires an explicit jtagIdcode")
     result = {"resetVector": reset, "enableM": enable_m, "enableC": enable_c, "protectedMode": protected,
-              "enableDebug": debug, "enableA": atomic, **bits}
+              "enableDebug": debug, "enableA": atomic, "multiplyBitsPerCycle": multiply_bits,
+              "axiConcurrent": axi_concurrent, "branchPrediction": branch_prediction, **bits}
     if jtag or idcode is not None:
         result |= {"enableJtag": jtag, "jtagIdcode": idcode}
     if trigger_count:

@@ -51,10 +51,21 @@ def prove(output, operation):
         P, M, Q = (c.current.P, c.current.M, c.current.Q)
         U = c.U
         F = c.total
-        predP = s["P"] + z3.If(z3.Extract(0, 0, s["Q"]) == BV(1, 1), s["M"], BV(0, 64))
-        predM = z3.Concat(z3.Extract(62, 0, s["M"]), BV(0, 1))
-        predQ = z3.Concat(BV(0, 1), z3.Extract(31, 1, s["Q"]))
+        predP = s["P"]
+        for bit in range(2):
+            predP = predP + z3.If(z3.Extract(bit, bit, s["Q"]) == BV(1, 1), s["M"] << bit, BV(0, 64))
+        predM = z3.Concat(z3.Extract(61, 0, s["M"]), BV(0, 2))
+        predQ = z3.Concat(BV(0, 2), z3.Extract(31, 2, s["Q"]))
         predT = F(predP, predM, predQ)
+        past = c.past
+        pastPredP = past.P
+        for bit in range(2):
+            pastPredP = pastPredP + z3.If(
+                z3.Extract(bit, bit, past.Q) == BV(1, 1), past.M << bit, BV(0, 64)
+            )
+        pastPredM = z3.Concat(z3.Extract(61, 0, past.M), BV(0, 2))
+        pastPredQ = z3.Concat(BV(0, 2), z3.Extract(31, 2, past.Q))
+        pastPredT = F(pastPredP, pastPredM, pastPredQ)
         hold_flag = z3.Bool("chain_previous_mul_hold")
         step = z3.And(c.common, c.previous_step)
         owner = z3.And(c.common, c.previous_owner)
@@ -63,6 +74,8 @@ def prove(output, operation):
         op_scope = c.OP == BV(op, 3)
         current_magL = generic.Certificate.mag(c.current.left, c.current.op, True)
         current_magR = generic.Certificate.mag(c.current.right, c.current.op, False)
+        selected_magL, selected_magR = generic.Certificate.selected_magnitudes(
+            c.current.left, c.current.right, c.current.op)
         snap_magL = generic.Certificate.mag(s["left"], s["op"], True)
         snap_magR = generic.Certificate.mag(s["right"], s["op"], False)
         phi = [
@@ -83,7 +96,8 @@ def prove(output, operation):
                 {
                     "native_owner_magnitudes": z3.Implies(
                         owner, z3.And(current_magL == snap_magL, current_magR == snap_magR)
-                    )
+                    ),
+                    "native_owner_operation": z3.Implies(owner, c.current.op == s["op"])
                 },
                 c.R == c.Rsnapshot,
                 "native_owner_magnitudes",
@@ -95,7 +109,7 @@ def prove(output, operation):
                     "native_initial_state": z3.Implies(
                         initial,
                         z3.And(
-                            P == BV(0, 64), M == z3.ZeroExt(32, current_magL), Q == current_magR
+                            P == BV(0, 64), M == z3.ZeroExt(32, selected_magL), Q == selected_magR
                         ),
                     )
                 },
@@ -140,9 +154,66 @@ def prove(output, operation):
                 claim,
                 role="One required tuple premise is removed",
             )
+            if name == "reference_stable":
+                query(op, "negative_phi_reference_without_selected_operation",
+                      {key: value for key, value in facts.items() if key != "native_owner_operation"},
+                      [op_scope, guard, z3.Not(claim)], "sat", claim,
+                      role="Equal raw magnitudes do not bind the selected pair without sampled operation stability")
+        sampled = [
+            (
+                "predicted_snapshot_total",
+                {
+                    "native_predicted_product_snapshot": z3.Implies(step, predP == pastPredP),
+                    "native_predicted_multiplicand_snapshot": z3.Implies(step, predM == pastPredM),
+                    "native_predicted_multiplier_snapshot": z3.Implies(step, predQ == pastPredQ),
+                },
+                predT == pastPredT,
+            ),
+            (
+                "snapshot_total",
+                {
+                    "native_snapshot_product": c.facts["snapshot_P"],
+                    "native_snapshot_multiplicand": c.facts["snapshot_M"],
+                    "native_snapshot_multiplier": c.facts["snapshot_Q"],
+                    "native_sampled_step_flag": c.facts["sampled_step_flag"],
+                },
+                c.Tsnapshot == c.Tpast,
+            ),
+        ]
+        for name, premises, claim in sampled:
+            query(
+                op, "phi_" + name, premises,
+                [op_scope, step, z3.Not(claim)], "unsat",
+                role="Source-bound past tuple substitution through the same typed function",
+            )
+            query(op, "phi_" + name + "_nonvacuity", premises, [op_scope, step], "sat")
+            for missing in premises:
+                query(
+                    op, "negative_phi_" + name + "_without_" + missing,
+                    {key: value for key, value in premises.items() if key != missing},
+                    [op_scope, step, z3.Not(claim)], "sat", claim,
+                    role="One required native past tuple premise is removed",
+                )
+        premises = {
+            "composed_predicted_snapshot_total": z3.Implies(step, predT == pastPredT),
+            "composed_original_snapshot_total": z3.Implies(step, c.Tsnapshot == c.Tpast),
+            "native_previous_polynomial_identity": z3.Implies(step, pastPredT == c.Tpast),
+        }
+        claim = predT == c.Tsnapshot
+        query(
+            op, "sampled_identity", premises, [op_scope, step, z3.Not(claim)], "unsat",
+            role="Typed past total correspondence and the licensed prior-frame polynomial predicate",
+        )
+        query(op, "sampled_identity_nonvacuity", premises, [op_scope, step], "sat")
+        for missing in premises:
+            query(
+                op, "negative_sampled_identity_without_" + missing,
+                {key: value for key, value in premises.items() if key != missing},
+                [op_scope, step, z3.Not(claim)], "sat", claim,
+            )
         facts = {
             "composed_actual_total_update": z3.Implies(step, c.T == predT),
-            "native_sampled_identity": z3.Implies(step, predT == c.Tsnapshot),
+            "composed_sampled_identity": z3.Implies(step, predT == c.Tsnapshot),
         }
         claim = c.T == c.Tsnapshot
         query(
@@ -228,13 +299,13 @@ def prove(output, operation):
                 if extras == "nonzero":
                     additional += [d.current.iteration != BV(0, 6)]
             query(op, "negative_conservation_" + name, d.facts, additional, "sat", d.I)
-        terminal_guard = z3.And(c.G, c.current.iteration == BV(32, 6))
-        native_guard = z3.And(c.common, c.current.active, c.current.iteration == BV(32, 6))
-        terminal_claim = c.current.P == c.R
+        terminal_guard = z3.And(c.G, c.finish_condition(c.current))
+        native_guard = z3.And(c.common, c.current.active, c.finish_condition(c.current))
+        terminal_claim = c.finish_product(c.current) == c.R
         tfacts = {
             "proved_complete_conservation": c.I,
             "native_active_epoch": c.facts["active_epoch"],
-            "native_terminal_total_is_product": z3.Implies(native_guard, c.T == c.current.P),
+            "native_terminal_total_is_product": z3.Implies(native_guard, c.T == c.finish_product(c.current)),
         }
         query(
             op,
@@ -271,6 +342,13 @@ def prove(output, operation):
         "concreteInterpretation": "M64 * zero_extend_32(Q32) modulo 2^64",
         "newArithmeticAxioms": 0,
         "fourPhiRulesProvedForEachOperation": True,
+        "sampledTotalCongruencesProvedForEachOperation": True,
+        "sampledIdentityUsesLicensedPriorPredicate": True,
+        "derivedSourceAssertions": [
+            "chain_polynomial_snapshot_predicted_total",
+            "chain_polynomial_snapshot_total",
+            "chain_sampled_identity",
+        ],
         "totalPreservedByCheckedTransitivity": True,
         "conservationInductionHypothesisOnlyLocalPast": True,
         "terminalUsesPreviouslyProvedConservation": True,

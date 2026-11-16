@@ -3,7 +3,7 @@
 """Generate the AXI4-Lite adapter and check transactions from complete port traces."""
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
 import hashlib
 import json
 import os
@@ -11,10 +11,13 @@ from pathlib import Path
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from build_rtl import configuration
 FIELDS = ("owner", "write", "address", "data", "mask", "size", "machine", "operation", "awDelay", "wDelay", "arDelay",
           "responseDelay", "nativeDelay", "response")
 CHANNELS = {"i": ("ia", "iw", "id", "im", "iz", "ip", "ix"), "d": ("da", "dw", "dd", "dm", "dz", "dp", "dx"),
@@ -60,6 +63,13 @@ def vectors(seed, count=1024):
     for index in range(4):
         rows.append(dict(zip(FIELDS, (0, 0, 0x20000000 + 4 * index, 0, 0, 2, 1, 0,
                                      0, 0, 0, 0, 0, (0, 2, 3, 0)[index]), strict=True)))
+    for index in range(4):
+        rows.append(dict(zip(FIELDS, (0, 1, 0x20000020 + 4 * index, 0x10203040 + index,
+                                     (0, 1, 7, 15)[index], 2, 1, 0,
+                                     index % 2, (index + 1) % 2, 0, 3, index,
+                                     (0, 2, 3, 0)[index]), strict=True)))
+        rows.append(dict(zip(FIELDS, (1, 0, 0x20000020 + 4 * index, 0, 0, 2, 0, 0,
+                                     0, 0, index, 2, index, 0), strict=True)))
     return rows, [rng.getrandbits(32) for _ in range(256)]
 
 
@@ -77,21 +87,20 @@ def parse_trace(trace):
     return rows
 
 
-def check(vectors, initial, samples, complete=True):
+def check(vectors, initial, samples, complete=True, *, concurrent=True):
     queues = [[row for row in vectors if row["owner"] == owner] for owner in (0, 1)]
     positions = [0, 0]
     memory = {0x20000000 + 4 * index + lane: (word >> (8 * lane)) & 255
               for index, word in enumerate(initial) for lane in range(4)}
-    active = None
+    active = [None, None]
+    reads, addresses, writes, write_responses = deque(), deque(), deque(), deque()
     previous = None
-    prefer = 0
     counts = Counter()
-    masks = set()
-    offsets = set()
+    masks, offsets = set(), set()
     for sample in samples:
         cycle = sample["cycle"]
         if sample["reset"]:
-            assert cycle < 2 and active is None, "Reset during a transaction"
+            assert cycle < 2 and not any(active), "Reset during a transaction"
             assert not any(sample[name] for name in ("iv", "dv", "bv", "qv")), "Reset with an offered transaction"
             previous = None
             continue
@@ -100,111 +109,150 @@ def check(vectors, initial, samples, complete=True):
                 if previous[channel + "v"] and not previous[READY[channel]]:
                     assert sample[channel + "v"], f"Withdrawn {channel} at cycle {cycle}"
                     assert all(sample[field] == previous[field] for field in payload), f"Unstable {channel} at cycle {cycle}"
-        old_owner = active["request"]["owner"] if active else None
-        native_complete = any(sample[channel + "v"] and sample[READY[channel]] for channel in ("o", "p"))
-        if active and not native_complete:
-            assert not sample["ir"] and not sample["dr"], "Request accepted before native completion"
-        if active is None:
-            assert not any(sample[name] for name in ("av", "wv", "rv", "by", "qy", "ov", "pv")), "Unowned output"
-        if active:
-            request = active["request"]
-            if request["operation"]:
-                assert not any(sample[key] for key in ("av", "wv", "rv", "by", "qy")), "Atomic request reached AXI"
-            write = request["write"]
-            address = request["address"] & ~3
-            prot = (0 if request["owner"] else 4) | request["machine"]
-            for channel, key in (("a", "aw"), ("w", "w"), ("r", "ar")):
-                if not sample[channel + "v"]:
-                    continue
-                assert cycle > active["accepted"], "External request before native acceptance"
-                assert active[key] is None and active["response"] is None, "Repeated AXI request channel"
-                assert bool(write) == (channel != "r"), "Wrong AXI request type"
-                if channel == "w":
-                    assert (sample["wd"], sample["wm"]) == (request["data"], request["mask"]), "Changed write payload"
+        native_completed = [False, False]
+        if sum(item is not None for item in active) == 2:
+            counts["overlappedActiveCycles"] += 1
+        if not concurrent:
+            assert sum(item is not None for item in active) <= 1, "Serial native ownership overlapped"
+            assert not (sample["ov"] and sample["pv"]), "Serial native responses overlapped: wrong owner"
+        if reads and write_responses:
+            counts["readWriteOverlapCycles"] += 1
+        if sample["qy"]:
+            assert reads, "Unowned output: read response ready without an address"
+        if sample["by"]:
+            assert write_responses, "Unowned output: write response ready without address and data"
+        for channel, key in (("a", "aw"), ("r", "ar")):
+            if not sample[channel + "v"]:
+                continue
+            ordinary = [item for item in active if item and not item["request"]["operation"] and
+                        bool(item["request"]["write"]) == (channel == "a")]
+            assert ordinary or not any(item and item["request"]["operation"] for item in active), "Atomic request reached AXI"
+            owner = int(not (sample[channel + "p"] & 4))
+            item = active[owner]
+            assert item is not None, "Unowned output: address without a native request"
+            request = item["request"]
+            assert not request["operation"], "Atomic request reached AXI"
+            assert bool(request["write"]) == (channel == "a"), "Wrong AXI request type"
+            assert cycle > item["accepted"], "External request before native acceptance"
+            assert item[key] is None and item["response"] is None, "Repeated AXI request channel"
+            assert (sample[channel + "a"], sample[channel + "p"]) == (
+                request["address"] & ~3, (0 if owner else 4) | request["machine"]), "Wrong address or protection"
+            if sample[READY[channel]]:
+                item[key] = cycle
+                counts[key + "Transfers"] += 1
+                if channel == "a":
+                    addresses.append(owner)
                 else:
-                    assert (sample[channel + "a"], sample[channel + "p"]) == (address, prot), "Wrong address or protection"
-                if sample[READY[channel]]:
-                    active[key] = cycle
-                    counts[key + "Transfers"] += 1
-                    if channel == "w":
-                        masks.add(sample["wm"])
-                else:
-                    counts[key + "Stalls"] += 1
-            for channel in ("b", "q"):
-                if not sample[channel + "v"]:
-                    continue
-                assert sample[channel + "r"] != 1, "AXI4-Lite forbids EXOKAY"
-                assert bool(write) == (channel == "b"), "Response type differs"
-                prerequisites = (active["aw"], active["w"]) if write else (active["ar"],)
-                assert all(value is not None and value < cycle for value in prerequisites), "Early AXI response"
-                assert active["response"] is None, "Duplicate AXI response"
-                assert sample[channel + "r"] == request["response"], "Changed response code"
-                if sample[READY[channel]]:
-                    value = 0
-                    if write:
-                        if request["response"] == 0:
-                            for lane in range(4):
-                                if request["mask"] & (1 << lane):
-                                    memory[address + lane] = (request["data"] >> (8 * lane)) & 255
-                        order = "awFirst" if active["aw"] < active["w"] else "wFirst" if active["w"] < active["aw"] else "awTogether"
-                        counts[order] += 1
-                    else:
-                        value = sum(memory[address + lane] << (8 * lane) for lane in range(4))
-                        assert sample["qd"] == value, "Read data differs from byte memory"
-                    active["response"] = (cycle, value, int(request["response"] != 0))
-                    counts["axiResponses"] += 1
-            for owner, channel in enumerate(("o", "p")):
-                if not sample[channel + "v"]:
-                    continue
-                assert owner == request["owner"], "Response delivered to wrong owner"
-                assert active["response"] is not None, "Native response before AXI response"
-                responded, value, fault = active["response"]
-                assert active["accepted"] < cycle, "Native response before request ownership"
+                    reads.append((owner, cycle))
+            else:
+                counts[key + "Stalls"] += 1
+        if sample["wv"]:
+            assert any(item and item["request"]["write"] and not item["request"]["operation"] for item in active), \
+                "Atomic request reached AXI" if any(active) else "Unowned output: write data"
+            if sample["wy"]:
+                writes.append((cycle, sample["wd"], sample["wm"]))
+                masks.add(sample["wm"])
+                counts["wTransfers"] += 1
+            else:
+                counts["wStalls"] += 1
+        while addresses and writes:
+            owner = addresses.popleft()
+            accepted, value, mask = writes.popleft()
+            item = active[owner]
+            request = item["request"]
+            assert item["w"] is None and item["response"] is None, "Repeated AXI request channel"
+            assert (value, mask) == (request["data"], request["mask"]), "Changed write payload"
+            item["w"] = accepted
+            if request["response"] == 0:
+                address = request["address"] & ~3
+                for lane in range(4):
+                    if mask & (1 << lane):
+                        memory[address + lane] = (value >> (8 * lane)) & 255
+            write_responses.append((owner, cycle))
+        # The endpoint snapshots reads at AR acceptance, after simultaneous completed writes.
+        for owner, accepted in reads:
+            item = active[owner]
+            if accepted == cycle:
+                address = item["request"]["address"] & ~3
+                item["readValue"] = sum(memory[address + lane] << (8 * lane) for lane in range(4))
+        if len(reads) == 2:
+            counts["twoReadOutstandingCycles"] += 1
+        for channel, pending in (("b", write_responses), ("q", reads)):
+            if not sample[channel + "v"]:
+                continue
+            assert sample[channel + "r"] != 1, "AXI4-Lite forbids EXOKAY"
+            assert pending, "Unowned output: AXI response without a request"
+            owner, issued = pending[0]
+            item = active[owner]
+            request = item["request"]
+            assert issued < cycle, "Early AXI response"
+            assert item["response"] is None, "Duplicate AXI response"
+            assert sample[channel + "r"] == request["response"], "Changed response code"
+            if channel == "q":
+                assert sample["qd"] == item["readValue"], "Read data differs from byte memory"
+            if sample[READY[channel]]:
+                pending.popleft()
+                value = 0 if channel == "b" else item["readValue"]
+                item["response"] = (cycle, value, int(request["response"] != 0))
+                counts["axiResponses"] += 1
+                if channel == "b":
+                    order = "awFirst" if item["aw"] < item["w"] else "wFirst" if item["w"] < item["aw"] else "awTogether"
+                    counts[order] += 1
+        for owner, channel in enumerate(("o", "p")):
+            item = active[owner]
+            if sample[channel + "v"]:
+                assert item is not None, "Unowned output: response delivered to wrong owner"
+                assert item["response"] is not None, "Response delivered to wrong owner or before AXI result"
+                request = item["request"]
+                responded, value, fault = item["response"]
+                assert item["accepted"] < cycle, "Native response before request ownership"
                 assert responded <= cycle, "Native response before AXI result"
                 assert (sample[channel + "d"], sample[channel + "f"]) == (value, fault), "Wrong native response"
-                if responded == cycle:
+                if responded == cycle and not request["operation"]:
                     counts["bypassResponses"] += 1
                     counts["faultBypassResponses"] += fault
                 if sample[READY[channel]]:
+                    native_completed[owner] = True
                     counts["responses"] += 1
-                    if request["operation"]:
-                        counts[f"owner{owner}Rejected{request['operation']}"] += 1
-                    else:
-                        counts[f"owner{owner}Code{request['response']}"] += 1
-                    active = None
+                    counts[f"owner{owner}Rejected{request['operation']}" if request["operation"] else
+                           f"owner{owner}Code{request['response']}"] += 1
+                    active[owner] = None
                 else:
                     counts["nativeResponseStalls"] += 1
+            if item is not None and not native_completed[owner]:
+                assert not sample["dr" if owner else "ir"], "Request accepted before native completion"
         accepted = [owner for owner, channel in enumerate(("i", "d"))
                     if sample[channel + "v"] and sample[READY[channel]]]
-        assert len(accepted) <= 1, "Two native requests accepted"
-        if accepted:
-            assert active is None, "Second outstanding native request"
-            owner = accepted[0]
+        if not concurrent:
+            assert len(accepted) <= 1 and sum(item is not None for item in active) + len(accepted) <= 1, "Serial native acceptance overlapped"
+        counts["parallelAcceptCycles"] += int(len(accepted) == 2)
+        for owner in accepted:
+            assert active[owner] is None, "Second outstanding native request on one port"
             assert positions[owner] < len(queues[owner]), "Extra native request"
             row = queues[owner][positions[owner]]
             prefix = "d" if owner else "i"
             assert tuple(sample[prefix + field] for field in ("a", "w", "d", "m", "z", "p", "x")) == tuple(
                 row[field] for field in ("address", "write", "data", "mask", "size", "machine", "operation")), "Changed native request"
             if sample["iv"] and sample["dv"]:
-                assert owner == prefer, "Arbitration did not alternate"
                 counts["contendedGrants"] += 1
-            if old_owner is not None:
-                assert native_complete, "Replacement without old completion"
+            if native_completed[owner]:
                 counts["replacementTransfers"] += 1
-                counts["sameOwnerReplacements" if old_owner == owner else "otherOwnerReplacements"] += 1
-            prefer = 1 - owner
+                counts["sameOwnerReplacements"] += 1
+            elif native_completed[1 - owner]:
+                counts["replacementTransfers"] += 1
+                counts["otherOwnerReplacements"] += 1
             positions[owner] += 1
-            active = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None,
-                      "response": (cycle, 0, 1) if row["operation"] else None}
+            active[owner] = {"request": row, "accepted": cycle, "aw": None, "w": None, "ar": None,
+                             "response": (cycle, 0, 1) if row["operation"] else None}
             counts["requests"] += 1
             offsets.add(row["address"] % 4)
         previous = sample
     if complete:
-        assert active is None, "Unfinished native request"
+        assert not any(active), "Unfinished native request"
+        assert not reads and not addresses and not writes and not write_responses, "Unfinished AXI transaction"
         assert positions == list(map(len, queues)), "Unaccepted test requests"
         assert counts["responses"] == len(vectors), "Missing native completion"
     return {**counts, "writeMasks": sorted(masks), "addressOffsets": sorted(offsets), "cycles": len(samples)}
-
 
 def expected_ports():
     expected = {"clock": ("input", 1), "reset": ("input", 1)}
@@ -256,10 +304,11 @@ def check_axi_structure(design):
     return {"portCount": len(ports), "axiInputToOutputCombinationalPaths": 0}
 
 
-def negative_controls(rows, initial, samples):
-    first = next(index for index, row in enumerate(samples) if row["ov"] or row["pv"])
+def negative_controls(rows, initial, samples, *, concurrent=True):
+    first = next(index for index in range(len(samples) - 1, -1, -1)
+                 if bool(samples[index]["ov"]) != bool(samples[index]["pv"]))
     wrong = [dict(row) for row in samples[:first + 1]]
-    wrong[-1]["ov"], wrong[-1]["pv"] = wrong[-1]["pv"], wrong[-1]["ov"]
+    wrong[-1]["pv" if wrong[-1]["ov"] else "ov"] = 1
     duplicate = [dict(row) for row in samples[-1:]]
     duplicate[0]["ov"] = duplicate[0]["or"] = 1
     bad_code = [dict(row) for row in samples]
@@ -269,7 +318,7 @@ def negative_controls(rows, initial, samples):
                                   ("duplicate-response", duplicate, "Unowned output"),
                                   ("exokay", bad_code, "EXOKAY")):
         try:
-            check(rows, initial, trace, complete=False)
+            check(rows, initial, trace, complete=False, concurrent=concurrent)
         except AssertionError as error:
             assert expected in str(error), f"Wrong negative control failure: {error}"
         else:
@@ -284,7 +333,8 @@ def sha(value):
 def freeze(root, destination):
     names = ["ditdah_e2/src/" + name for name in ("AxiLite.scala", "AxiLiteInterfaces.scala", "Interfaces.scala",
                                                "Parameters.scala", "DebugTransportInterfaces.scala")]
-    names += ["test/test_platform/axi.py", "test/test_platform/axi_sim.cpp", "test/test_platform/test_axi.py", "flake.nix", "flake.lock"]
+    names += ["test/test_platform/axi.py", "test/test_platform/axi_sim.cpp", "test/test_platform/test_axi.py",
+              "scripts/build_rtl.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(root)) for path in sorted((root / "nix").glob("*.nix"))]
     contents = {name: (root / name).read_bytes() for name in names}
     for name, value in contents.items():
@@ -297,8 +347,11 @@ def freeze(root, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("result/axi"))
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--seed", type=int, action="append")
     args = parser.parse_args()
+    parameters = configuration(json.loads(args.config.read_text()) if args.config else {})
+    concurrent = parameters.get("axiConcurrent", False)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     commands = []
@@ -309,7 +362,8 @@ def main():
         shutil.copytree(work / "inputs", output / "inputs", dirs_exist_ok=True)
         source = work / "inputs/ditdah_e2/src"
         (source / "AxiTop.scala").write_text(WRAPPER)
-        (work / "parameters.json").write_text('{"resetVector":0}\n')
+        (work / "parameters.json").write_text(json.dumps(parameters) + "\n")
+        (output / "parameters.json").write_text(json.dumps(parameters) + "\n")
         env = dict(os.environ, DITDAH_E2_SOURCE=str(source))
 
         def run(command):
@@ -345,14 +399,18 @@ def main():
             (output / f"seed-{seed}.vectors").write_text(vector_text)
             (output / f"seed-{seed}.memory").write_text(memory_text)
             samples = parse_trace(trace)
-            counts = check(rows, initial, samples)
-            controls = negative_controls(rows, initial, samples)
+            counts = check(rows, initial, samples, concurrent=concurrent)
+            controls = negative_controls(rows, initial, samples, concurrent=concurrent)
             for name in ("awFirst", "wFirst", "awTogether", "nativeResponseStalls", "awStalls", "wStalls", "arStalls"):
                 assert counts[name] > 0, f"Unreached scenario {name}"
             assert counts["writeMasks"] == list(range(16)), "Missing write mask"
             assert counts["addressOffsets"] == list(range(4)), "Missing address offset"
-            assert counts["contendedGrants"] == len(rows) - 4, "Missing sustained contention"
-            for name in ("bypassResponses", "faultBypassResponses", "replacementTransfers", "sameOwnerReplacements", "otherOwnerReplacements"):
+            overlap = ("parallelAcceptCycles", "overlappedActiveCycles", "twoReadOutstandingCycles", "readWriteOverlapCycles")
+            if concurrent:
+                assert all(counts.get(name, 0) > 0 for name in overlap), "Missing concurrent schedule"
+            else:
+                assert not any(counts.get(name, 0) for name in overlap), "Serial adapter overlapped transactions"
+            for name in ("bypassResponses", "faultBypassResponses", "replacementTransfers", "sameOwnerReplacements"):
                 assert counts[name] > 0, f"Unreached scenario {name}"
             assert all(counts[f"owner{owner}Code{code}"] > 0 for owner in (0, 1) for code in (0, 2, 3)), "Missing response class"
             assert all(counts[f"owner{owner}Rejected{op}"] > 0 for owner in (0, 1) for op in range(1, 16)), "Missing rejected operation"
@@ -363,14 +421,16 @@ def main():
                  ("firld", ["firld", "--version"]), ("verilator", ["verilator", "--version"]),
                  ("yosys", ["yosys", "-V"]), ("cxx", ["c++", "--version"]))}
         tools["cxx"] = tools["cxx"].splitlines()[0]
-        report = {"scope": "standalone dual native port to AXI4-Lite adapter", "parameters": {"resetVector": 0},
+        report = {"scope": "standalone dual native port to AXI4-Lite adapter", "parameters": parameters,
                   "inputHashes": {name: sha(value) for name, value in contents.items()},
                   "rtlHashes": {path.name: sha(path.read_bytes()) for path in rtl}, "wrapperHash": sha(WRAPPER.encode()),
                   "tools": tools, "elaboratorHash": sha(Path(shutil.which("elaborate-ditdah-e2")).read_bytes()),
                   "commands": commands, "command": "python3 test/test_platform/axi.py", "exitStatus": 0, "outcomes": outcomes,
                   "structure": structure,
                   "environment": ["cold reset before offered requests", "one outstanding native request per port",
-                                  "AXI4-Lite responses are OKAY, SLVERR or DECERR", "failed writes have no memory effect"],
+                                  "AXI4-Lite responses are OKAY, SLVERR or DECERR", "failed writes have no memory effect",
+                                  "responses preserve order within each AXI direction",
+                                  "reads snapshot at AR acceptance after completed same-cycle write pairs"],
                   "excluded": ["CPU integration", "platform endpoints", "atomic memory execution", "warm reset", "memory liveness"]}
         (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"PASS: {sum(row['responses'] for row in outcomes)} AXI transactions and {3 * len(outcomes)} negative controls")

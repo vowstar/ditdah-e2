@@ -109,6 +109,9 @@ No particular memory macro, area or operating frequency follows from RTL simulat
 `verify-local-memory` checks the controller with an independent byte-memory model across bank sizes and read latencies.
 `verify-local-platform` executes ROM boot, local code updates with FENCE.I, data-bank execution and MMIO against the independent instruction model.
 Its harness initializes ROM only and rejects external AXI access to locally selected banks.
+Completion numbers instruction offers through terminal retirement, including a held offer, and waits for all of them to return.
+Data, device and AXI-write transactions and console output must drain; only later read-only instruction traffic may remain at the finite trace boundary.
+The `J` trace record binds the terminal PC, offer frontier, response counts and remaining instruction owners; it does not claim fetch quiescence.
 `make verify-signoff` includes the controller and ROM-boot checks, using an A-disabled local configuration independent of `CONFIG`.
 `LOCAL_MEMORY_CONFIG` supplies optional core settings for the local boot check.
 `verify-local-sba` checks hart/SBA visibility and concurrent local execution.

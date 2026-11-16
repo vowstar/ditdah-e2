@@ -35,6 +35,35 @@ class NativeArithmeticTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     traces.replay_cover(path, 0, label)
 
+    def test_narrow_cover_replays_exact_request_domain(self):
+        fields = (("clock", 1), ("reset", 1), ("accepted", 1),
+                  ("request_bits_operation", 3), ("request_bits_left", 32),
+                  ("request_bits_right", 32))
+        base = {"reset": 0, "accepted": 1, "request_bits_operation": 0,
+                "request_bits_left": 511, "request_bits_right": 257}
+        def write(path, row):
+            lines = ["$scope module md_math_bench $end"]
+            lines += [f"$var wire {width} v{index} {name} $end"
+                      for index, (name, width) in enumerate(fields)]
+            lines += ["$upscope $end", "$enddefinitions $end"]
+            for edge in (0, 1):
+                lines.append("#" + str(edge))
+                lines += [f"b{(edge if name == 'clock' else row[name]):b} v{index}"
+                          for index, (name, _) in enumerate(fields)]
+            path.write_text("\n".join(lines) + "\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "narrow.vcd"
+            write(path, base)
+            self.assertTrue(traces.replay_cover(path, 0, "narrow_capture_reached")["replayed"])
+            for field, value in (("request_bits_operation", 1), ("request_bits_left", 512),
+                                 ("request_bits_right", 512), ("accepted", 0), ("reset", 1)):
+                write(path, {**base, field: value})
+                with self.assertRaises(ValueError):
+                    traces.replay_cover(path, 0, "narrow_capture_reached")
+            write(path, base)
+            with self.assertRaises(ValueError):
+                traces.replay_cover(path, 1, "narrow_capture_reached")
+
     def test_native_process_failures_keep_case_and_log(self):
         scripts = {
             "exit": ("import sys\nsys.exit(7)\n", "exit status 7", 2),

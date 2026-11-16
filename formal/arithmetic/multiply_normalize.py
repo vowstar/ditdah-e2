@@ -22,7 +22,9 @@ def prove(output):
         )
         magnitude_left = z3.If(negative_left, -left, left)
         magnitude_right = z3.If(negative_right, -right, right)
-        product = U(magnitude_left, magnitude_right)
+        swap = z3.Extract(2, 2, op) == 0
+        product = U(z3.If(swap, magnitude_right, magnitude_left),
+                    z3.If(swap, magnitude_left, magnitude_right))
         corrected = z3.If(z3.Xor(negative_left, negative_right), -product, product)
         return {
             "left_sign": negative_left,

@@ -35,6 +35,54 @@ def verify_boot_payload(boot, payload, banks):
             raise ValueError("Boot bank image bytes do not match the payload")
 
 
+def completion_controls(image, parameters, regions, trace, output):
+    lines = trace.splitlines()
+    terminal = next(line.split() for line in lines if line.startswith("J "))
+    terminal_cycle, frontier = int(terminal[2]), int(terminal[3])
+    offered_id = accepted_id = 0
+    held = old_response = held_acceptance = None
+    for index, line in enumerate(lines):
+        fields = line.split()
+        if fields[0] == "P" and fields[2] == "I":
+            offered_id += 1
+            held = (index, int(fields[1]))
+        elif fields[0] == "Q" and fields[2] == "I":
+            accepted_id = offered_id
+            if held and int(fields[1]) > held[1] and accepted_id <= frontier:
+                held_acceptance = index
+            held = None
+        elif fields[0] == "S" and fields[2] == "I" and int(fields[1]) > terminal_cycle and accepted_id <= frontier:
+            old_response = index
+    assert old_response is not None and held_acceptance is not None, "Missing instruction ownership control witness"
+    controls = []
+    for name, expected in (("drop-frontier-response", "Native request overwrote its owner"),
+                           ("change-held-request", "Accepted request differs from its first offer"),
+                           ("change-frontier", "Instruction frontier differs from terminal retirement")):
+        changed = lines.copy()
+        if name == "drop-frontier-response":
+            del changed[old_response]
+        elif name == "change-held-request":
+            fields = changed[held_acceptance].split()
+            fields[3] = str(int(fields[3]) ^ 4)
+            changed[held_acceptance] = " ".join(fields)
+        else:
+            index = next(index for index, line in enumerate(changed) if line.startswith("J "))
+            fields = changed[index].split()
+            fields[3] = str(frontier - 1)
+            changed[index] = " ".join(fields)
+        text = "\n".join(changed) + "\n"
+        try:
+            check(image, parameters, regions, text, "local", expected_output=b"L\n", allow_instruction_tail=True)
+        except AssertionError as error:
+            assert expected in str(error), "Instruction ownership control failed for another reason"
+        else:
+            raise AssertionError("Checker accepted an instruction ownership error")
+        with gzip.open(output / (name + ".trace.gz"), "wt") as file:
+            file.write(text)
+        controls.append({"mutation": name, "failure": expected, "traceHash": hashlib.sha256(text.encode()).hexdigest()})
+    return controls
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform-build", type=Path, required=True)
@@ -64,7 +112,7 @@ def main():
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
     tools = {name: tool(name)[1] for name in ("verilator", "g++", "make", "riscv32-none-elf-gcc")}
-    commands, runs = [], []
+    commands, runs, controls = [], [], []
     software = args.output / "payload"
     software.mkdir()
     if args.payload_elf:
@@ -120,7 +168,7 @@ def main():
                                               f"{int(regions[key]['backend'] == 'axi')}\n" for key in ("itcm", "dtcm")))
         for seed, delay in ((0, 0), (1, 9), (19, 24)):
             command = [str(work / "obj/VPlatformBench"), "image.hex", str(seed), str(delay),
-                       str(image.symbols["software_done"]), "banks.hex"]
+                       str(image.symbols["software_done"]), "banks.hex", "instruction-tail"]
             result = subprocess.run(command, cwd=work, capture_output=True, text=True)
             name = f"local-s{seed}-d{delay}"
             with gzip.open(args.output / f"{name}.trace.gz", "wt") as trace:
@@ -129,7 +177,9 @@ def main():
             commands.append({"argv": list(map(diagnostic, command)), "exitStatus": result.returncode})
             if result.returncode:
                 raise RuntimeError("Local platform execution failed")
-            metrics = check(image, params, regions, result.stdout, "local", expected_output=b"L\n")
+            metrics = check(image, params, regions, result.stdout, "local", expected_output=b"L\n", allow_instruction_tail=True)
+            if seed == 0:
+                controls = completion_controls(image, params, regions, result.stdout, args.output)
             runs.append({"seed": seed, "delay": delay, "exitStatus": 0, **metrics,
                          "traceHash": hashlib.sha256(result.stdout.encode()).hexdigest()})
     for name, content in inputs.items():
@@ -141,7 +191,8 @@ def main():
               "regions": regions, "preloadedRegions": ["rom"],
               "sourceHashes": {name: hashlib.sha256(content).hexdigest() for name, content in inputs.items()},
               "bootElfHash": digest(software / "program.elf"), "payloadElfHash": digest(software / "payload.elf"),
-              "tools": tools, "commands": commands, "runs": runs}
+              "tools": tools, "commands": commands, "runs": runs, "negativeControls": controls,
+              "completionPolicy": "Drain the terminal-retirement instruction offer frontier and all data/device/write debt; record a finite postterminal read-only instruction cut"}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print("Local platform boot and independent model checks passed")
 

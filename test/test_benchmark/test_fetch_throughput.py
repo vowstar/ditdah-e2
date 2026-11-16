@@ -25,6 +25,10 @@ class ThroughputTests(unittest.TestCase):
     def test_bubble_mutation(self):
         original = "wire offer = (~outstanding | response) & space;"
         self.assertEqual(bubble(original), "wire offer = (~outstanding) & space;")
+        routed = "wire redirectOffer = (~outstanding | response);\nwire offer = ~held & ~discardWords & (~outstanding | response) & space;"
+        changed = bubble(routed)
+        self.assertIn("redirectOffer = (~outstanding | response)", changed)
+        self.assertIn("~discardWords & (~outstanding) & space", changed)
         for text in ("", original + original):
             with self.assertRaisesRegex(AssertionError, "no longer matches"):
                 bubble(text)

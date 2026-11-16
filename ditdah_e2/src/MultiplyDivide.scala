@@ -34,13 +34,13 @@ object MultiplyDivide extends Generator[Parameters, UnitLayers, MultiplyDivideIO
     val negative = Reg(Bool())
     val remainderNegative = Reg(Bool())
     val zeroDivisor = Reg(Bool())
-    val dividend = Reg(UInt(32))
     val product = Reg(UInt(64))
     val multiplicand = Reg(UInt(64))
     val multiplier = Reg(UInt(32))
-    val quotient = Reg(UInt(32))
-    val remainder = Reg(UInt(33))
-    val divisor = Reg(UInt(32))
+    val dividend = multiplicand.asBits.bits(63, 32).asUInt
+    val divisor = multiplicand.asBits.bits(31, 0).asUInt
+    val quotient = multiplier
+    val remainder = product.asBits.bits(32, 0).asUInt
 
     io.request.ready := !active & !valid & !io.cancel
     io.response.valid := valid & !io.cancel
@@ -65,13 +65,29 @@ object MultiplyDivide extends Generator[Parameters, UnitLayers, MultiplyDivideIO
       negative := leftNegative ^ rightNegative
       remainderNegative := leftNegative
       zeroDivisor := io.request.bits.right === 0.U(32)
-      dividend := io.request.bits.left
       product := 0.U(64)
-      multiplicand := (0.B(32) ## leftMagnitude.asBits).asUInt
-      multiplier := rightMagnitude
-      quotient := leftMagnitude
-      remainder := 0.U(33)
-      divisor := rightMagnitude
+      multiplicand := requested.asBits.bit(2).?(
+        (io.request.bits.left.asBits ## rightMagnitude.asBits).asUInt,
+        (0.B(32) ## rightMagnitude.asBits).asUInt)
+      multiplier := leftMagnitude
+      val narrowMultiply = (requested === 0.U(3)) &
+        (io.request.bits.left.asBits.bits(31, 9) === 0.B(23)) &
+        (io.request.bits.right.asBits.bits(31, 9) === 0.B(23))
+      when(narrowMultiply) {
+        active := false.B
+        valid := true.B
+        val smallProduct = io.request.bits.left.asBits.bits(8, 0).asUInt *
+          io.request.bits.right.asBits.bits(8, 0).asUInt
+        value := (0.B(14) ## smallProduct.asBits).asUInt
+      }
+    }
+
+    val multiplyBitsPerCycle = p.multiplyBitsPerCycle
+    val multiplyNext = (0 until multiplyBitsPerCycle).foldLeft[Referable[UInt]](product) { (sum, bit) =>
+      val shiftedMultiplicand = if bit == 0 then multiplicand
+        else (multiplicand.asBits.bits(63 - bit, 0) ## 0.B(bit)).asUInt
+      val term = multiplier.asBits.bit(bit).?(shiftedMultiplicand, 0.U(64))
+      (sum + term).asBits.bits(63, 0).asUInt
     }
 
     val shifted = (remainder.asBits.bits(31, 0) ## quotient.asBits.bits(31, 31)).asUInt
@@ -83,17 +99,26 @@ object MultiplyDivide extends Generator[Parameters, UnitLayers, MultiplyDivideIO
     val correctedRemainder = remainderNegative.?(0.U(32) - remainderLow, remainderLow).asBits.bits(31, 0).asUInt
 
     when(active) {
-      when(iteration =/= 32.U(6)) {
-        iteration := (iteration + 1.U(6)).asBits.bits(5, 0).asUInt
+      val multiplyComplete = !operation.asBits.bit(2) & (multiplier === 0.U(32))
+      when((iteration =/= 32.U(6)) & !multiplyComplete) {
+        val advance = operation.asBits.bit(2).?(1.U(6), multiplyBitsPerCycle.U(6))
+        iteration := (iteration + advance).asBits.bits(5, 0).asUInt
         when(operation.asBits.bit(2)) {
-          remainder := subtract.?((shifted - extendedDivisor).asBits.bits(32, 0).asUInt, shifted)
-          quotient := (quotient.asBits.bits(30, 0) ## subtract.asBits).asUInt
+          val nextRemainder = subtract.?((shifted - extendedDivisor).asBits.bits(32, 0).asUInt, shifted)
+          product := (0.B(31) ## nextRemainder.asBits).asUInt
+          multiplier := (quotient.asBits.bits(30, 0) ## subtract.asBits).asUInt
         }.otherwise {
-          when(multiplier.asBits.bit(0)) {
-            product := (product + multiplicand).asBits.bits(63, 0).asUInt
+          when(multiplier.asBits.bits(multiplyBitsPerCycle - 1, 0).asUInt =/= 0.U(multiplyBitsPerCycle)) {
+            product := multiplyNext
           }
-          multiplicand := (multiplicand.asBits.bits(62, 0) ## 0.B(1)).asUInt
-          multiplier := (0.B(1) ## multiplier.asBits.bits(31, 1)).asUInt
+          multiplicand := (multiplicand.asBits.bits(63 - multiplyBitsPerCycle, 0) ## 0.B(multiplyBitsPerCycle)).asUInt
+          multiplier := (0.B(multiplyBitsPerCycle) ## multiplier.asBits.bits(31, multiplyBitsPerCycle)).asUInt
+          when((operation === 0.U(3)) &
+            (multiplier.asBits.bits(31, multiplyBitsPerCycle).asUInt === 0.U(32 - multiplyBitsPerCycle))) {
+            active := false.B
+            valid := true.B
+            value := multiplyNext.asBits.bits(31, 0).asUInt
+          }
         }
       }.otherwise {
         active := false.B

@@ -17,6 +17,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   override def moduleName(p: Parameters): String = "DitDahE2"
   // Keep retirement observation below the JVM method-size limit.
   private def observeRetirement(body: () => Unit): Unit = body()
+  private def connectPrediction(body: () => Unit): Unit = body()
+  private def executeValue(body: () => Referable[UInt]): Referable[UInt] = body()
+  private def issueExecution(body: () => Wire[Bool]): Wire[Bool] = body()
   private def triggerActions(p: Parameters, csr: Interface[CsrIO], x: Referable[Instruction],
       xValid: Referable[Bool], xInjected: Referable[Bool], xUser: Referable[Bool], debugAccess: Referable[Bool],
       mValid: Referable[Bool], eligibleInterrupt: Referable[Bool], sleeping: Referable[Bool],
@@ -71,6 +74,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
   private def injectExecution(debug: Interface[DebugHartIO], io: Interface[CoreIO],
       x: Reg[Instruction], xValid: Reg[Bool], xUser: Reg[Bool],
       xInjected: Reg[Bool], xSequence: Reg[UInt], xTruncated: Reg[Bool],
+      xDecoded: Reg[UInt], xEncodingLegal: Reg[Bool],
+      frontWord: Wire[UInt], frontLength: Wire[UInt],
+      expanded: Referable[UInt], expansionLegal: Referable[Bool],
       m: Referable[Completion], mValid: Referable[Bool], complete: Referable[Bool], failed: Referable[Bool],
       actualWriteback: Referable[Bool], writeback: Referable[UInt], debugLocalSelected: Referable[Bool],
       debugStop: Referable[Bool], debugResume: Referable[Bool], coreReset: Referable[Reset])
@@ -102,6 +108,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.debugExecution.get.address := (m.load | m.store).?(m.address, 0.U(32))
     val injectionFire = debug.core.injection.valid & debug.core.injection.ready
     when(injectionFire) {
+      frontWord := debug.core.injection.bits.word
+      frontLength := debug.core.injection.bits.length
       xValid := true.B
       x.pc := (debug.core.injection.bits.sequence.asBits ## 0.B(1)).asUInt
       x.word := debug.core.injection.bits.word
@@ -112,6 +120,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       xInjected := true.B
       xSequence := debug.core.injection.bits.sequence
       xTruncated := debug.core.injection.bits.truncated
+      xDecoded := expanded
+      xEncodingLegal := expansionLegal
     }
 
   private def debugBackend(debug: Interface[DebugHartIO], csr: Interface[CsrIO], io: Interface[CoreIO],
@@ -152,6 +162,31 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       programData.request.ready := false.B
       programData.response.valid := false.B
     }
+
+  private def issueOrdinary(p: Parameters, port: Wire[MemoryPort], advance: Referable[Bool],
+      load: Referable[Bool], store: Referable[Bool], fault: Referable[Bool],
+      address: Referable[UInt], data: Referable[UInt], size: Referable[UInt])
+      (using Arena, Context, Block, InstanceContext): Wire[Bool] =
+    val accepted = Wire(Bool())
+    accepted := false.B
+    if !p.protectedMode && !p.enableDebug && !p.enableA then
+      // Only the advancing owner may offer, after older faults resolve.
+      val offer = advance & (load | store) & !fault
+      val lane = address.asBits.bits(1, 0).asUInt
+      val shift = (address.asBits.bits(1, 0) ## 0.B(3)).asUInt
+      val mask = (size === 0.U(2)).?(1.U(4), (size === 1.U(2)).?(3.U(4), 15.U(4)))
+      when(offer) {
+        port.request.valid := true.B
+        port.request.bits.address := address
+        port.request.bits.machine := true.B
+        port.request.bits.write := store
+        port.request.bits.data := (data << shift).asBits.bits(31, 0).asUInt
+        port.request.bits.mask := store.?((mask << lane).asBits.bits(3, 0).asUInt, 0.U(4))
+        port.request.bits.size := size
+        port.request.bits.operation := 0.U(4)
+      }
+      accepted := offer & port.request.ready
+    accepted
 
   def architecture(p: Parameters) =
     val io = summon[Interface[CoreIO]]
@@ -217,6 +252,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     else io.instruction :<>= fetch.io.memory
     val xValid = RegInit(false.B)
     val x = Reg(new Instruction)
+    val xDecoded = Reg(UInt(32))
+    val xEncodingLegal = Reg(Bool())
     val xUser = RegInit(false.B)
     val xInjected = RegInit(false.B)
     val xSequence = RegInit(0.U(3))
@@ -238,18 +275,20 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val waking = sleeping & localWake & !debugStop
 
     val memory = m.load | m.store
-    csr.io.dataProtection.address := m.address
+    val memoryAddress = if !p.protectedMode && !p.enableDebug && !p.enableA then m.tval else m.address
+    csr.io.dataProtection.address := memoryAddress
     csr.io.dataProtection.size := m.size
     csr.io.dataProtection.machine := csr.io.dataMachine
     csr.io.dataProtection.kind := (m.atomicOperation >= 3.U(4)).?(3.U(2), m.store.?(1.U(2), 0.U(2)))
     val denied = mValid & memory & !m.trap & !csr.io.dataProtection.allowed
     programData.request.valid := mValid & memory & !m.trap & !sent & !denied
-    programData.request.bits.address := m.address
+    programData.request.bits.address := memoryAddress
     programData.request.bits.machine := csr.io.dataMachine
     programData.request.bits.write := m.store
-    val lane = m.address.asBits.bits(1, 0).asUInt
-    val shift = (m.address.asBits.bits(1, 0) ## 0.B(3)).asUInt
-    programData.request.bits.data := (m.storeData << shift).asBits.bits(31, 0).asUInt
+    val lane = memoryAddress.asBits.bits(1, 0).asUInt
+    val shift = (memoryAddress.asBits.bits(1, 0) ## 0.B(3)).asUInt
+    val retiringStoreData = (m.storeData << shift).asBits.bits(31, 0).asUInt
+    programData.request.bits.data := retiringStoreData
     val mask = (m.size === 0.U(2)).?(1.U(4), (m.size === 1.U(2)).?(3.U(4), 15.U(4)))
     programData.request.bits.mask := m.store.?((mask << lane).asBits.bits(3, 0).asUInt, 0.U(4))
     programData.request.bits.size := m.size
@@ -278,7 +317,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
         permissionWrite | debugEntry | debugResume
       io.dataDebug.get := debugDataOwner
     val finalCause = m.trap.?(m.cause, csrError.?(2.U(32), m.store.?(7.U(32), 5.U(32))))
-    val finalTval = m.trap.?(m.tval, csrError.?(m.instruction.word, m.address))
+    val finalTval = if !p.protectedMode && !p.enableDebug && !p.enableA then m.tval
+      else (m.trap | csrError).?(m.tval, m.address)
     driveTrap(csr.io, io, m, complete, failed, trap, interrupt, returning, debugBreakpoint,
       architecturalPc, interruptCause, finalCause, finalTval, coreReset, sleeping)
     val loaded = (programData.response.bits.data >> shift).asBits
@@ -302,7 +342,8 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     io.retire.value := io.retire.writes.?(writeback, 0.U(32))
     io.retire.trap := trap
     io.retire.cause := finalCause
-    io.retire.tval := finalTval
+    io.retire.tval := (if !p.protectedMode && !p.enableDebug && !p.enableA then
+      (m.trap | csrError).?(m.tval, m.address) else finalTval)
     observeRetirement(() => {
       io.retire.order := retirementOrder
       io.retire.length := m.instruction.length
@@ -323,7 +364,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       io.retire.memoryReadMask := (memory & m.load & !conditionalStore & !failed).?(accessMask, 0.U(4))
       io.retire.memoryWriteMask := (successfulStore & !atomicModify).?(accessMask, 0.U(4))
       io.retire.memoryReadData := (io.retire.memoryReadMask =/= 0.U(4)).?(programData.response.bits.data, 0.U(32))
-      io.retire.memoryWriteData := (memory & m.store & !failed).?(programData.request.bits.data, 0.U(32))
+      io.retire.memoryWriteData := (memory & m.store & !failed).?(retiringStoreData, 0.U(32))
       io.retire.memoryOperation := (memory & !m.instruction.fault).?(m.atomicOperation, 0.U(4))
       io.retire.memoryResponse := response.?(programData.response.bits.data, 0.U(32))
       io.retire.memoryOperand := (memory & !m.instruction.fault & (m.atomicOperation =/= 0.U(4))).?(m.storeData, 0.U(32))
@@ -356,16 +397,24 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     for i <- 1 to 31 do
       when(actualWriteback & (m.rd === i.U(5))) { registers(i - 1) := writeback }
 
-    val decoded = Wire(UInt(32))
-    val encodingLegal = Wire(Bool())
-    decoded := x.word
-    encodingLegal := true.B
+    val frontWord = Wire(UInt(32))
+    val frontLength = Wire(UInt(3))
+    frontWord := fetch.io.output.bits.word
+    frontLength := fetch.io.output.bits.length
+    val expanded = Wire(UInt(32))
+    val expansionLegal = Wire(Bool())
+    expanded := frontWord
+    expansionLegal := true.B
     if p.enableC then
       val compressed = Compressed.instantiate(p)
-      compressed.io.raw := x.word.asBits.bits(15, 0).asUInt
-      val short = x.length === 2.U(3)
-      decoded := short.?(compressed.io.instruction, x.word)
-      encodingLegal := short.?(compressed.io.legal, x.word.asBits.bits(4, 0) =/= 31.B(5))
+      compressed.io.raw := frontWord.asBits.bits(15, 0).asUInt
+      val short = frontLength === 2.U(3)
+      expanded := short.?(compressed.io.instruction, frontWord)
+      expansionLegal := short.?(compressed.io.legal, frontWord.asBits.bits(4, 0) =/= 31.B(5))
+    val decoded = if p.enableC then xDecoded else x.word
+    val encodingLegal = if p.enableC then xEncodingLegal else true.B
+    val rawInstruction = if p.enableC then (x.length === 2.U(3)).?(
+      (0.B(16) ## x.word.asBits.bits(15, 0)).asUInt, xDecoded) else x.word
     val bits = decoded.asBits
     val opcode = bits.bits(6, 0)
     val rs1 = bits.bits(19, 15).asUInt
@@ -427,8 +476,11 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val producer = mValid & m.writes & (m.rd =/= 0.U(5)) & !m.trap
     val match1 = producer & use1 & (rs1 === m.rd)
     val match2 = producer & use2 & (rs2 === m.rd)
-    when(match1 & !m.load) { a := m.value }
-    when(match2 & !m.load) { b := m.value }
+    val returnedLoad = if !p.protectedMode && !p.enableDebug && !p.enableA then
+      m.load & response & !failed else false.B
+    val forwardedValue = returnedLoad.?(loadValue, m.value)
+    when(match1 & (!m.load | returnedLoad)) { a := forwardedValue }
+    when(match2 & (!m.load | returnedLoad)) { b := forwardedValue }
     if p.enableZba || p.enableZbb || p.enableZbs then
       val bit = BitOperations.instantiate(BitParameters(p.enableZba, p.enableZbb, p.enableZbs))
       bit.io.word := decoded
@@ -437,7 +489,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       isBit := bit.io.valid
       bitUsesRs2 := bit.io.usesRs2
       bitValue := bit.io.result
-    val loadUse = m.load & (match1 | match2)
+    val loadUse = m.load & (match1 | match2) & !returnedLoad
     val serialM = mValid & (m.csr | m.mret | m.wfi | m.fenceI)
     val arithmeticReady = Wire(Bool())
     val arithmeticValue = Wire(UInt(32))
@@ -477,7 +529,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       when(started) { arithmeticPending := true.B }
       when(finished | trap | interrupt | (debugStop & !debugInjectionActive)) { arithmeticPending := false.B }
     io.loadUse := xValid & loadUse
-    io.forward := advance & !m.load & (match1 | match2)
+    io.forward := advance & (!m.load | returnedLoad) & (match1 | match2)
     io.memoryWait := mValid & memory & !complete
 
     val sign = bits.bit(31)
@@ -486,14 +538,18 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val immB = (sign.?(0x7ffff.B(19), 0.B(19)) ## bits.bits(31, 31) ## bits.bits(7, 7) ## bits.bits(30, 25) ## bits.bits(11, 8) ## 0.B(1)).asUInt
     val immJ = (sign.?(0x7ff.B(11), 0.B(11)) ## bits.bits(31, 31) ## bits.bits(19, 12) ## bits.bits(20, 20) ## bits.bits(30, 21) ## 0.B(1)).asUInt
     val sequential = (x.pc + x.length).asBits.bits(31, 0).asUInt
-    val address = isAtomic.?(a, (a + isStore.?(immS, immI)).asBits.bits(31, 0).asUInt)
+    val pcAddress = isBranch | isJal | isAuipc
+    val addressOffset = pcAddress.?(isAuipc.?((bits.bits(31, 12) ## 0.B(12)).asUInt,
+      isJal.?(immJ, immB)), isStore.?(immS, immI))
+    val addressSum = (pcAddress.?(x.pc, a) + addressOffset).asBits.bits(31, 0).asUInt
+    val address = isAtomic.?(a, addressSum)
     val compare = Wire(Bool())
     compare := a === b
     when(funct3.bits(2, 1) === 2.B(2)) { compare := a.asBits.asSInt < b.asBits.asSInt }
     when(funct3.bits(2, 1) === 3.B(2)) { compare := a < b }
     val branchTaken = compare ^ funct3.bit(0)
     val jump = isJal | isJalr | (isBranch & branchTaken)
-    val relative = (x.pc + isJal.?(immJ, immB)).asBits.bits(31, 0).asUInt
+    val relative = addressSum
     val target = isJalr.?((address.asBits.bits(31, 1) ## 0.B(1)).asUInt, relative)
     val badTarget = jump & (if p.enableC then target.asBits.bit(0) else target.asBits.bits(1, 0) =/= 0.B(2))
     val size = funct3.bits(1, 0).asUInt
@@ -507,36 +563,85 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     val cause = Wire(UInt(32))
     val tval = Wire(UInt(32))
     cause := 2.U(32)
-    tval := x.word
+    tval := rawInstruction
     when(isBreak) { cause := 3.U(4); tval := x.pc }
     when(isCall) { cause := xUser.?(8.U(32), 11.U(32)); tval := 0.U(32) }
     when(badData) { cause := (isStore | (isAtomic & !isLr)).?(6.U(32), 4.U(32)); tval := address }
     when(badTarget) { cause := 0.U(32); tval := target }
     when(x.fault) { cause := 1.U(32); tval := x.faultAddress }
     when(triggerNative) { cause := 3.U(4); tval := x.pc }
-    val value = Wire(UInt(32))
-    val rhs = isRegister.?(b, immI)
-    val amount = rhs.asBits.bits(4, 0).asUInt
-    value := (a + rhs).asBits.bits(31, 0).asUInt
-    when(isRegister & bits.bit(30) & (funct3 === 0.B(3))) { value := (a - rhs).asBits.bits(31, 0).asUInt }
-    when(funct3 === 1.B(3)) { value := (a << amount).asBits.bits(31, 0).asUInt }
-    when(funct3 === 2.B(3)) { value := (a.asBits.asSInt < rhs.asBits.asSInt).asBits.asUInt }
-    when(funct3 === 3.B(3)) { value := (a < rhs).asBits.asUInt }
-    when(funct3 === 4.B(3)) { value := (a.asBits ^ rhs.asBits).asUInt }
-    when(funct3 === 5.B(3)) { value := bits.bit(30).?((a.asBits.asSInt >> amount).asBits.asUInt, a >> amount) }
-    when(funct3 === 6.B(3)) { value := (a.asBits | rhs.asBits).asUInt }
-    when(funct3 === 7.B(3)) { value := (a.asBits & rhs.asBits).asUInt }
-    when(isLui) { value := (bits.bits(31, 12) ## 0.B(12)).asUInt }
-    when(isAuipc) { value := (x.pc + (bits.bits(31, 12) ## 0.B(12)).asUInt).asBits.bits(31, 0).asUInt }
-    when(isJal | isJalr) { value := sequential }
-    when(isMultiplyDivide) { value := arithmeticValue }
-    when(isBit) { value := bitValue }
+    val xDataAccepted = issueExecution(() => {
+      if !p.protectedMode && !p.enableDebug && !p.enableA then
+        val memoryEligible = xValid & (!mValid | complete) & !loadUse & !trap & !serialM &
+          !eligibleInterrupt & !sleeping & !triggerMatched & !triggerNative
+        val memoryFault = x.fault | xTruncated | !encodingLegal | badData
+        issueOrdinary(p, programData, memoryEligible, isLoad, isStore, memoryFault, address, b, size)
+      else issueOrdinary(p, programData, advance, isLoad, isStore, fault, address, b, size)
+    })
+    val csrOperand = funct3.bit(2).?((0.B(27) ## bits.bits(19, 15)).asUInt, a)
+    val value = executeValue(() => {
+      val rhs = isRegister.?(b, immI)
+      val amount = rhs.asBits.bits(4, 0).asUInt
+      def gated(condition: Referable[Bool], result: Referable[UInt]): Referable[Bits] =
+        condition.?(result, 0.U(32)).asBits
+      val addSubtract = (isRegister & bits.bit(30)).?(
+        (a - rhs).asBits.bits(31, 0).asUInt, (a + rhs).asBits.bits(31, 0).asUInt)
+      val alu = Seq(
+        gated(funct3 === 0.B(3), addSubtract),
+        gated(funct3 === 1.B(3), (a << amount).asBits.bits(31, 0).asUInt),
+        gated(funct3 === 2.B(3), (a.asBits.asSInt < rhs.asBits.asSInt).asBits.asUInt),
+        gated(funct3 === 3.B(3), (a < rhs).asBits.asUInt),
+        gated(funct3 === 4.B(3), (a.asBits ^ rhs.asBits).asUInt),
+        gated(funct3 === 5.B(3), bits.bit(30).?(
+          (a.asBits.asSInt >> amount).asBits.asUInt, a >> amount)),
+        gated(funct3 === 6.B(3), (a.asBits | rhs.asBits).asUInt),
+        gated(funct3 === 7.B(3), (a.asBits & rhs.asBits).asUInt)).reduce(_ | _).asUInt
+      // Result overrides are disjoint; select them without a priority chain.
+      Seq(
+        gated(!(isLui | isAuipc | isJal | isJalr | isMultiplyDivide | isBit | isCsr | isLoad | isStore | isAtomic), alu),
+        gated(isLui, (bits.bits(31, 12) ## 0.B(12)).asUInt),
+        gated(isAuipc, addressSum),
+        gated(isJal | isJalr, sequential),
+        gated(isMultiplyDivide, arithmeticValue),
+        gated(isBit, bitValue),
+        gated(isCsr, csrOperand),
+        gated(isLoad | isStore | isAtomic, b)).reduce(_ | _).asUInt
+    })
 
-    val branchRedirect = advance & jump & !fault
+    val predicted = Wire(Bool())
+    val predictionCorrection = Wire(Bool())
+    predicted := false.B
+    predictionCorrection := false.B
+    fetch.io.predict := false.B
+    fetch.io.predictedTarget := 0.U(32)
+    connectPrediction(() => {
+      if p.branchPrediction then
+        val prediction = BranchPrediction.instantiate(p)
+        prediction.io.clock := io.clock
+        prediction.io.reset := coreReset
+        prediction.io.fetchPc := fetch.io.output.bits.pc
+        prediction.io.fetchMachine := !csr.io.userMode
+        prediction.io.fetchFault := fetch.io.output.bits.fault
+        prediction.io.fetchAccepted := fetch.io.output.valid & fetch.io.output.ready
+        prediction.io.learn := advance & isBranch & branchTaken & bits.bit(31) & !fault & !xInjected
+        prediction.io.learnPc := x.pc
+        prediction.io.learnTarget := target
+        prediction.io.learnMachine := !xUser
+        prediction.io.executeAccepted := advance
+        prediction.io.executeNextPc := jump.?(target, sequential)
+        prediction.io.clear := trap | interrupt | returning | waiting | waking | synchronized |
+          synchronizing | debugStop | debugResume | (advance & isFenceI)
+        fetch.io.predict := prediction.io.predict
+        fetch.io.predictedTarget := prediction.io.target
+        predicted := prediction.io.executePredicted
+        predictionCorrection := prediction.io.correction
+    })
+    val branchRedirect = advance & !fault & ((jump & !predicted) | predictionCorrection)
     val redirect = trap | interrupt | returning | waiting | waking | synchronized | branchRedirect | debugResume
     fetch.io.redirect := redirect
+    fetch.io.redirectRequest := branchRedirect
     fetch.io.target := debugResume.?(debugResumePc, (trap | interrupt).?(csr.io.trapTarget,
-      returning.?(csr.io.returnPc, (waiting | synchronized).?(m.nextPc, waking.?(architecturalPc, target)))))
+      returning.?(csr.io.returnPc, (waiting | synchronized).?(m.nextPc, waking.?(architecturalPc, jump.?(target, sequential))))))
     fetch.io.pause := trap | interrupt | sleeping | waiting | synchronizing | (advance & isFenceI & !fault) | debugStop
     fetch.io.output.ready := (!xValid | advance) & !redirect & !sleeping & !eligibleInterrupt & !debugStop
     io.redirect := redirect
@@ -545,8 +650,9 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
     when(advance) {
       xValid := false.B
       mValid := true.B
-      sent := false.B
+      sent := xDataAccepted
       m.instruction :<= x
+      m.instruction.word := rawInstruction
       m.rs1 := (use1 & legal & !x.fault).?(rs1, 0.U(5))
       m.rs1Data := (use1 & legal & !x.fault).?(a, 0.U(32))
       m.rs2 := (use2 & legal & !x.fault).?(rs2, 0.U(5))
@@ -564,13 +670,13 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.store := isStore | (isAtomic & !isLr)
       m.atomicOperation := atomicOperation
       m.address := address
-      m.storeData := b
+      m.storeData := value
       m.size := size
       m.unsignedLoad := funct3.bit(2)
       m.csr := isCsr
       m.csrAddress := bits.bits(31, 20).asUInt
       m.csrOperation := funct3.bits(1, 0).asUInt
-      m.csrOperand := funct3.bit(2).?((0.B(27) ## bits.bits(19, 15)).asUInt, a)
+      m.csrOperand := value
       m.csrWrite := (funct3.bits(1, 0) === 1.B(2)) | (rs1 =/= 0.U(5))
       m.csrRead := isCsr & ((funct3.bits(1, 0) =/= 1.B(2)) | (bits.bits(11, 7) =/= 0.B(5)))
       m.mret := isMret
@@ -578,11 +684,14 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       m.fenceI := isFenceI
       m.trap := fault
       m.cause := cause
-      m.tval := tval
+      m.tval := (if !p.protectedMode && !p.enableDebug && !p.enableA then
+        (!fault & (isLoad | isStore)).?(address, tval) else tval)
     }
     when(fetch.io.output.valid & fetch.io.output.ready) {
       xValid := true.B
       x :<= fetch.io.output.bits
+      xDecoded := expanded
+      xEncodingLegal := expansionLegal
       xUser := csr.io.userMode
       xInjected := false.B
       xSequence := 0.U(3)
@@ -624,6 +733,7 @@ object DitDahE2 extends Generator[Parameters, UnitLayers, CoreIO, UnitProbe]:
       debugLocalRead := debug.io.core.localCsr.readData
       systemReset := debug.io.core.coreReset
       io.systemReset.get := systemReset
-      injectExecution(debug.io, io, x, xValid, xUser, xInjected, xSequence, xTruncated, m, mValid,
+      injectExecution(debug.io, io, x, xValid, xUser, xInjected, xSequence, xTruncated,
+        xDecoded, xEncodingLegal, frontWord, frontLength, expanded, expansionLegal, m, mValid,
         complete, failed, actualWriteback, writeback, debugLocalSelected, debugStop, debugResume, coreReset)
       debugBackend(debug.io, csr.io, io, registers, debugAccess, debugInjectionActive, debugDataOwner, programData)

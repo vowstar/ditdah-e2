@@ -90,6 +90,13 @@ class MultiplyModelTests(unittest.TestCase):
                     for address, value in case.signature.items():
                         self.assertEqual(model.word(address), value, f"Signature at {address:#x}")
 
+    def test_interrupt_schedules_follow_multiply_step(self):
+        for bits in (1, 2, 4):
+            selected = {case.name: case for case in cases(enable_m=True, multiply_bits_per_cycle=bits)}
+            for name, delay in (("mulh", (3 + bits - 1) // bits + 1), ("result", 1),
+                                ("full_width_mulh", 32 // bits + 1), ("div", 17)):
+                self.assertEqual(selected["m_interrupt_restart_" + name].interrupt_schedule[0][3], delay)
+
     def test_interrupt_return_reloads_operands(self):
         for case in cases(enable_m=True):
             if not case.name.startswith("m_interrupt_restart_"):

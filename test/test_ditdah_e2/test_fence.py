@@ -23,7 +23,10 @@ class FenceTests(unittest.TestCase):
         first = "m_fenceI <= isFenceI;"
         second = "| advance\n       & isFenceI & ~fault"
         self.assertNotEqual(without_instruction_sync(first + second), first + second)
-        for text in ("", first, second, first + first + second, first + second + second):
+        shared = "wire fence_advance = advance & isFenceI;"
+        self.assertIn("wire fence_advance = 1'h0;", without_instruction_sync(first + shared))
+        for text in ("", first, second, first + first + second, first + second + second,
+                     first + shared + second, first + shared + shared):
             with self.subTest(text=text), self.assertRaisesRegex(AssertionError, "Cannot identify"):
                 without_instruction_sync(text)
 

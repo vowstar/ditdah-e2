@@ -103,13 +103,14 @@ GROUP_PROBE_STRATEGY = {
     "multiplyTargetTimeLimitSeconds": GROUP_PROBE_LIMITS["group"],
 }
 CORE_INITIAL_STATE = {
-    "profile": "source-cold-reset122",
-    "resetExpressionSha256": "8b3f32c82d236bf42e5487fb13e4d526b02abd1b54f3b275e44ab4eb17bd42a0",
-    "resetFacts": 122,
+    "profile": "source-cold-reset121",
+    "resetExpressionSha256": "b286cb142b863800fd8a29303793e4563502e5c5930e27b22ee3699e325de183",
+    "resetFacts": 121,
     "resetGprs": 31,
     "addedResetFacts": 52,
+    "removedResetFacts": 1,
     "previousResetExpressionSha256": "22b194ee11240f2f5b59baa2ff2c102943de00c0eb6a06a2ea02506989fc967a",
-    "scopeChange": "Previously omitted implemented reset values are explicit; unreset payloads remain unconstrained",
+    "scopeChange": "The removed fetch packet flag is omitted; all other reset facts and unreset payload exclusions are unchanged",
     "unresetPayloadExclusions": ["dut.dm.executionProgram0", "dut.dm.executionProgram1",
                                  "dut.debug.program0", "dut.debug.program1", "dut.m_injected"],
 }
@@ -232,8 +233,19 @@ def mutate(contents, name):
         filename, target = UNIT_RTL, "assign core_nativeAction = core_ready & core_matched_0 & ~core_debugAction_0;"
         replacement = "assign core_nativeAction = core_ready & core_matched_0;"
     elif name == "negative-native-trap":
-        filename, target = CORE_RTL, "m_trap <= fault;"
-        replacement = "m_trap <= x_fault | ~legal | isBreak & ~isDebugBreak | isCall | badTarget | badData;"
+        source = changed[CORE_RTL].decode()
+        definitions = re.findall(r"\bwire\s+fault\s*=\s*([^;]+);", source, re.DOTALL)
+        if len(definitions) != 1:
+            raise ValueError("Mutation anchor differs: " + name)
+        expression, count = re.subn(r"^\s*_csr_trigger_nativeAction\s*\|\s*", "", definitions[0])
+        if count != 1 or re.search(r"\b_csr_trigger_nativeAction\b", expression):
+            raise ValueError("Mutation anchor differs: " + name)
+        source, count = re.subn(r"\bm_trap\s*<=\s*fault\s*;",
+                                lambda _: "m_trap <= " + expression + ";", source)
+        if count != 1:
+            raise ValueError("Mutation anchor differs: " + name)
+        changed[CORE_RTL] = source.encode()
+        return changed
     elif name == "negative-multiply-start":
         filename = CORE_RTL
         target = (r"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault"
@@ -584,6 +596,14 @@ def case_definition(name, unit, core, wrappers, collectors, unit_time_limit, cor
                     traceScope="linked covered or cex trace including the resume and load-accepted prefixes")
         if role == "negative_older":
             plan["directJoint"] = True
+        if name == "core-multiply-covers":
+            stage = b"set prefix [prove_stage cover_multiply_done $prefix $stage_bound $stage_time_limit]"
+            if contents["collect.tcl"].count(stage) != 1:
+                raise ValueError("Missing or ambiguous multiply completion stage")
+            contents["collect.tcl"] = contents["collect.tcl"].replace(
+                stage, stage.replace(b"$stage_time_limit", b"1200"), 1)
+            plan["stageTimeLimitsSeconds"] = {"cover_multiply_done": 1200}
+            plan["nativeTimeoutSeconds"] = 5400
         extra_tcl += (f"set trace_bound {trace_bound}\nset stage_bound 128\n"
                       f"set stage_time_limit {plan['stageTimeLimitSeconds']}\n").encode()
     contents["plan.tcl"] = tcl_plan(plan) + extra_tcl + (f"set scenario {scenario}\n".encode() if scenario is not None else b"")
@@ -1076,7 +1096,7 @@ def collect_trigger_case(case, executable, private_output, timeout):
         if staged.is_staged(plan):
             result = collect_case(case, executable, private_output, staged.budgets(plan["stagedConfiguration"]["name"])[1], cpu_count=16)
         else:
-            result = collect_case(case, executable, private_output, timeout)
+            result = collect_case(case, executable, private_output, plan.get("nativeTimeoutSeconds", timeout))
     except ValueError as error:
         if str(error) != "Unexpected native environment assumption":
             raise

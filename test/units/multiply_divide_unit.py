@@ -176,8 +176,19 @@ def vectors():
                 rows.append((operation, left, right, rng.randrange(9), -1))
         for _ in range(4096):
             rows.append((operation, rng.getrandbits(32), rng.getrandbits(32), rng.randrange(9), -1))
-        for cancel_after in (0, 1, 17, 33, 34, 38):
+        for width in range(33):
+            center = 0 if width == 0 else 1 << (width - 1)
+            for short in {center, (center - 1) & MASK, (center + 1) & MASK}:
+                for long in (0x80000001, 0xffffffff, 0x76543210):
+                    rows.append((operation, short, long, rng.randrange(9), -1))
+                    rows.append((operation, long, short, rng.randrange(9), -1))
+        if operation == 0:
+            for _ in range(8192):
+                rows.append((operation, rng.getrandbits(9), rng.getrandbits(9), rng.randrange(9), -1))
+        for cancel_after in (0, 1, 2, 3, 5, 9, 17, 33, 34, 38):
             rows.append((operation, 0x87654321, 0xFEDCBA98, 0, cancel_after))
+            for left, right in ((0, 0xffffffff), (7, 3), (3, 7), (0xfffffff9, 3)):
+                rows.append((operation, left, right, 0, cancel_after))
     return rows
 
 
@@ -321,11 +332,13 @@ def sha(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("result/multiply-divide-unit"))
+    parser.add_argument("--multiply-bits-per-cycle", type=int, choices=(1, 2, 4), default=2)
     args = parser.parse_args()
     oracle_checks = check_oracle()
     root = ROOT
     names = ["ditdah_e2/src/MultiplyDivide.scala", "ditdah_e2/src/Parameters.scala",
-             "ditdah_e2/src/Interfaces.scala", "test/units/multiply_divide_unit.py", "flake.nix", "flake.lock"]
+             "ditdah_e2/src/Interfaces.scala", "ditdah_e2/src/DebugTransportInterfaces.scala",
+             "test/units/multiply_divide_unit.py", "flake.nix", "flake.lock"]
     names += [str(path.relative_to(root)) for path in sorted((root / "nix").glob("*.nix"))]
     contents = {name: (root / name).read_bytes() for name in names}
     hashes = {name: sha(data) for name, data in contents.items()}
@@ -344,7 +357,7 @@ def main():
             target.write_bytes(data)
         source = work / "inputs/ditdah_e2/src"
         (source / "ArithmeticTop.scala").write_text(WRAPPER)
-        (work / "parameters.json").write_text('{"resetVector":0}\n')
+        (work / "parameters.json").write_text(json.dumps({"resetVector": 0, "multiplyBitsPerCycle": args.multiply_bits_per_cycle}) + "\n")
         (work / "vectors.txt").write_text(vector_text)
         (work / "arithmetic_tb.sv").write_text(HARNESS)
         frozen = {path: sha(path.read_bytes()) for path in work.rglob("*") if path.is_file()}
@@ -395,7 +408,7 @@ def main():
                   "vectorHash": sha(vector_text.encode()), "traceHash": sha(trace.encode()),
                   "randomSeed": SEED, "randomPairsPerOperation": 4096, "boundaryValues": BOUNDARY,
                   "oracleChecks": oracle_checks,
-                  "cancelCycles": [0, 1, 17, 33, 34, 38], "vectors": len(rows), **metrics,
+                  "cancelCycles": [0, 1, 2, 3, 5, 9, 17, 33, 34, 38], "vectors": len(rows), **metrics,
                   "negativeControls": controls,
                   "integrationChecksRequired": ["operand forwarding", "X ownership", "M retirement", "trap and interrupt cancellation"]}
         (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")

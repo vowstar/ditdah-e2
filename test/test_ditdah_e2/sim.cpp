@@ -151,6 +151,10 @@ int main(int argc, char **argv) {
                 dut.instruction_request_ready = 1;
                 dut.eval();
             }
+            if (!delay && data.active && dut.data_response_valid && dut.data_response_ready) {
+                dut.data_request_ready = 1;
+                dut.eval();
+            }
             std::cout << "T " << cycle << ' ' << pending << ' ' << dut.timeValue << '\n';
             if (observeSleep)
                 std::cout << "L " << cycle << ' ' << unsigned(dut.sleeping) << '\n';

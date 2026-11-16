@@ -83,8 +83,21 @@ verify-router: platform
 	python3 test/test_platform/router.py --platform-build "$(PLATFORM_OUTPUT)/design" --output "$(PLATFORM_OUTPUT)/router"
 
 verify-axi:
-	python3 test/test_platform/axi.py
+	mkdir -p result
+	printf '%s\n' '{"axiConcurrent":false}' > result/axi-serial.json
+	python3 test/test_platform/axi.py --config result/axi-serial.json
 	python3 formal/axi/axi_formal.py --rtl result/axi
+	printf '%s\n' '{"axiConcurrent":true}' > result/axi-concurrent.json
+	python3 test/test_platform/axi.py --config result/axi-concurrent.json --output result/axi-concurrent
+	python3 formal/axi/axi_formal.py --rtl result/axi-concurrent --output result/axi-concurrent-formal
+
+.PHONY: verify-axi-ordering
+AXI_ORDERING_OUTPUT ?= result/axi-ordering
+verify-axi-ordering:
+	mkdir -p "$(AXI_ORDERING_OUTPUT)"
+	printf '%s\n' '{"axiConcurrent":true}' > "$(AXI_ORDERING_OUTPUT)/configuration.json"
+	python3 scripts/build_platform.py --config "$(AXI_ORDERING_OUTPUT)/configuration.json" --output "$(AXI_ORDERING_OUTPUT)/platform"
+	python3 test/test_platform/axi_ordering.py --platform "$(AXI_ORDERING_OUTPUT)/platform" --output "$(AXI_ORDERING_OUTPUT)/verification"
 
 verify-multiply:
 	python3 formal/arithmetic/multiply_divide_formal.py
@@ -271,7 +284,7 @@ verify-pmp-data:
 	python3 scripts/build_rtl.py --config "$(PMP_DATA_OUTPUT)/configuration.json" --output "$(PMP_DATA_OUTPUT)/rtl"
 	python3 formal/protection/pmp_data_formal.py --rtl "$(PMP_DATA_OUTPUT)/rtl" --source-root . --output "$(PMP_DATA_OUTPUT)/proof"
 
-verify-signoff: rtl verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module verify-sba verify-local-memory verify-local-platform
+verify-signoff: rtl verify-axi verify-axi-ordering verify-jtag verify-debug-host verify-program-buffer verify-program-host verify-debug-module verify-sba verify-local-memory verify-local-platform
 	python3 test/test_ditdah_e2/verify.py --rvfi
 	python3 formal/core/formal.py
 	python3 formal/core/core_formal.py

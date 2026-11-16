@@ -3,8 +3,11 @@
 
 # Integration
 
-F fetches instructions, X executes them, and M completes memory work and commits results.
+F fetches, assembles and expands instructions, X executes them, and M completes memory work and commits results.
 The core uses little-endian memory and separate instruction and data ports.
+`multiplyBitsPerCycle` selects one, two or four iterative bits per cycle, defaulting to four. Multiplication ends early and narrow low products use a direct path; division processes one bit per cycle.
+`branchPrediction` defaults to true and learns one backward conditional target; execution corrects predictions, and entry replacement can conservatively require refetch. Traps, FENCE.I, privilege changes and debug transitions clear prediction state.
+The default ordinary-memory path can offer from X and forward successful load responses. Protected, Debug and atomic configurations retain conservative memory issue.
 
 Each native port permits one outstanding transaction through ready/valid channels.
 A rising edge with valid and ready high transfers the request or response.
@@ -24,7 +27,7 @@ Redirects discard younger instructions but retain offered and accepted requests 
 Ordinary read requests use a zero mask. Data accesses require natural alignment.
 Alignment faults prevent external issue. Failed writes must have no external effect.
 Instruction memory must have no read side effects.
-Completed stores must be visible to later instruction fetches.
+Instruction reads accepted after store completion must observe the store. FENCE.I discards earlier fetches.
 Cold reset is synchronous and active high. Apply it only with no offered or outstanding peer requests.
 It clears integer registers and protocol state. Core reset does not initialize memory contents.
 
@@ -48,7 +51,8 @@ The ordered data path completes each access before the next, for all aq and rl c
 `platform.json` defines the memory map for `DitDahE2Platform`.
 
 `DitDahE2Platform` requires A disabled. `DitDahE2AtomicPlatform` requires A enabled.
-Atomics outside shared SRAM fault. The AXI4-Lite adapter rejects atomics without bus activity.
+Atomics outside shared SRAM fault. The AXI4-Lite adapter rejects atomics without bus activity. `axiConcurrent` defaults to true and enables two ordered reads and independent writes.
+Setting `axiConcurrent=false` serializes transactions. AW and W advance independently. A write completes after its B response.
 Shared SRAM serializes instruction, data, debug and competitor accesses through one controller.
 Writes to the reserved word invalidate the reservation. Every SC attempt clears it.
 Trap entry, MRET, permission updates, debug transitions and reset also clear it.
@@ -104,16 +108,11 @@ It also carries privilege and trap CSR state before and after entry.
 
 ## Verification scope
 
-`make verify-signoff` runs the functional gate for the selected RTL configuration.
+`make verify-signoff` checks the selected core configuration and fixed interface, Debug and local-memory profiles.
+For the default RTL build, `python3 formal/prediction/check.py --rtl result/rtl` checks learned-target safety, covers and RTL controls.
 The trigger commercial gate separately requires all 17 fixed cases to pass.
 Trigger proofs use four fixed ROM programs, directed DMI setup and one initial reset.
 Memory responses follow the ideal one-cycle model.
-Each trigger core safety case must pass all 21 original goals.
-Each goal needs an unbounded proof or a qualified finite result at its own original bound.
-Goals declared unbounded require native unbounded proof.
-Covers and expected counterexamples retain their recorded acceptance conditions.
-Reuse requires identical complete case plans and native inputs, with original receipts and outputs preserved.
-Tool identities and verifier contracts must also match.
-The selected profile reuses only native unbounded facts from the same task.
-Source diagnostics and helper proofs do not replace original goals.
+The arithmetic gate covers an explicit `multiplyBitsPerCycle=2` build selected with `ARITHMETIC_RTL`. It combines licensed RTL facts with independent solver and trace replay.
+Other multiplier settings retain their declared functional verification scope.
 These gates do not prove arbitrary programs or establish complete ISA conformance or physical signoff.

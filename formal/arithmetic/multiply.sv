@@ -15,6 +15,10 @@ module md_math_bench #(
 );
     wire request_ready, response_valid;
     wire [31:0] response_bits;
+    wire [31:0] observed_quotient = dut.multiplier;
+    wire [32:0] observed_remainder = dut.product[32:0];
+    wire [31:0] observed_divisor = dut.multiplicand[31:0];
+    wire [31:0] observed_dividend = dut.multiplicand[63:32];
 
     DitDahE2MultiplyDivide dut (
         .clock(clock),
@@ -57,14 +61,17 @@ module md_math_bench #(
     wire owner_right_negative = owner_right_signed && owner_right[31];
     wire [31:0] owner_left_magnitude = owner_left_negative ? 32'd0 - owner_left : owner_left;
     wire [31:0] owner_right_magnitude = owner_right_negative ? 32'd0 - owner_right : owner_right;
-    wire [63:0] magnitude_product = {32'd0, owner_left_magnitude} * {32'd0, owner_right_magnitude};
+    wire owner_swap = !owner_op[2];
+    wire [31:0] owner_multiplicand = owner_swap ? owner_right_magnitude : owner_left_magnitude;
+    wire [31:0] owner_multiplier = owner_swap ? owner_left_magnitude : owner_right_magnitude;
+    wire [63:0] magnitude_product = {32'd0, owner_multiplicand} * {32'd0, owner_multiplier};
     wire [63:0] remaining_product = dut.multiplicand * {32'd0, dut.multiplier};
     wire [5:0] remaining_iterations = 6'd32 - dut.iteration;
     wire [31:0] quotient_mask = 32'hffffffff >> remaining_iterations;
-    wire [31:0] quotient_partial = dut.quotient & quotient_mask;
+    wire [31:0] quotient_partial = observed_quotient & quotient_mask;
     wire [31:0] dividend_prefix = owner_left_magnitude >> remaining_iterations;
-    wire [64:0] division_sum = {32'd0, dut.remainder} +
-                             ({33'd0, dut.divisor} * {33'd0, quotient_partial});
+    wire [64:0] division_sum = {32'd0, observed_remainder} +
+                             ({33'd0, observed_divisor} * {33'd0, quotient_partial});
 
     always @(posedge clock) begin
         if (reset) begin
@@ -82,26 +89,28 @@ module md_math_bench #(
             owner_sign: assert(dut.negative == (owner_left_negative ^ owner_right_negative));
             owner_remainder_sign: assert(dut.remainderNegative == owner_left_negative);
             owner_zero_divisor: assert(dut.zeroDivisor == (owner_right == 0));
-            owner_raw_dividend: assert(dut.dividend == owner_left);
-            owner_divisor: assert(dut.divisor == owner_right_magnitude);
+            if (owner_op[2]) begin
+                owner_raw_dividend: assert(observed_dividend == owner_left);
+                owner_divisor: assert(observed_divisor == owner_right_magnitude);
+            end
             iteration_in_range: assert(dut.iteration <= 32);
             if (dut.active && owner_op == OPERATION) begin
                 if (!OPERATION[2]) begin
-                    multiplier_tracks_remaining_bits: assert(dut.multiplier == (owner_right_magnitude >> dut.iteration));
-                    multiplicand_tracks_iteration: assert(dut.multiplicand == ({32'd0, owner_left_magnitude} << dut.iteration));
+                    multiplier_tracks_remaining_bits: assert(dut.multiplier == (owner_multiplier >> dut.iteration));
+                    multiplicand_tracks_iteration: assert(dut.multiplicand == ({32'd0, owner_multiplicand} << dut.iteration));
                     multiplication_conservation: assert(dut.product + remaining_product == magnitude_product);
                     if (dut.iteration == 32)
                         multiplication_terminal: assert(dut.product == magnitude_product);
                 end else begin
-                    quotient_tracks_unprocessed_bits: assert((dut.quotient >> dut.iteration) ==
+                    quotient_tracks_unprocessed_bits: assert((observed_quotient >> dut.iteration) ==
                         (owner_left_magnitude & (32'hffffffff >> dut.iteration)));
                     division_conservation: assert(division_sum == {33'd0, dividend_prefix});
-                    remainder_fits_word: assert(!dut.remainder[32]);
+                    remainder_fits_word: assert(!observed_remainder[32]);
                     if (owner_right_magnitude != 0)
-                        remainder_below_divisor: assert(dut.remainder < {1'b0, dut.divisor});
+                        remainder_below_divisor: assert(observed_remainder < {1'b0, observed_divisor});
                     if (dut.iteration == 32)
-                        division_terminal: assert({32'd0, dut.remainder} +
-                               ({33'd0, dut.divisor} * {33'd0, dut.quotient}) ==
+                        division_terminal: assert({32'd0, observed_remainder} +
+                               ({33'd0, observed_divisor} * {33'd0, observed_quotient}) ==
                                {33'd0, owner_left_magnitude});
                 end
             end
@@ -218,13 +227,31 @@ module md_math_bench #(
         .remaining_high(dut.multiplier[31:1])
     );
 
+    wire [63:0] polynomial_state1_product = dut.product + (dut.multiplier[0] ? dut.multiplicand : 64'd0);
+    wire [63:0] polynomial_state1_multiplicand = {dut.multiplicand[62:0], 1'b0};
+    wire [31:0] polynomial_state1_multiplier = {1'b0, dut.multiplier[31:1]};
+    mul_transition #(.LOW_BIT(1'b0)) polynomial_step1_lsb0 (
+        .clock(clock), .accumulator(polynomial_state1_product),
+        .multiplicand(polynomial_state1_multiplicand),
+        .remaining_high(polynomial_state1_multiplier[31:1])
+    );
+    mul_transition #(.LOW_BIT(1'b1)) polynomial_step1_lsb1 (
+        .clock(clock), .accumulator(polynomial_state1_product),
+        .multiplicand(polynomial_state1_multiplicand),
+        .remaining_high(polynomial_state1_multiplier[31:1])
+    );
+
+    wire [63:0] polynomial_state1_total = polynomial_state1_product + polynomial_state1_multiplicand * {32'd0, polynomial_state1_multiplier};
+
     wire [63:0] chain_total = dut.product + remaining_product;
-    wire [63:0] chain_predicted_product = dut.product +
-        (dut.multiplier[0] ? dut.multiplicand : 64'd0);
-    wire [63:0] chain_predicted_multiplicand = {dut.multiplicand[62:0], 1'b0};
-    wire [31:0] chain_predicted_multiplier = {1'b0, dut.multiplier[31:1]};
+    wire [63:0] chain_predicted_product = dut.product + (dut.multiplier[0] ? dut.multiplicand : 64'd0) + (dut.multiplier[1] ? {dut.multiplicand[62:0], 1'b0} : 64'd0);
+    wire [63:0] chain_predicted_multiplicand = {dut.multiplicand[61:0], 2'b0};
+    wire [31:0] chain_predicted_multiplier = {2'b0, dut.multiplier[31:2]};
     wire [63:0] chain_predicted_total = chain_predicted_product +
         chain_predicted_multiplicand * {32'd0, chain_predicted_multiplier};
+    wire chain_low_finish = owner_op == 0 && dut.multiplier[31:2] == 0;
+    wire chain_finish = dut.multiplier == 0 || chain_low_finish;
+    wire [63:0] chain_finish_product = chain_low_finish ? chain_predicted_product : dut.product;
     wire chain_selected_owner = pending && owner_op == OPERATION && !OPERATION[2];
     logic [63:0] chain_previous_product, chain_previous_multiplicand;
     logic [31:0] chain_previous_multiplier, chain_previous_expected;
@@ -232,6 +259,8 @@ module md_math_bench #(
     logic [2:0] chain_previous_owner_operation;
     logic [5:0] chain_previous_iteration;
     logic chain_previous_negative;
+    logic [63:0] chain_previous_finish_product;
+    logic chain_previous_narrow_capture;
     logic chain_previous_owner, chain_previous_mul_step;
     logic chain_previous_mul_finish, chain_previous_mul_hold;
     wire chain_previous_left_signed = chain_previous_owner_operation == 1 ||
@@ -245,21 +274,27 @@ module md_math_bench #(
         32'd0 - chain_previous_owner_left : chain_previous_owner_left;
     wire [31:0] chain_previous_right_magnitude = chain_previous_right_negative ?
         32'd0 - chain_previous_owner_right : chain_previous_owner_right;
-    wire [63:0] chain_previous_reference = {32'd0, chain_previous_left_magnitude} *
-        {32'd0, chain_previous_right_magnitude};
+    wire chain_previous_swap = !chain_previous_owner_operation[2];
+    wire [31:0] chain_previous_selected_left = chain_previous_swap ?
+        chain_previous_right_magnitude : chain_previous_left_magnitude;
+    wire [31:0] chain_previous_selected_right = chain_previous_swap ?
+        chain_previous_left_magnitude : chain_previous_right_magnitude;
+    wire [63:0] chain_previous_reference = {32'd0, chain_previous_selected_left} *
+        {32'd0, chain_previous_selected_right};
     wire [63:0] chain_previous_total = chain_previous_product +
         chain_previous_multiplicand * {32'd0, chain_previous_multiplier};
-    wire [63:0] chain_previous_predicted_product = chain_previous_product +
-        (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0);
+    wire [63:0] chain_previous_predicted_product = chain_previous_product + (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0) + (chain_previous_multiplier[1] ? {chain_previous_multiplicand[62:0], 1'b0} : 64'd0);
     wire [63:0] chain_previous_predicted_multiplicand =
-        {chain_previous_multiplicand[62:0], 1'b0};
-    wire [31:0] chain_previous_predicted_multiplier = {1'b0, chain_previous_multiplier[31:1]};
+        {chain_previous_multiplicand[61:0], 2'b0};
+    wire [31:0] chain_previous_predicted_multiplier = {2'b0, chain_previous_multiplier[31:2]};
     wire [63:0] chain_previous_predicted_total = chain_previous_predicted_product +
         chain_previous_predicted_multiplicand * {32'd0, chain_previous_predicted_multiplier};
     wire [63:0] chain_previous_corrected_product = chain_previous_negative ?
         64'd0 - chain_previous_product : chain_previous_product;
 
     always @(posedge clock) begin
+        polynomial_step0_identity: assert(polynomial_state1_total == chain_total);
+        polynomial_step1_identity: assert(chain_predicted_total == polynomial_state1_total);
         chain_variable_lsb_identity: assert(chain_predicted_total == chain_total);
         if (reset) begin
             chain_previous_product <= 0;
@@ -271,6 +306,8 @@ module md_math_bench #(
             chain_previous_owner_operation <= 0;
             chain_previous_iteration <= 0;
             chain_previous_negative <= 0;
+            chain_previous_finish_product <= 0;
+            chain_previous_narrow_capture <= 0;
             chain_previous_owner <= 0;
             chain_previous_mul_step <= 0;
             chain_previous_mul_finish <= 0;
@@ -285,11 +322,14 @@ module md_math_bench #(
             chain_previous_owner_operation <= owner_op;
             chain_previous_iteration <= dut.iteration;
             chain_previous_negative <= dut.negative;
+            chain_previous_finish_product <= chain_finish_product;
+            chain_previous_narrow_capture <= accepted && request_bits_operation == 0 &&
+                request_bits_left[31:9] == 0 && request_bits_right[31:9] == 0;
             chain_previous_owner <= !cancel && chain_selected_owner;
             chain_previous_mul_step <= !cancel && chain_selected_owner &&
-                dut.active && dut.iteration < 32;
+                dut.active && !chain_finish;
             chain_previous_mul_finish <= !cancel && chain_selected_owner &&
-                dut.active && dut.iteration == 32;
+                dut.active && chain_finish;
             chain_previous_mul_hold <= !cancel && chain_selected_owner &&
                 dut.valid && !response_ready;
         end
@@ -304,33 +344,39 @@ module md_math_bench #(
             end
 
             if (chain_previous_mul_step) begin
+                chain_actual_step_operation: assert($past(dut.operation) == OPERATION);
                 chain_actual_step_active: assert(dut.active && !dut.valid);
-                chain_actual_step_iteration: assert(dut.iteration == chain_previous_iteration + 6'd1);
-                chain_actual_step_product: assert(dut.product == chain_previous_product +
-                    (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0));
+                chain_actual_step_iteration: assert(dut.iteration == chain_previous_iteration + 6'd2);
+                chain_actual_step_product: assert(dut.product == chain_previous_product + (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0) + (chain_previous_multiplier[1] ? {chain_previous_multiplicand[62:0], 1'b0} : 64'd0));
                 chain_actual_step_multiplicand: assert(dut.multiplicand ==
-                    {chain_previous_multiplicand[62:0], 1'b0});
+                    {chain_previous_multiplicand[61:0], 2'b0});
                 chain_actual_step_multiplier: assert(dut.multiplier ==
-                    {1'b0, chain_previous_multiplier[31:1]});
+                    {2'b0, chain_previous_multiplier[31:2]});
                 chain_actual_total_update: assert(chain_total == chain_previous_predicted_total);
+                chain_polynomial_snapshot_product: assert(chain_previous_predicted_product == $past(chain_predicted_product));
+                chain_polynomial_snapshot_multiplicand: assert(chain_previous_predicted_multiplicand == $past(chain_predicted_multiplicand));
+                chain_polynomial_snapshot_multiplier: assert(chain_previous_predicted_multiplier == $past(chain_predicted_multiplier));
+                chain_polynomial_snapshot_predicted_total: assert(chain_previous_predicted_total == $past(chain_predicted_total));
+                chain_polynomial_snapshot_total: assert(chain_previous_total == $past(chain_total));
+                chain_polynomial_previous_identity: assert($past(chain_predicted_total == chain_total));
                 chain_sampled_identity: assert(chain_previous_predicted_total == chain_previous_total);
                 chain_total_preserved: assert(chain_total == chain_previous_total);
             end
 
             if (dut.active && dut.iteration == 0) begin
                 chain_initial_state: assert(dut.product == 0 &&
-                    dut.multiplicand == {32'd0, owner_left_magnitude} &&
-                    dut.multiplier == owner_right_magnitude);
+                    dut.multiplicand == {32'd0, owner_multiplicand} &&
+                    dut.multiplier == owner_multiplier);
                 chain_initial_total: assert(chain_total == magnitude_product);
             end
-            if (dut.active && dut.iteration == 32) begin
-                chain_terminal_multiplier_zero: assert(dut.multiplier == 0);
-                chain_terminal_total_is_product: assert(chain_total == dut.product);
+            if (dut.active && chain_finish) begin
+                chain_terminal_remaining_zero: assert(chain_predicted_multiplier == 0);
+                chain_terminal_total_is_product: assert(chain_total == chain_finish_product);
             end
             if (chain_previous_mul_finish) begin
                 chain_actual_finish_valid: assert(dut.valid && response_valid && !dut.active);
                 if (OPERATION == 0)
-                    chain_actual_finish_low: assert(response_bits == chain_previous_product[31:0]);
+                    chain_actual_finish_low: assert(response_bits == chain_previous_finish_product[31:0]);
                 else
                     chain_actual_finish_high: assert(response_bits == chain_previous_corrected_product[63:32]);
             end
@@ -374,7 +420,7 @@ module md_math_bench #(
         end
         if (history_valid && !reset) begin
             snapshot_mul_step_is_actual_past: assert(chain_previous_mul_step ==
-                (!previous_reset && $past(!cancel && chain_selected_owner && dut.active && dut.iteration < 32)));
+                (!previous_reset && $past(!cancel && chain_selected_owner && dut.active && !chain_finish)));
             snapshot_owner_is_actual_past: assert(chain_previous_owner ==
                 (!previous_reset && $past(!cancel && chain_selected_owner)));
         end
@@ -390,7 +436,7 @@ module md_math_bench #(
                 m_reference(OPERATION, owner_left, owner_right));
         if (!reset && !cancel && response_valid && owner_op == OPERATION)
             response_epoch_has_predecessor: assert(history_valid && pending &&
-                (chain_previous_mul_finish || chain_previous_mul_hold));
+                (chain_previous_mul_finish || chain_previous_mul_hold || chain_previous_narrow_capture));
         captured_reference_reached: cover(!reset && pending &&
             owner_op == OPERATION && owner_left[31] && owner_right[31]);
     end
@@ -421,7 +467,7 @@ module md_math_bench #(
             if (chain_previous_mul_finish)
                 response_finish_has_actual_past_terminal_owner: assert(
                     chain_previous_owner && $past(!reset && !cancel && pending &&
-                        dut.active && owner_op == OPERATION && dut.iteration == 32));
+                        dut.active && owner_op == OPERATION && chain_finish));
             if (chain_previous_mul_hold) begin
                 response_hold_has_actual_past_goal: assert($past(!reset && !cancel &&
                     response_valid && owner_op == OPERATION));
@@ -432,6 +478,20 @@ module md_math_bench #(
     end
 
     always @(posedge clock) begin
+        if (history_valid && !reset && !previous_reset) begin
+            snapshot_finish_product_is_actual_past: assert(
+                chain_previous_finish_product == $past(chain_finish_product));
+        end
+        if (!reset && !cancel && response_valid && owner_op == OPERATION &&
+            chain_previous_narrow_capture) begin
+            narrow_response_has_past_accept: assert(history_valid &&
+                $past(accepted && request_bits_operation == 0 &&
+                    request_bits_left[31:9] == 0 && request_bits_right[31:9] == 0));
+            narrow_result_matches_reference: assert(response_bits == expected);
+        end
+        narrow_capture_reached: cover(!reset && accepted && OPERATION == 0 &&
+            request_bits_operation == 0 && request_bits_left[31:9] == 0 &&
+            request_bits_right[31:9] == 0);
         if (history_valid && !reset && !previous_reset)
             snapshot_negative_is_actual_past: assert(
                 chain_previous_negative == $past(dut.negative));

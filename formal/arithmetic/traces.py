@@ -205,7 +205,7 @@ def replay_cover(path, operation, label):
     )
     if label.endswith("initial_frame_reached"):
         widths[first_frame] = 1
-    elif label == "high_operand_bits_reached":
+    elif label in ("high_operand_bits_reached", "narrow_capture_reached"):
         widths.update(
             accepted=1, request_bits_operation=3, request_bits_left=32, request_bits_right=32
         )
@@ -224,6 +224,10 @@ def replay_cover(path, operation, label):
             continue
         if label.endswith("initial_frame_reached"):
             reached = row[first_frame]
+        elif label == "narrow_capture_reached":
+            reached = (operation == 0 and row["accepted"] and
+                       row["request_bits_operation"] == 0 and
+                       row["request_bits_left"] < 512 and row["request_bits_right"] < 512)
         elif label == "high_operand_bits_reached":
             reached = (
                 row["accepted"]

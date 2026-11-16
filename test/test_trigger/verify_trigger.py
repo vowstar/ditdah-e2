@@ -553,6 +553,12 @@ def raw_retirements(text):
 
 def mutate_copy(source, destination, name):
     shutil.copytree(source, destination)
+    if name == "native-trap":
+        sys.path.insert(0, str(ROOT))
+        from formal.trigger.run import CORE_RTL, mutate
+        path = destination / CORE_RTL
+        path.write_bytes(mutate({CORE_RTL: path.read_bytes()}, "negative-native-trap")[CORE_RTL])
+        return path
     if name == "priority":
         path = destination / "DitDahE2Trigger.sv"
         target = "assign core_nativeAction = core_ready & core_matched_0 & ~core_debugAction_0;"
@@ -564,9 +570,6 @@ def mutate_copy(source, destination, name):
                       r"( & ~_debug_core_stop| & \(~_debug_core_stop \| xInjected\))"
                       r"\n    & ~_csr_trigger_matched;")
             replacement = r"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault\1;"
-        elif name == "native-trap":
-            target = "m_trap <= fault;"
-            replacement = "m_trap <= x_fault | ~legal | isBreak & ~isDebugBreak | isCall | badTarget | badData;"
         else:
             raise ValueError("Unknown core trigger mutation")
     text = path.read_text()

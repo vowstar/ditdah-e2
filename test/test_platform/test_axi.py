@@ -67,11 +67,70 @@ class AxiTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "wrong owner"):
             check(requests, memory, rows)
 
-    def test_no_replacement_before_completion(self):
-        requests, memory, rows = replacement()
-        rows[2].update(dv=1, dr=1)
+    def test_same_owner_not_replaced_before_completion(self):
+        first = dict.fromkeys(FIELDS, 0)
+        first.update(owner=0, address=0x20000000, size=2, machine=1)
+        second = dict(first, address=0x20000004)
+        rows = [sample(0, reset=1), sample(1, iv=1, ir=1, ia=first["address"], iz=2, ip=1),
+                sample(2, iv=1, ir=1, ia=second["address"], iz=2, ip=1)]
         with self.assertRaisesRegex(AssertionError, "before native completion"):
-            check(requests, memory, rows)
+            check([first, second], [0] * 256, rows, complete=False)
+
+    def test_simultaneous_accept_and_read_write_completion(self):
+        first = dict.fromkeys(FIELDS, 0)
+        first.update(owner=0, address=0x20000000, size=2, machine=1)
+        second = dict(first, owner=1, address=0x20000004, write=1, data=0x12345678, mask=15)
+        rows = [sample(0, reset=1),
+                sample(1, iv=1, ir=1, ia=first["address"], iz=2, ip=1,
+                       dv=1, dr=1, da=second["address"], dw=1, dd=second["data"], dm=15, dz=2, dp=1),
+                sample(2, rv=1, ry=1, ra=first["address"], rp=5,
+                       av=1, ay=1, aa=second["address"], ap=1, wv=1, wy=1, wd=second["data"], wm=15),
+                sample(3, qv=1, qy=1, bv=1, by=1, ov=1, pv=1, pr=1, **{"or": 1}), sample(4)]
+        counts = check([first, second], [0] * 256, rows)
+        self.assertEqual(counts["responses"], 2)
+        self.assertEqual(counts["parallelAcceptCycles"], 1)
+        self.assertEqual(counts["readWriteOverlapCycles"], 1)
+        self.assertEqual(counts["bypassResponses"], 2)
+        rows[3]["pd"] = 1
+        with self.assertRaisesRegex(AssertionError, "Wrong native response"):
+            check([first, second], [0] * 256, rows)
+
+    def test_two_ordered_reads_with_independent_native_backpressure(self):
+        first = dict.fromkeys(FIELDS, 0)
+        first.update(owner=0, address=0x20000000, size=2, machine=1)
+        second = dict(first, owner=1, address=0x20000004, machine=0, response=2)
+        memory = [0x11223344, 0x55667788] + [0] * 254
+        rows = [sample(0, reset=1),
+                sample(1, iv=1, ir=1, ia=first["address"], iz=2, ip=1,
+                       dv=1, dr=1, da=second["address"], dz=2),
+                sample(2, rv=1, ry=1, ra=first["address"], rp=5),
+                sample(3, rv=1, ry=1, ra=second["address"], rp=0),
+                sample(4, qv=1, qy=1, qd=memory[0], ov=1, od=memory[0]),
+                sample(5, qv=1, qy=1, qd=memory[1], qr=2, ov=1, od=memory[0],
+                       pv=1, pd=memory[1], pf=1, **{"or": 1}),
+                sample(6, pv=1, pr=1, pd=memory[1], pf=1), sample(7)]
+        counts = check([first, second], memory, rows)
+        self.assertEqual(counts["responses"], 2)
+        self.assertGreater(counts["twoReadOutstandingCycles"], 0)
+        with self.assertRaisesRegex(AssertionError, "Serial native acceptance overlapped"):
+            check([first, second], memory, rows, concurrent=False)
+        rows[4]["qd"] = memory[1]
+        with self.assertRaisesRegex(AssertionError, "Read data differs"):
+            check([first, second], memory, rows)
+
+    def test_instruction_write_remains_supported(self):
+        first = dict.fromkeys(FIELDS, 0)
+        first.update(owner=0, write=1, address=0x20000000, data=0x12345678, mask=15, size=2, machine=1)
+        second = dict(first, owner=1, write=0, data=0, mask=0)
+        rows = [sample(0, reset=1),
+                sample(1, iv=1, ir=1, ia=first["address"], iw=1, id=first["data"], im=15, iz=2, ip=1,
+                       dv=1, dr=1, da=second["address"], dz=2, dp=1),
+                sample(2, av=1, ay=1, aa=first["address"], ap=5, wv=1, wy=1, wd=first["data"], wm=15,
+                       rv=1, ry=1, ra=second["address"], rp=1),
+                sample(3, bv=1, by=1, qv=1, qy=1, qd=first["data"], ov=1,
+                       pv=1, pr=1, pd=first["data"], **{"or": 1}), sample(4)]
+        self.assertEqual(check([first, second], [0] * 256, rows)["responses"], 2)
+
 
     def test_axi_structure_rejects_combination_and_abi_changes(self):
         ports = {}
@@ -161,7 +220,7 @@ class AxiTests(unittest.TestCase):
         self.assertEqual({row["mask"] for row in rows if row["write"]}, set(range(16)))
 
     def test_owner_mutation(self):
-        source = "assign data_response_valid = active & done & dataOwner;"
+        source = "assign data_response_valid = data_response_valid_0;"
         self.assertEqual(mutate_owner(source), "assign data_response_valid = instruction_response_valid;")
         with self.assertRaisesRegex(AssertionError, "no longer matches"):
             mutate_owner("assign other = 0;")

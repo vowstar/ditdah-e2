@@ -57,6 +57,23 @@ class FrozenDesignTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "configuration"):
                 self.freeze()
 
+    def test_implementation_option_binding(self):
+        path = self.rtl / "manifest.json"
+        manifest = json.loads(path.read_text())
+        for bits in (1, 2, 4):
+            for concurrent in (False, True):
+                for prediction in (False, True):
+                    manifest["parameters"] = {"resetVector": 0, "multiplyBitsPerCycle": bits,
+                                              "axiConcurrent": concurrent, "branchPrediction": prediction}
+                    path.write_text(json.dumps(manifest))
+                    self.assertEqual(self.freeze()[2]["parameters"], manifest["parameters"])
+        for field, value in (("multiplyBitsPerCycle", 3), ("multiplyBitsPerCycle", True),
+                             ("axiConcurrent", 1), ("branchPrediction", 1), ("unexpectedOption", True)):
+            manifest["parameters"] = {"resetVector": 0, field: value}
+            path.write_text(json.dumps(manifest))
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(AssertionError, "configuration"):
+                self.freeze()
+
     def test_bit_configuration_binding(self):
         path = self.rtl / "manifest.json"
         manifest = json.loads(path.read_text())

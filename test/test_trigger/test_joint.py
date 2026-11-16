@@ -68,7 +68,16 @@ class JointTests(unittest.TestCase):
             if name not in run.SAFETY_RETRY_CASES:
                 self.assertEqual((plan, contents), (old, previous))
                 continue
-            self.assertEqual([n for n in plan['inputs'] if contents[n] != previous[n]], ['collect.tcl', 'plan.tcl'])
+            expected = ['collect.tcl', 'plan.tcl']
+            if plan['scenario'] == 3:
+                expected.append(run.CORE_WRAPPER)
+                template = (run.HERE / 'payload_helpers.sv').read_bytes()
+                projected = previous[run.CORE_WRAPPER].replace(
+                    staged.older_command_payload_fragment(template), template, 1)
+                self.assertEqual(projected, contents[run.CORE_WRAPPER])
+                self.assertNotIn('requiredUnboundedHelpers', plan)
+                self.assertTrue(plan['caseSuccessUsesOriginalGoalsOnly'])
+            self.assertEqual([n for n in plan['inputs'] if contents[n] != previous[n]], expected)
             for key in ('sources', 'goals', 'targetBounds', 'assumptions', 'initialState', 'dutInitialState', 'payloadParameters', 'allAssertions', 'nativeCovers'):
                 self.assertEqual(plan[key], old[key])
             self.assertEqual(sum(q['timeLimit'] for q in plan['querySchedule']), 960)

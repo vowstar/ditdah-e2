@@ -17,12 +17,16 @@
 struct Transfer {
     bool active = false, held = false;
     std::array<uint32_t, 6> request{};
+    std::array<uint32_t, 6> accepted{};
+    uint64_t offerId = 0, acceptedId = 0, acceptedCycle = 0;
 };
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 5 && argc != 6)
-            throw std::runtime_error("Expected image seed delay completion-pc [bank-map]");
+        if (argc < 5 || argc > 7)
+            throw std::runtime_error("Expected image seed delay completion-pc [bank-map [instruction-tail]]");
+        const bool instructionTail = argc == 7 && std::string(argv[6]) == "instruction-tail";
+        if (argc == 7 && !instructionTail) throw std::runtime_error("Unknown platform completion policy");
         VerilatedContext context;
         context.commandArgs(argc, argv);
         VPlatformBench dut{&context};
@@ -41,7 +45,7 @@ int main(int argc, char **argv) {
         if (!(file >> std::hex >> rom >> romSize >> ram >> ramSize))
             throw std::runtime_error("Missing platform memory bounds");
         std::vector<std::array<uint64_t, 3>> banks;
-        if (argc == 6) {
+        if (argc >= 6) {
             std::ifstream bankFile(argv[5]);
             if (!bankFile) throw std::runtime_error("Cannot open bank map");
             std::array<uint64_t, 3> bank;
@@ -64,7 +68,8 @@ int main(int argc, char **argv) {
                 (!write && at >= rom && uint64_t(at) + 4 <= rom + romSize));
         };
         bool ar = false, aw = false, w = false, b = false;
-        uint32_t readData = 0, writeAddress = 0, writeData = 0, strobe = 0;
+        uint32_t readData = 0, readAddress = 0, readProtection = 0;
+        uint32_t writeAddress = 0, writeData = 0, strobe = 0;
         uint64_t readDue = 0, writeDue = 0;
         bool readFault = false, writeFault = false;
         std::array<Transfer, 4> ports{};
@@ -78,6 +83,8 @@ int main(int argc, char **argv) {
         dut.reset = 0;
         bool completed = false, finished = false;
         uint64_t completionCycle = 0;
+        uint64_t instructionOffers = 0, instructionAccepted = 0, instructionCompleted = 0;
+        uint64_t completionFrontier = 0;
         for (uint64_t cycle = 0; cycle < 2000000; ++cycle) {
             dut.clock = 0;
             dut.tick = cycle % 100 == 99;
@@ -111,10 +118,13 @@ int main(int argc, char **argv) {
                 port.request = request;
                 if (rv && rr) {
                     if (!port.active) throw std::runtime_error("Native response has no owner");
+                    if (index == 0 && port.acceptedId != ++instructionCompleted)
+                        throw std::runtime_error("Instruction response order changed");
                     port.active = false;
                     std::cout << "S " << cycle << ' ' << name << ' ' << value << ' ' << fault << '\n';
                 }
                 if (first && index < 2) {
+                    if (index == 0) port.offerId = ++instructionOffers;
                     std::cout << "P " << cycle << ' ' << name;
                     for (auto item : request) std::cout << ' ' << item;
                     std::cout << '\n';
@@ -122,6 +132,13 @@ int main(int argc, char **argv) {
                 if (valid && ready) {
                     if (port.active) throw std::runtime_error("Native transaction overlapped");
                     port.active = true;
+                    port.accepted = request;
+                    port.acceptedCycle = cycle;
+                    if (index == 0) {
+                        port.acceptedId = port.offerId;
+                        if (port.acceptedId != ++instructionAccepted)
+                            throw std::runtime_error("Instruction acceptance order changed");
+                    }
                     std::cout << "Q " << cycle << ' ' << name;
                     for (auto item : request) std::cout << ' ' << item;
                     std::cout << '\n';
@@ -157,6 +174,8 @@ int main(int argc, char **argv) {
             if (dut.axi_ar_valid && dut.axi_ar_ready) {
                 if (ar || aw || w || b) throw std::runtime_error("AXI read overlapped another transfer");
                 ar = true;
+                readAddress = dut.axi_ar_bits_address;
+                readProtection = dut.axi_ar_bits_protection;
                 readFault = !allows(dut.axi_ar_bits_address, false);
                 readData = memory[dut.axi_ar_bits_address];
                 readDue = cycle + 1 + (delay ? random() % delay : 0);
@@ -196,16 +215,43 @@ int main(int argc, char **argv) {
                           << dut.retire_nextPc << ' ' << unsigned(dut.retire_rd) << ' '
                           << unsigned(dut.retire_writes) << ' ' << dut.retire_value << ' '
                           << unsigned(dut.retire_trap) << ' ' << dut.retire_cause << ' ' << dut.retire_tval << ' ' << unsigned(dut.retire_userMode) << '\n';
-                if (dut.retire_pc == done && !completed) { completed = true; completionCycle = cycle; }
+                if (dut.retire_pc == done) {
+                    if (dut.retire_trap || dut.retire_word != 0x6f || dut.retire_nextPc != done)
+                        throw std::runtime_error("Invalid platform completion instruction");
+                    if (!completed) {
+                        completed = true;
+                        completionCycle = cycle;
+                        completionFrontier = instructionOffers;
+                    }
+                }
             }
             if (dut.interrupt_valid)
                 std::cout << "N " << cycle << ' ' << dut.interrupt_pc << ' ' << dut.interrupt_target
                           << ' ' << dut.interrupt_cause << '\n';
             dut.clock = 1;
             dut.eval();
-            if (completed && cycle >= completionCycle + 8 && !ar && !aw && !w && !b &&
-                !ports[0].active && !ports[1].active && !ports[2].active && !ports[3].active) {
+            // A running terminal loop need not leave an instruction-port bubble.
+            const bool frontierDrained = instructionCompleted >= completionFrontier;
+            const bool instructionCut = instructionTail && frontierDrained &&
+                (!ports[0].active || ports[0].acceptedId > completionFrontier) &&
+                (!ports[0].held || ports[0].offerId > completionFrontier);
+            if (completed && cycle >= completionCycle + 8 && (!ar || (instructionCut && (readProtection & 4))) &&
+                !aw && !w && !b && (!ports[0].active || instructionCut) &&
+                !ports[1].active && !ports[2].active && !ports[3].active && !dut.transmit_valid) {
                 std::cout << "F " << cycle + 1 << '\n';
+                if (instructionTail) {
+                    const auto &port = ports[0];
+                    std::cout << "J " << done << ' ' << completionCycle << ' ' << completionFrontier << ' '
+                              << instructionOffers << ' ' << instructionAccepted << ' ' << instructionCompleted << ' '
+                              << (port.active ? port.acceptedId : 0) << ' ' << (port.active ? port.acceptedCycle : 0);
+                    for (auto value : port.accepted) std::cout << ' ' << (port.active ? value : 0);
+                    std::cout << ' ' << (port.held ? port.offerId : 0);
+                    for (auto value : port.request) std::cout << ' ' << (port.held ? value : 0);
+                    std::cout << ' ' << ar << ' ' << (ar ? readAddress : 0) << ' ' << (ar ? readProtection : 0)
+                              << ' ' << axiHeld[2].held << ' '
+                              << (axiHeld[2].held ? axiHeld[2].request[0] : 0) << ' '
+                              << (axiHeld[2].held ? axiHeld[2].request[1] : 0) << '\n';
+                }
                 finished = true;
                 break;
             }

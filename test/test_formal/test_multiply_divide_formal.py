@@ -33,6 +33,16 @@ class MultiplyFormalTests(unittest.TestCase):
         self.assertIn("~cancel", duplicate)
         self.assertIn("value ^ {32{response_ready}}", mutate_value(RTL))
 
+    def test_direct_cancel_gates_with_multiline_assignments(self):
+        value = "active <=\n ~cancel & (accepted | active);\nvalid <=\n ~cancel & (finished | valid);"
+        changed = mutate_cancel(value)
+        self.assertNotIn("~cancel", changed)
+        self.assertIn("(accepted | active)", changed)
+        self.assertIn("(finished | valid)", changed)
+        for invalid in (value + value, value + RTL):
+            with self.assertRaisesRegex(AssertionError, "no longer matches"):
+                mutate_cancel(invalid)
+
     def test_mutations_require_exact_targets(self):
         for mutation in (mutate_cancel, mutate_duplicate, mutate_value):
             with self.assertRaisesRegex(AssertionError, "no longer matches"):
@@ -56,7 +66,7 @@ class MultiplyFormalTests(unittest.TestCase):
         self.assertEqual(ROOT, Path(__file__).resolve().parents[2])
         with self.workspace() as directory:
             root = Path(directory)
-            names = ["ditdah_e2/src/" + name for name in ("MultiplyDivide.scala", "Parameters.scala", "Interfaces.scala")]
+            names = ["ditdah_e2/src/" + name for name in ("MultiplyDivide.scala", "Parameters.scala", "Interfaces.scala", "DebugTransportInterfaces.scala")]
             names += ["formal/arithmetic/multiply_divide_formal.py", "formal/arithmetic/multiply_divide_formal.sv",
                       "test/units/multiply_divide_unit.py", "flake.nix", "flake.lock", "nix/toolchain.nix"]
             for index, name in enumerate(names):

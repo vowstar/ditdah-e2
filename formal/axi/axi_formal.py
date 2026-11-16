@@ -32,6 +32,8 @@ def main():
     summary_bytes = (args.rtl / "summary.json").read_bytes()
     summary = json.loads(summary_bytes)
     assert summary["exitStatus"] == 0 and summary["scope"] == "standalone dual native port to AXI4-Lite adapter", "Wrong RTL candidate"
+    concurrent = summary["parameters"].get("axiConcurrent", False)
+    assert type(concurrent) is bool, "Invalid AXI configuration"
     contents = {"summary.json": summary_bytes}
     for name, value in summary["inputHashes"].items():
         data = (args.rtl / "inputs" / name).read_bytes()
@@ -65,13 +67,14 @@ def main():
                 rtl, count = re.subn(r"(assign\s+axi_ar_bits_protection\s*=\s*)([^;]+);", r"\g<1>3'd5;", rtl)
                 assert count == 1, "Privilege mutation no longer matches RTL"
             if name == "wrong-atomic":
-                rtl, count = re.subn(r"(wire\s+unsupported\s*=\s*)([^;]+);", r"\g<1>1'b0;", rtl)
-                assert count == 1, "Atomic rejection mutation no longer matches RTL"
+                rtl, count = re.subn(r"(wire\s+unsupported(?:_\d+)?\s*=\s*)([^;]+);", r"\g<1>1'b0;", rtl)
+                assert count == (2 if concurrent else 1), "Atomic rejection mutation no longer matches RTL"
             (case / "DitDahE2AxiLite.sv").write_text(rtl)
             (case / "axi_formal.sv").write_bytes(contents["formal/axi/axi_formal.sv"])
             replay = "aigsmt z3\n" if engine.startswith("abc ") else ""
             config = (f"[options]\nmode {mode}\ndepth 24\n{replay}[engines]\n{engine}\n"
-                      "[script]\nread -formal -sv DitDahE2AxiLite.sv axi_formal.sv\nprep -top axi_formal\n"
+                      "[script]\nread -formal -sv DitDahE2AxiLite.sv axi_formal.sv\n"
+                      f"chparam -set CONCURRENT {int(concurrent)} axi_formal\nprep -top axi_formal\n"
                       "[files]\nDitDahE2AxiLite.sv\naxi_formal.sv\n")
             (case / "run.sby").write_text(config)
             (args.output / f"{name}.sby").write_text(config)
@@ -96,14 +99,15 @@ def main():
             if negative:
                 assert any(path.suffix == ".vcd" for path in traces), "Missing semantic counterexample"
             if mode == "cover":
-                assert result.stdout.count("Reached cover statement") == 20, "Missing cover witness"
+                assert result.stdout.count("Reached cover statement") == 24, "Missing cover witness"
         assert all(Path(shutil.which(name)).read_bytes() == value for name, value in tool_inputs.items()), "Tools changed"
     versions = {name: subprocess.check_output(command, text=True).strip() for name, command in (
         ("sby", ["sby", "--version"]), ("yosys", ["yosys", "-V"]),
         ("abc", ["yosys-abc", "-c", "version"]), ("z3", ["z3", "--version"]))}
     report = {"scope": "unbounded AXI adapter ownership, payload and channel stability safety",
               "inputHashes": {name: sha(data) for name, data in contents.items()},
-              "rtlHashes": summary["rtlHashes"], "toolHashes": {name: sha(data) for name, data in tool_inputs.items()},
+              "rtlHashes": summary["rtlHashes"], "parameters": summary["parameters"],
+              "toolHashes": {name: sha(data) for name, data in tool_inputs.items()},
               "tools": versions, "outcomes": outcomes, "command": "python3 formal/axi/axi_formal.py", "exitStatus": 0,
               "assumptions": ["initial synchronous cold reset with no offered request or response",
                               "instruction requests are reads", "native request payload remains stable while blocked",
@@ -111,16 +115,21 @@ def main():
                               "AXI response payload remains stable while blocked", "EXOKAY is excluded",
                               "no eventual acceptance or response assumption"],
               "covers": ["AW before W", "W before AW", "AW and W together", "instruction response backpressure",
-                         "data response backpressure", "instruction error", "data error", "contended alternating grants",
+                         "data response backpressure", "instruction error", "data error",
+                         "overlapping instruction and data completion" if concurrent else "both native owners serviced",
                          "machine instruction", "user instruction", "machine data", "user data",
                          "rejected instruction operation", "rejected data operation", "instruction response bypass",
                          "write response bypass", "data read response bypass", "same-owner replacement",
-                         "other-owner replacement", "held-response replacement"],
+                         "other-owner replacement", "held-response replacement",
+                         "simultaneous native acceptance" if concurrent else "contended instruction grant",
+                         "two ordered reads outstanding" if concurrent else "contended data grant",
+                         "read and write outstanding" if concurrent else "queued request under response backpressure",
+                         "simultaneous native completion" if concurrent else "data to instruction owner replacement"],
               "negativeControls": ["deliver instruction responses to the data owner", "force privileged instruction attributes",
                                    "send atomic requests to AXI"],
               "excluded": ["CPU integration", "device effects", "liveness", "reset during a transaction"]}
     (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print("PASS: AXI unbounded safety, twenty covers and three counterexamples")
+    print(f"PASS: AXI unbounded safety, {'concurrent' if concurrent else 'serial'} covers and three counterexamples")
 
 
 if __name__ == "__main__":

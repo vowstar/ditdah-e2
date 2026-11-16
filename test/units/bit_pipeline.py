@@ -10,7 +10,7 @@ import subprocess
 
 def mutate(text, kind):
     if kind == "forwarding":
-        source = re.findall(r'wire\s+\[31:0\]\s+b\s*=\s*match2\s*&\s*~m_load\s*\?\s*m_value\s*:\s*(\w+\[(?:bits|x_word)\[24:20\]\]);', text)
+        source = re.findall(r'wire\s+\[31:0\]\s+b\s*=\s*match2\s*&\s*(?:~m_load|\(~m_load\s*\|\s*returnedLoad\))\s*\?\s*(?:m_value|forwardedValue)\s*:\s*(\w+\[(?:bits|x_word|xDecoded)\[24:20\]\]);', text)
         assert len(source) == 1, "Changed bit operand register selection"
         pattern = r'(\.b\s*\()b(\),\s*\.valid\s*\(_bit_valid\))'
         changed, count = re.subn(pattern, lambda match: match[1] + source[0] + match[2], text)

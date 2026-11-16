@@ -5,10 +5,21 @@
 import unittest
 
 from formal.trigger.run import CORE_ASSERTIONS, HERE, labels
-from test.test_trigger.wrapper_progress import mutate, result, simulation_wrapper
+from test.test_trigger.wrapper_progress import helper_wrapper, mutate, result, simulation_wrapper
 
 
 class WrapperProgressTests(unittest.TestCase):
+    def test_helper_adapter_retains_native_properties_without_new_assumptions(self):
+        wrapper = (HERE / "trigger_core_formal.sv").read_text()
+        extended = helper_wrapper(wrapper)
+        self.assertEqual(labels(extended, "assume"), labels(wrapper, "assume"))
+        self.assertEqual(labels(extended, "cover"), labels(wrapper, "cover"))
+        self.assertEqual(len(labels(extended, "assert")), len(CORE_ASSERTIONS) + 15)
+        self.assertIn("if (dut.fetch.reset || dut.fetch.redirect) core_geom_sync_epoch <= 1;", extended)
+        self.assertEqual(extended.count("if (!reset) "), wrapper.count("if (!reset) ") + 15)
+        with self.assertRaisesRegex(ValueError, "inventory changed"):
+            helper_wrapper("module empty;")
+
     def test_adapter_keeps_all_assertions_and_both_fault_mutations(self):
         wrapper = (HERE / "trigger_core_formal.sv").read_text()
         simulated = simulation_wrapper(wrapper)

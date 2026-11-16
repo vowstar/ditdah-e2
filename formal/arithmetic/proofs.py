@@ -66,6 +66,26 @@ def validate_graph(graph):
     return tuple(established)
 
 
+MULTIPLY_COMPOSED = {
+    "chain_polynomial_snapshot_predicted_total": [
+        "chain_polynomial_snapshot_product",
+        "chain_polynomial_snapshot_multiplicand",
+        "chain_polynomial_snapshot_multiplier",
+    ],
+    "chain_polynomial_snapshot_total": [
+        "snapshot_product_is_actual_past",
+        "snapshot_multiplicand_is_actual_past",
+        "snapshot_multiplier_is_actual_past",
+        "snapshot_mul_step_is_actual_past",
+    ],
+    "chain_sampled_identity": [
+        "chain_polynomial_snapshot_predicted_total",
+        "chain_polynomial_snapshot_total",
+        "chain_polynomial_previous_identity",
+    ],
+}
+
+
 def prove_multiply(operation, contract, native_facts, output):
     from . import capture_rules, multiply_normalize, multiply_result, multiply_rules, multiply_sign
 
@@ -81,6 +101,7 @@ def prove_multiply(operation, contract, native_facts, output):
         multiply_normalize.prove(output / "normalization")
         multiply_result.prove(output / "response", operation)
     graph = {label: list(dependencies) for label, dependencies in facts.goals(operation)}
+    graph.update(MULTIPLY_COMPOSED)
     graph.update(
         {
             "source_observers": [],
@@ -90,6 +111,7 @@ def prove_multiply(operation, contract, native_facts, output):
                 "chain_actual_step_multiplicand",
                 "chain_actual_step_multiplier",
                 "chain_owner_magnitudes_stable",
+                "chain_owner_operation_stable",
                 "chain_initial_state",
                 "chain_actual_hold_product",
                 "chain_actual_hold_multiplicand",
@@ -142,10 +164,12 @@ def prove_multiply(operation, contract, native_facts, output):
                 "response_hold_has_actual_past_goal",
                 "response_hold_data_matches_past",
                 "response_hold_expected_matches_past",
-                "snapshot_product_is_actual_past",
+                "snapshot_finish_product_is_actual_past",
                 "snapshot_owner_left_is_actual_past",
                 "snapshot_owner_right_is_actual_past",
                 "snapshot_negative_is_actual_past",
+                "narrow_response_has_past_accept",
+                "narrow_result_matches_reference",
                 "chain_owner_left_stable",
                 "chain_owner_right_stable",
                 "owner_sign",
@@ -156,9 +180,16 @@ def prove_multiply(operation, contract, native_facts, output):
     validate_graph(graph)
     return {
         "operation": operation,
+        "multiplyBitsPerCycle": 2,
+        "derivedSourceAssertions": list(MULTIPLY_COMPOSED),
         "proofGraph": graph,
         "functionInterpretation": "U(M64,Q32) = M64 * zero_extend(Q32) modulo 2^64",
-        "referenceSubstitution": "U32(L32,R32) = U(zero_extend(L32),R32)",
+        "referenceSubstitution": "U32(L32,R32) = U(zero_extend(magR),magL); checked commutativity",
+        "multiplyTermination": "zero remaining tail or final low-word digit",
+        "narrowProductBitsEach": 9,
+        "nativeNarrowLowProductPredicateProven": operation == 0,
+        "narrowLowProductGuard": "accepted operation zero with both operands below 512",
+        "divisionStateLayout": "quotient=multiplier, remainder=product[32:0], divisor=multiplicand[31:0], dividend=multiplicand[63:32]",
         "inductionRule": "First sampled frame and universal actual preceding sample step",
         "inductionHypothesis": "Local preceding predicate inside the step only",
         "guard": contract["guard"],
@@ -245,6 +276,7 @@ def replay(evidence, manifest, output, z3_executable):
         raise ValueError("Verification source changed during replay")
     report = {
         "schema": "ditdah-e2.arithmetic-replay.v1",
+        "multiplyBitsPerCycle": 2,
         "operations": operations,
         "operationsAccepted": len(operations),
         "fullUnitMProven": len(operations) == 8,

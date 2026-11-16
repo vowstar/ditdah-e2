@@ -98,7 +98,7 @@ def main():
     check_inputs(tool_inputs)
     report = {"scope": "bounded redirect recovery through 20 cycles", **bindings, **tool_versions(), "outcomes": outcomes,
               "inputHashes": {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()},
-              "boundCycles": 4 if compressed else 3, "command": "python3 formal/fetch/fetch_latency.py", "exitStatus": 0,
+              "boundCycles": 3 if compressed else 2, "command": "python3 formal/fetch/fetch_latency.py", "exitStatus": 0,
               "assumptions": ["initial synchronous reset and aligned redirect targets", "one ordered response per accepted request",
                               "arbitrary delays before the selected redirect", "request and output ready after the selected redirect",
                               "one-cycle responses and no further pause or redirect until target delivery",

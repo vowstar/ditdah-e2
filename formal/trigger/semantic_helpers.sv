@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: MIT
   wire [31:0] core_flow_m_continuation = dut.m_trap ?
       dut.m_instruction_pc + 32'd4 : dut.m_nextPc;
-  wire [31:0] core_flow_frontier = dut.fetch.buffered ?
-      dut.fetch.packet_pc : dut.fetch.assemblyPc;
+  wire [31:0] core_flow_frontier = dut.fetch.assemblyPc;
   wire [31:0] core_flow_expected_frontier = dut.xValid ? dut.x_pc + 32'd4 :
       dut.mValid ? core_flow_m_continuation : dut.architecturalPc;
   always @(posedge clock) begin
@@ -11,7 +10,7 @@
         (!dut.mValid || dut.m_instruction_pc == dut.architecturalPc) &&
         (!dut.xValid || dut.x_pc == (dut.mValid ? core_flow_m_continuation : dut.architecturalPc)) &&
         (!core_geom_sync_epoch || core_flow_frontier == core_flow_expected_frontier) &&
-        (!(core_geom_sync_epoch && dut.fetch.buffered) || dut.fetch.assemblyPc == dut.fetch.packet_pc + 32'd4) &&
+        (!(core_geom_sync_epoch && dut.fetch.output_valid) || dut.fetch.output_bits_pc == dut.fetch.assemblyPc) &&
         (!(dut.mValid && dut.m_debugBreak) || dut.m_instruction_word == 32'h00100073));
   end
 
@@ -84,7 +83,7 @@
 
   wire core_semantic_fetch_execute_FX = (!dut.fetch.firstValid || !dut.fetch.firstFault) &&
         (!dut.fetch.secondValid || !dut.fetch.secondFault) &&
-        (!dut.fetch.buffered || !dut.fetch.packet_fault) &&
+        (!dut.fetch.output_valid || !dut.fetch.output_bits_fault) &&
         (!dut.xValid || !dut.x_fault);
   wire core_semantic_execute_not_truncated_XT = !dut.xValid || !dut.xTruncated;
   always @(posedge clock) begin

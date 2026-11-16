@@ -35,6 +35,11 @@ def window(text, addresses, consecutive=True):
 
 
 def bubble(text):
+    ordinary = r"(~held\s*&\s*~(?:flush|discardWords)\s*&\s*)\(~outstanding\s*\|\s*response\)"
+    result, count = re.subn(ordinary, r"\g<1>(~outstanding)", text)
+    if count:
+        assert count == 1, "Replacement mutation no longer matches generated RTL"
+        return result
     pattern = r"\(~outstanding \| response\)"
     result, count = re.subn(pattern, "(~outstanding)", text)
     assert count == 1, "Replacement mutation no longer matches generated RTL"

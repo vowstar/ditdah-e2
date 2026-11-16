@@ -200,7 +200,7 @@ class SemanticTests(unittest.TestCase):
         terms = expression.decode().split(" && ")
         omitted = {"dut.debug.cancelInjection", "dut.debug.ebreakUser", "dut.debug.injecting", "dut.debug.pendingIssue",
                    "dut.debug.slot", "dut.dm.program0", "dut.dm.program1", "dut.xInjected", "dut.xSequence", "dut.xTruncated"}
-        if config["dutColdFacts"] == 122:
+        if config["dutColdFacts"] == 121:
             wrong_terms = [term for term in terms if term.split(" == ")[0] not in omitted]
             self.assertEqual(len(terms) - len(wrong_terms), 10)
         else:
@@ -225,7 +225,7 @@ class SemanticTests(unittest.TestCase):
         expression = re.findall(rb"(?m)^\s*assume -reset \{([^\n]+)\}\s*$", source)[0]
         omitted = {"dut.debug.cancelInjection", "dut.debug.ebreakUser", "dut.debug.injecting", "dut.debug.pendingIssue",
                    "dut.debug.slot", "dut.dm.program0", "dut.dm.program1", "dut.xInjected", "dut.xSequence", "dut.xTruncated"}
-        if staged.SEMANTIC_CONFIG["dutColdFacts"] != 122:
+        if staged.SEMANTIC_CONFIG["dutColdFacts"] != 121:
             omitted = {"dut.dm.auto"}
         wrong_terms = [term for term in expression.decode().split(" && ") if term.split(" == ")[0] not in omitted]
         bad = source.replace(expression, " && ".join(wrong_terms).encode())

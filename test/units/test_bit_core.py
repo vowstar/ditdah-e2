@@ -68,11 +68,12 @@ class BitCoreTests(unittest.TestCase):
 
     def test_forwarding_mutation_uses_the_actual_register_array(self):
         for name in ("_GEN", "_GEN_0", "register_values"):
-            for instruction in ("bits", "x_word"):
-                source = f"wire [31:0] b = match2 & ~m_load ? m_value : {name}[{instruction}[24:20]];\n.b(b), .valid(_bit_valid)"
-                changed = mutate(source, "forwarding")
-                self.assertIn(f".b({name}[{instruction}[24:20]]), .valid(_bit_valid)", changed)
-                self.assertIn("match2 & ~m_load ? m_value", changed)
+            for instruction in ("bits", "x_word", "xDecoded"):
+                for selection in ("~m_load ? m_value", "(~m_load | returnedLoad) ? forwardedValue"):
+                    source = f"wire [31:0] b = match2 & {selection} : {name}[{instruction}[24:20]];\n.b(b), .valid(_bit_valid)"
+                    changed = mutate(source, "forwarding")
+                    self.assertIn(f".b({name}[{instruction}[24:20]]), .valid(_bit_valid)", changed)
+                    self.assertIn(f"match2 & {selection}", changed)
 
     def test_interlock_mutation_follows_the_actual_dependency(self):
         direct = "wire match2 = producer & _bit_usesRs2 & match;"

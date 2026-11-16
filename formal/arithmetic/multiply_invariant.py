@@ -45,7 +45,8 @@ class Certificate:
         self.U = z3.Function("U", z3.BitVecSort(64), z3.BitVecSort(32), z3.BitVecSort(64))
         self.total = lambda P, M, Q: P + self.U(M, Q)
         self.ref = lambda left, right, op: self.U(
-            z3.ZeroExt(32, self.mag(left, op, True)), self.mag(right, op, False)
+            z3.ZeroExt(32, self.selected_magnitudes(left, right, op)[0]),
+            self.selected_magnitudes(left, right, op)[1]
         )
         self.selected = lambda s: z3.And(
             s.pending, s.op == self.OP, z3.Extract(2, 2, self.OP) == bv(0, 1)
@@ -82,7 +83,7 @@ class Certificate:
             self.facts["snapshot_" + k] = z3.Implies(snapshot_guard, self.snap[k] == rhs)
         flag_guard = z3.And(self.H, z3.Not(c.reset))
         past_owner = z3.And(z3.Not(p.cancel), self.selected(p))
-        past_step = z3.And(past_owner, p.active, z3.ULT(p.iteration, bv(32, 6)))
+        past_step = z3.And(past_owner, p.active, z3.Not(self.finish_condition(p)))
         self.facts["sampled_step_flag"] = z3.Implies(
             flag_guard, self.previous_step == z3.And(z3.Not(self.previous_reset), past_step)
         )
@@ -108,3 +109,24 @@ class Certificate:
         signed = z3.Or(*[op == bv(n, 3) for n in ((1, 2, 4, 6) if left else (1, 4, 6))])
         negative = z3.And(signed, z3.Extract(31, 31, word) == bv(1, 1))
         return z3.If(negative, bv(0, 32) - word, word)
+
+    @staticmethod
+    def selected_magnitudes(left, right, op):
+        a = Certificate.mag(left, op, True)
+        b = Certificate.mag(right, op, False)
+        swap = z3.Extract(2, 2, op) == bv(0, 1)
+        return z3.If(swap, b, a), z3.If(swap, a, b)
+
+    @staticmethod
+    def finish_condition(state):
+        return z3.Or(state.Q == bv(0, 32),
+                     z3.And(state.op == bv(0, 3), z3.LShR(state.Q, 2) == bv(0, 32)))
+
+    @staticmethod
+    def finish_product(state):
+        predicted = state.P
+        for bit in range(2):
+            predicted = predicted + z3.If(z3.Extract(bit, bit, state.Q) == bv(1, 1),
+                                          state.M << bit, bv(0, 64))
+        return z3.If(z3.And(state.op == bv(0, 3), z3.LShR(state.Q, 2) == bv(0, 32)),
+                     predicted, state.P)

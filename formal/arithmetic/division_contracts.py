@@ -23,6 +23,10 @@ module md_math_bench # ( parameter logic [ 2 : 0 ] OPERATION = OPERATION_VALUE )
 DECLARATION_TEXT = """
 wire request_ready, response_valid;
 wire [31:0] response_bits;
+    wire [31:0] observed_quotient = dut.multiplier;
+    wire [32:0] observed_remainder = dut.product[32:0];
+    wire [31:0] observed_divisor = dut.multiplicand[31:0];
+    wire [31:0] observed_dividend = dut.multiplicand[63:32];
 logic first_cycle = 1'b1;
 logic history_valid = 1'b0;
 logic previous_reset, previous_cancel, previous_stall;
@@ -49,9 +53,9 @@ wire [63:0] magnitude_product = { 32'd0, owner_left_magnitude } * { 32'd0, owner
 wire [63:0] remaining_product = dut.multiplicand * { 32'd0, dut.multiplier };
 wire [5:0] remaining_iterations = 6'd32 - dut.iteration;
 wire [31:0] quotient_mask = 32'hffffffff >> remaining_iterations;
-wire [31:0] quotient_partial = dut.quotient & quotient_mask;
+wire [31:0] quotient_partial = observed_quotient & quotient_mask;
 wire [31:0] dividend_prefix = owner_left_magnitude >> remaining_iterations;
-wire [64:0] division_sum = { 32'd0, dut.remainder } + ({ 33'd0, dut.divisor } * { 33'd0, quotient_partial });
+wire [64:0] division_sum = { 32'd0, observed_remainder } + ({ 33'd0, observed_divisor } * { 33'd0, quotient_partial });
 wire division_selected_owner = OPERATION [2] && pending && owner_op == OPERATION;
 logic division_previous_owner = 0, division_previous_accepted = 0;
 logic division_previous_step = 0, division_previous_finish = 0;
@@ -271,9 +275,11 @@ for _kind, _guards, _claims in (
         'owner_sign': 'dut.negative == (owner_left_negative ^ owner_right_negative)',
         'owner_remainder_sign': 'dut.remainderNegative == owner_left_negative',
         'owner_zero_divisor': 'dut.zeroDivisor == (owner_right == 0)',
-        'owner_raw_dividend': 'dut.dividend == owner_left',
-        'owner_divisor': 'dut.divisor == owner_right_magnitude',
         'iteration_in_range': 'dut.iteration <= 32',
+    }),
+    ('assert', OWNER + [('owner_op [2]', True)], {
+        'owner_raw_dividend': 'observed_dividend == owner_left',
+        'owner_divisor': 'observed_divisor == owner_right_magnitude',
     }),
     ('assert', MULTIPLY_ACTIVE, {
         'multiplier_tracks_remaining_bits': 'dut.multiplier == (owner_right_magnitude >> dut.iteration)',
@@ -284,15 +290,15 @@ for _kind, _guards, _claims in (
         'multiplication_terminal': 'dut.product == magnitude_product',
     }),
     ('assert', DIVIDE_ACTIVE, {
-        'quotient_tracks_unprocessed_bits': "(dut.quotient >> dut.iteration) == (owner_left_magnitude & (32'hffffffff >> dut.iteration))",
+        'quotient_tracks_unprocessed_bits': "(observed_quotient >> dut.iteration) == (owner_left_magnitude & (32'hffffffff >> dut.iteration))",
         'division_conservation': "division_sum == { 33'd0, dividend_prefix }",
-        'remainder_fits_word': '! dut.remainder [32]',
+        'remainder_fits_word': '! observed_remainder [32]',
     }),
     ('assert', DIVIDE_NONZERO, {
-        'remainder_below_divisor': "dut.remainder < { 1'b0, dut.divisor }",
+        'remainder_below_divisor': "observed_remainder < { 1'b0, observed_divisor }",
     }),
     ('assert', DIVIDE_TERMINAL, {
-        'division_terminal': "{ 32'd0, dut.remainder } + ({ 33'd0, dut.divisor } * { 33'd0, dut.quotient }) == { 33'd0, owner_left_magnitude }",
+        'division_terminal': "{ 32'd0, observed_remainder } + ({ 33'd0, observed_divisor } * { 33'd0, observed_quotient }) == { 33'd0, owner_left_magnitude }",
     }),
     ('assume', FIRST_CYCLE, {
         'initial_synchronous_reset': 'reset',
@@ -354,7 +360,7 @@ for _kind, _guards, _claims in (
         'division_owner_words_stable': 'owner_left == division_previous_owner_left && owner_right == division_previous_owner_right && owner_op == division_previous_owner_operation',
     }),
     ('assert', INITIAL_DIVISION, {
-        'division_initial_state': 'dut.remainder == 0 && dut.quotient == owner_left_magnitude && dut.divisor == owner_right_magnitude && quotient_partial == 0 && dividend_prefix == 0',
+        'division_initial_state': 'observed_remainder == 0 && observed_quotient == owner_left_magnitude && observed_divisor == owner_right_magnitude && quotient_partial == 0 && dividend_prefix == 0',
         'division_initial_conservation': "division_sum == { 33'd0, dividend_prefix }",
     }),
     ('assert', ACTIVE_DIVISION, {
@@ -364,9 +370,9 @@ for _kind, _guards, _claims in (
         'division_previous_remainder_fits': '! division_previous_remainder [32]',
         'division_previous_partial_fits': '! division_previous_partial [31]',
         'division_actual_control_step': "dut.active && ! dut.valid && dut.iteration == division_previous_iteration + 6'd1",
-        'division_actual_remainder_step': 'dut.remainder == division_predicted_remainder',
-        'division_actual_quotient_step': 'dut.quotient == division_predicted_quotient',
-        'division_actual_divisor_stable': 'dut.divisor == division_previous_divisor',
+        'division_actual_remainder_step': 'observed_remainder == division_predicted_remainder',
+        'division_actual_quotient_step': 'observed_quotient == division_predicted_quotient',
+        'division_actual_divisor_stable': 'observed_divisor == division_previous_divisor',
         'division_mask_step': 'quotient_partial == division_predicted_partial',
         'division_next_source_bit': 'division_previous_quotient [31] == division_previous_next_prefix [0]',
         'division_prefix_step': "{ 33'd0, dividend_prefix } == division_doubled_previous_prefix",
@@ -375,29 +381,29 @@ for _kind, _guards, _claims in (
         'division_actual_sum_step': 'division_sum == division_doubled_previous_sum',
     }),
     ('assert', TERMINAL_DIVISION, {
-        'division_terminal_fields': 'quotient_partial == dut.quotient && dividend_prefix == owner_left_magnitude',
+        'division_terminal_fields': 'quotient_partial == observed_quotient && dividend_prefix == owner_left_magnitude',
     }),
     ('assert', NONZERO_TERMINAL, {
-        'division_terminal_quotient_reference': 'dut.quotient == owner_left_magnitude / owner_right_magnitude',
-        'division_terminal_remainder_reference': 'dut.remainder [31:0] == owner_left_magnitude % owner_right_magnitude',
+        'division_terminal_quotient_reference': 'observed_quotient == owner_left_magnitude / owner_right_magnitude',
+        'division_terminal_remainder_reference': 'observed_remainder [31:0] == owner_left_magnitude % owner_right_magnitude',
     }),
     ('assert', ZERO_TERMINAL, {
-        'division_zero_divisor_terminal': 'dut.zeroDivisor && dut.remainder [31:0] == owner_left_magnitude',
+        'division_zero_divisor_terminal': 'dut.zeroDivisor && observed_remainder [31:0] == owner_left_magnitude',
     }),
     ('assert', PREVIOUS_FINISH, {
         'division_actual_finish_valid': 'dut.valid && response_valid && ! dut.active',
         'division_actual_finish_value': "response_bits == (OPERATION [1] ? (division_previous_zero_divisor ? division_previous_owner_left:division_previous_left_negative ? 32'd0 - division_previous_remainder [31:0]:division_previous_remainder [31:0]):(division_previous_zero_divisor ? 32'hffffffff:division_previous_negative ? 32'd0 - division_previous_quotient:division_previous_quotient))",
     }),
     ('assert', REMAINDER_BOUND, {
-        'division_remainder_iteration_bound': "dut.remainder < (33'd1 << dut.iteration)",
+        'division_remainder_iteration_bound': "observed_remainder < (33'd1 << dut.iteration)",
     }),
     ('assert', ACTIVE_EPOCH, {
         'division_epoch_active_has_predecessor': 'history_valid && (dut.iteration == 0 || (division_previous_step && division_previous_owner))',
     }),
     ('assert', OWNER_SNAPSHOT, {
-        'division_snapshot_remainder': 'division_previous_remainder == $past (dut.remainder)',
-        'division_snapshot_quotient': 'division_previous_quotient == $past (dut.quotient)',
-        'division_snapshot_divisor': 'division_previous_divisor == $past (dut.divisor)',
+        'division_snapshot_remainder': 'division_previous_remainder == $past (observed_remainder)',
+        'division_snapshot_quotient': 'division_previous_quotient == $past (observed_quotient)',
+        'division_snapshot_divisor': 'division_previous_divisor == $past (observed_divisor)',
         'division_snapshot_owner_left': 'division_previous_owner_left == $past (owner_left)',
         'division_snapshot_owner_right': 'division_previous_owner_right == $past (owner_right)',
         'division_snapshot_owner_operation': 'division_previous_owner_operation == $past (owner_op)',
@@ -523,9 +529,9 @@ DRIVER_ASSIGNMENTS = [
     (10, 'division_previous_accepted <= accepted && request_bits_operation == OPERATION && OPERATION [2];'),
     (10, 'division_previous_step <= ! cancel && division_selected_owner && dut.active && dut.iteration < 32;'),
     (10, 'division_previous_finish <= ! cancel && division_selected_owner && dut.active && dut.iteration == 32;'),
-    (11, 'division_previous_remainder <= dut.remainder;'),
-    (11, 'division_previous_quotient <= dut.quotient;'),
-    (11, 'division_previous_divisor <= dut.divisor;'),
+    (11, 'division_previous_remainder <= observed_remainder;'),
+    (11, 'division_previous_quotient <= observed_quotient;'),
+    (11, 'division_previous_divisor <= observed_divisor;'),
     (11, 'division_previous_owner_left <= owner_left;'),
     (11, 'division_previous_owner_right <= owner_right;'),
     (11, 'division_previous_owner_operation <= owner_op;'),

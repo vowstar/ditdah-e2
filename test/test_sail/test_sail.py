@@ -135,6 +135,23 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(result["memory"]["pmp"]["count"], 16)
         self.assertGreater(result["platform"]["instructions_per_tick"], 1000)
 
+    def test_implementation_options_preserve_architecture(self):
+        expected = self.build()
+        for bits in (1, 2, 4):
+            for concurrent in (False, True):
+                for prediction in (False, True):
+                    self.parameters.update(multiplyBitsPerCycle=bits, axiConcurrent=concurrent, branchPrediction=prediction)
+                    self.assertEqual(self.build(), expected)
+        for field, value in (("multiplyBitsPerCycle", 3), ("multiplyBitsPerCycle", True),
+                             ("axiConcurrent", 1), ("branchPrediction", 1), ("unknownImplementation", True)):
+            self.parameters.pop("multiplyBitsPerCycle", None)
+            self.parameters.pop("axiConcurrent", None)
+            self.parameters.pop("branchPrediction", None)
+            self.parameters[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                self.build()
+            self.parameters.pop(field)
+
     def test_machine_only_has_no_pmp_or_user_mode(self):
         self.parameters["protectedMode"] = False
         result = self.build()

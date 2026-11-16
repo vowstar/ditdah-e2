@@ -16,16 +16,24 @@ from test.common.model import Model
 class ConfigurationTests(unittest.TestCase):
     def test_reset_addresses(self):
         for address in (0, 4, 0x80000000, 0xFFFFFFFC):
-            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "enableZba": False, "enableZbb": False, "enableZbs": False})
+            self.assertEqual(configuration({"resetVector": address}), {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "multiplyBitsPerCycle": 4, "axiConcurrent": True, "branchPrediction": True, "enableZba": False, "enableZbb": False, "enableZbs": False})
 
     def test_multiply_configuration(self):
         for enabled in (False, True):
-            self.assertEqual(configuration({"enableM": enabled}), {"resetVector": 0, "enableM": enabled, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "enableZba": False, "enableZbb": False, "enableZbs": False})
+            self.assertEqual(configuration({"enableM": enabled}), {"resetVector": 0, "enableM": enabled, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "multiplyBitsPerCycle": 4, "axiConcurrent": True, "branchPrediction": True, "enableZba": False, "enableZbb": False, "enableZbs": False})
+
+    def test_multiply_step_configuration(self):
+        self.assertEqual(configuration({})["multiplyBitsPerCycle"], 4)
+        for bits in (1, 2, 4):
+            self.assertEqual(configuration({"multiplyBitsPerCycle": bits}).get("multiplyBitsPerCycle", 2), bits)
+        for value in (True, False, 0, 3, 8, "2", None, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                configuration({"multiplyBitsPerCycle": value})
 
     def test_compressed_alignment(self):
         for address in (0, 2, 0x80000002, 0xFFFFFFFE):
             self.assertEqual(configuration({"resetVector": address, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "enableZba": False, "enableZbb": False, "enableZbs": False}),
-                             {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "enableZba": False, "enableZbb": False, "enableZbs": False})
+                             {"resetVector": address, "enableM": True, "enableC": True, "protectedMode": False, "enableDebug": False, "enableA": False, "multiplyBitsPerCycle": 4, "axiConcurrent": True, "branchPrediction": True, "enableZba": False, "enableZbb": False, "enableZbs": False})
 
     def test_protected_configuration(self):
         for enabled in (False, True):
@@ -59,6 +67,24 @@ class ConfigurationTests(unittest.TestCase):
                 configuration(value)
         self.assertIn("DitDahE2DebugSystemBus", TOPS)
         self.assertEqual(GENERATORS["DitDahE2DebugSystemBus"], "DebugSystemBus")
+
+    def test_branch_prediction_configuration(self):
+        baseline = configuration({})
+        self.assertTrue(baseline["branchPrediction"])
+        self.assertEqual(configuration({"branchPrediction": True}), baseline)
+        self.assertFalse(configuration({"branchPrediction": False})["branchPrediction"])
+        for value in (1, "true", None, []):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "branchPrediction"):
+                configuration({"branchPrediction": value})
+
+    def test_axi_concurrency_configuration(self):
+        baseline = configuration({})
+        self.assertTrue(baseline["axiConcurrent"])
+        self.assertEqual(configuration({"axiConcurrent": True}), baseline)
+        self.assertFalse(configuration({"axiConcurrent": False})["axiConcurrent"])
+        for value in (1, "true", None, []):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "axiConcurrent"):
+                configuration({"axiConcurrent": value})
 
     def test_jtag_configuration(self):
         selected = configuration({"enableDebug": True, "enableJtag": True, "jtagIdcode": 0xE2000001})

@@ -527,7 +527,7 @@ def mutate(source, name):
         pattern = r"wire\s+injectExecution =\n?[\s\S]*?;"
         replacement = "wire injectExecution = 1'h0;"
     elif name == "native-trap":
-        pattern = r"if \(trap\) begin\n        mepc <= _GEN_198;"
+        pattern = r"if \(trap\) begin\s+mepc <= \w+;"
         replacement = "if (trap | debugAccess) begin\n        mepc <= 32'hdeadbeef;"
     elif name == "drop-writeback":
         pattern = r"wire\s+actualWriteback =\n?[\s\S]*?;"

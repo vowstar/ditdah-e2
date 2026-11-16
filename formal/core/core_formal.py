@@ -45,8 +45,12 @@ def freeze_design(rtl, root, wrapper, runner):
     manifest_bytes = (rtl / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
     parameters = manifest["parameters"]
-    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs"}
+    assert (isinstance(parameters, dict) and not parameters.keys() - {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs", "multiplyBitsPerCycle", "axiConcurrent", "branchPrediction"}
             and type(parameters.get("resetVector")) is int and parameters["resetVector"] == 0
+            and type(parameters.get("multiplyBitsPerCycle", 2)) is int
+            and parameters.get("multiplyBitsPerCycle", 2) in (1, 2, 4)
+            and type(parameters.get("axiConcurrent", False)) is bool
+            and type(parameters.get("branchPrediction", False)) is bool
             and type(parameters.get("enableM", False)) is bool
             and type(parameters.get("enableC", False)) is bool
             and type(parameters.get("protectedMode", False)) is bool

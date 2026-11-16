@@ -30,6 +30,12 @@ class ProgramBufferTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown"):
             mutate("", "unknown")
 
+    def test_native_trap_control_follows_the_epc_assignment(self):
+        for name in ("_GEN_198", "_GEN_238", "trapPc"):
+            source = f"if (trap) begin\n        mepc <= {name};"
+            self.assertEqual(mutate(source, "native-trap"),
+                             "if (trap | debugAccess) begin\n        mepc <= 32'hdeadbeef;")
+
     def test_fault_completion_keeps_request_snapshot_for_one_cycle(self):
         reference = ProgramReference(cases()[0])
         reference.active = True

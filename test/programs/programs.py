@@ -347,7 +347,8 @@ M_RESULTS = (
 )
 
 
-def multiply_cases():
+def multiply_cases(multiply_bits_per_cycle=2):
+    last_multiply_step = (3 + multiply_bits_per_cycle - 1) // multiply_bits_per_cycle + 1
     result = []
     for operation, name in enumerate(("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")):
         code, signature = [], {}
@@ -397,10 +398,14 @@ def multiply_cases():
         result.append(Case(f"m_older_{'store' if write else 'load'}_fault", code, data_fault=768, handler=handler,
                            expected_causes=(7 if write else 5,), enable_m=True, data={768: 11},
                            signature={256: 55, 260: 66, 264: 0, 768: 11, TRAP_RECORD: PROGRAM_PC + 16}))
-    for operation, name, delay, left, expected in ((0, "mul", 1, 7, 33), (4, "div", 17, 7, 3),
-                                                  (1, "mulh", 33, MASK - 6, 0), (0, "result", 34, 7, 33)):
+    for operation, name, delay, left, right, expected in (
+            (0, "mul", 1, 7, 3, 33), (4, "div", 17, 7, 3, 3),
+            (1, "mulh", last_multiply_step, MASK - 6, 3, 0),
+            (1, "full_width_mulh", 32 // multiply_bits_per_cycle + 1,
+             0x80000000, 0x80000000, 0xfffffffa),
+            (0, "result", 1, 7, 3, 33)):
         code = constant(5, 1 << 11) + [csr(0, 0x304, 5, 1), csr(0, 0x300, 8, 6)]
-        code += constant(1, left) + constant(2, 3) + [immediate(20, 0, 0)]
+        code += constant(1, left) + constant(2, right) + [immediate(20, 0, 0)]
         pc = PROGRAM_PC + len(code) * 4
         code += [multiply(3, 1, 2, operation), store(3, 0, 256), store(20, 0, 260)]
         handler = constant(25, TRAP_RECORD)
@@ -529,7 +534,49 @@ def reset_cases(reset):
     return result
 
 
-def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba=False, enable_zbb=False, enable_zbs=False):
+def memory_pipeline_cases():
+    result = []
+    code = [immediate(1, 0, 512, 3, 2), immediate(0, 1, 0, 0x67), store(0, 0, 520),
+            immediate(5, 0, 19), store(5, 0, 516)]
+    result.append(Case("memory_pipeline_load_jalr", finish(code), expected_causes=(),
+                       data={512: PROGRAM_PC + 12, 520: 0xA5A5A5A5}, signature={516: 19, 520: 0xA5A5A5A5}))
+    for function, value, expected in ((0, 0x80, 0xFFFFFF80), (1, 0x8000, 0xFFFF8000),
+                                      (2, 0x80000000, 0x80000000), (4, 0x80, 0x80), (5, 0x8000, 0x8000)):
+        code = [immediate(1, 0, 512, 3, function), branch(1, 0, 8, funct3=1),
+                store(0, 0, 520), store(1, 0, 516)]
+        result.append(Case(f"memory_pipeline_load_branch_{function}", finish(code), expected_causes=(),
+                           data={512: value, 520: 0xA5A5A5A5}, signature={516: expected, 520: 0xA5A5A5A5}))
+    code = constant(1, 0x11223344) + constant(2, 0xA5B6C7D8)
+    code += [store(1, 0, 512), store(2, 0, 520), store(1, 0, 529, 0), store(2, 0, 530, 1)]
+    result.append(Case("memory_pipeline_store_turnover", finish(code), expected_causes=(),
+                       signature={512: 0x11223344, 520: 0xA5B6C7D8, 528: 0xC7D84400}))
+    for write in (False, True):
+        memory = store(1, 0, 768) if write else immediate(3, 0, 768, 3, 2)
+        code = [immediate(1, 0, 29), memory, store(1, 0, 772)]
+        fault_pc = PROGRAM_PC + 4
+        result.append(Case(f"memory_pipeline_older_{'store' if write else 'load'}_fault", code,
+                           data_fault=768, expected_causes=(7 if write else 5,),
+                           signature={768: 0, 772: 0, TRAP_RECORD: fault_pc,
+                                      TRAP_RECORD + 4: 7 if write else 5, TRAP_RECORD + 8: 768}))
+    illegal = csr(0, 0xF11, 1, 1)
+    result.append(Case("memory_pipeline_older_csr_fault", [immediate(1, 0, 29), illegal, store(1, 0, 772)],
+                       signature={772: 0, TRAP_RECORD: PROGRAM_PC + 4,
+                                  TRAP_RECORD + 4: 2, TRAP_RECORD + 8: illegal}, expected_causes=(2,)))
+    prefix = constant(31, 1 << 11) + [csr(0, 0x304, 31, 1), csr(0, 0x300, 8, 6), immediate(1, 0, 29)]
+    code = prefix + [store(1, 0, 768), store(1, 0, 772)]
+    result.append(Case("memory_pipeline_interrupt_boundary", finish(code), expected_causes=(),
+                       interrupt_schedule=(("D", 768, 4), ("N", 1, 0)), expected_interrupts=(0x8000000B,),
+                       signature={768: 29, 772: 0, TRAP_RECORD: PROGRAM_PC + 4 * (len(prefix) + 1),
+                                  TRAP_RECORD + 4: 0x8000000B}))
+    code = [immediate(1, 0, 29), store(1, 0, 768), immediate(2, 0, 772, 3, 2)]
+    result.append(Case("memory_pipeline_store_before_load_fault", code, data_fault=772,
+                       signature={768: 29, TRAP_RECORD: PROGRAM_PC + 8,
+                                  TRAP_RECORD + 4: 5, TRAP_RECORD + 8: 772}, expected_causes=(5,)))
+    return result
+
+
+def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba=False, enable_zbb=False, enable_zbs=False,
+          multiply_bits_per_cycle=2):
     compressed = []
     if enable_c:
         from test.programs.compressed_programs import cases as compressed_cases
@@ -585,6 +632,17 @@ def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba
         Case("branch_not_taken_misaligned", [a(1, 0, 1), branch(0, 1, 2), BREAK]),
         Case("branch_taken_misaligned", [branch(0, 0, 2), BREAK], expected_causes=(0,)),
         Case("load_zero_fault", [load(0, 0, 256), BREAK], data_fault=256, expected_causes=(5,)),
+    ]
+    result += [
+        Case("branch_direction_change", finish([a(1, 0, 3), a(2, 0, 0), a(2, 2, 1),
+             branch(2, 1, -4, True), store(2, 0, 256)]), signature={256: 3}, expected_causes=()),
+        Case("branch_entry_replace", finish([a(1, 0, 3), a(2, 0, 0), a(2, 2, 1),
+             branch(2, 1, -4, True), a(3, 0, 2), a(3, 3, -1), a(2, 2, 2),
+             branch(3, 0, -8, True), store(2, 0, 256)]), signature={256: 7}, expected_causes=()),
+        Case("branch_older_load_fault", [a(1, 0, 252), a(3, 0, 3), a(3, 3, -1), a(1, 1, 4),
+             load(4, 1), branch(3, 0, -12, True), store(4, 0, 264), BREAK], data={256: 0x12345678},
+             data_fault=260, signature={264: 0, TRAP_RECORD: PROGRAM_PC + 16,
+                                       TRAP_RECORD + 4: 5, TRAP_RECORD + 8: 260}, expected_causes=(5,)),
     ]
     for index, word in enumerate([0, 0xFFFFFFFF, 0x02000033, 0x40001033, 0x02001013,
                                   0x00001067, 0x00003003, 0x00003023, 0x00002063,
@@ -658,9 +716,10 @@ def cases(reset=0, enable_m=False, enable_c=False, *, enable_a=False, enable_zba
         result.append(Case(f"random_{seed}", code + [BREAK]))
     from test.programs.bit_programs import cases as bit_cases
     result += bit_cases(enable_zba, enable_zbb, enable_zbs)
+    result += memory_pipeline_cases()
     result += csr_cases(enable_m, enable_c, enable_a=enable_a, enable_zba=enable_zba, enable_zbb=enable_zbb, enable_zbs=enable_zbs) + [nested_case()] + interrupt_cases() + counter_cases()
     if enable_m:
-        result += multiply_cases()
+        result += multiply_cases(multiply_bits_per_cycle)
     if enable_c:
         result = [case for case in result if case.name not in
                   ("jump_misaligned", "jalr_misaligned", "branch_taken_misaligned")]

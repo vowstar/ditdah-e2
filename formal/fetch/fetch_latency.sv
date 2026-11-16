@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
 module fetch_latency #(parameter COMPRESSED = 1)(input clock);
-  localparam BOUND = COMPRESSED ? 4 : 3;
+  localparam BOUND = COMPRESSED ? 3 : 2;
   reg reset = 1;
   always @(posedge clock) reset <= 0;
-  (* anyseq *) reg redirect, pause, memory_request_ready, memory_response_valid, output_ready, measure;
+  (* anyseq *) reg redirect, redirectRequest, pause, memory_request_ready, memory_response_valid, output_ready, measure;
+  (* anyseq *) reg predict;
+  (* anyseq *) reg [31:0] predictedTarget;
   (* anyseq *) reg [31:0] target;
   wire [31:0] memory_response_bits_data = 32'h00130013;
   wire memory_response_bits_fault = 0;

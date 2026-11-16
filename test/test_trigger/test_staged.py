@@ -138,7 +138,7 @@ def rtl():
     core = {name: b"module empty; endmodule\n" for name in (
         "DitDahE2.sv", "DitDahE2Counters.sv", "DitDahE2Csr.sv", "DitDahE2DebugHart.sv",
         "DitDahE2DebugModule.sv", "DitDahE2Fetch.sv", "DitDahE2MultiplyDivide.sv", "DitDahE2Trigger.sv")}
-    core[run.CORE_RTL] = (("module DitDahE2(input clock, output " + ", ".join(run.CORE_DEBUG_OUTPUTS) + ");\nm_trap <= fault;\n").encode() +
+    core[run.CORE_RTL] = (("module DitDahE2(input clock, output " + ", ".join(run.CORE_DEBUG_OUTPUTS) + ");\nwire fault = _csr_trigger_nativeAction | x_fault | badData_0;\nm_trap <= fault;\n").encode() +
         b"& ~eligibleInterrupt & ~sleeping_0 & ~x_fault & ~_debug_core_stop\n    & ~_csr_trigger_matched;\n"
         b"_GEN_466 = redirect_0 | returning | waiting | waking | synchronized;\nendmodule\n")
     return unit, core
@@ -182,14 +182,14 @@ class StagedTests(unittest.TestCase):
             self.assertEqual(len(plan["allAssertions"]), 32)
             self.assertEqual(len(plan["inputs"]), 11)
             self.assertEqual(plan["sources"], [*rtl()[1], run.CORE_WRAPPER])
-            self.assertEqual(plan["initialState"]["resetFacts"], 123)
+            self.assertEqual(plan["initialState"]["resetFacts"], 122)
             self.assertEqual(plan["dutInitialState"], run.CORE_INITIAL_STATE)
             fragment = collectors()["staged_helpers"]
             self.assertEqual(contents[run.CORE_WRAPPER].replace(fragment + b"\n", b""), (run.HERE / run.CORE_WRAPPER).read_bytes())
         self.assertEqual(definition("core-store-safety"), definition("core-dpc-safety"))
         older, contents = definition()
-        self.assertEqual(run.sha(contents["plan.tcl"]), "229e62c503f4e5e4f10904d467887acd2449807214052e3922e522512d2a6b5d")
-        self.assertEqual(run.sha(contents[run.CORE_WRAPPER]), "4cbdcd81f92721e92f76f995afe3e5fee4e0e2a620348437243b4716ba1e2b07")
+        self.assertEqual(run.sha(contents["plan.tcl"]), "c0568d912c2c518b145b7140667c328230419b66c46ecd524a962413dd3f1b01")
+        self.assertEqual(run.sha(contents[run.CORE_WRAPPER]), "ffdd0c053c6be2047f389f864117daff2a6f5a23841b5276c435cca1ec146a67")
         self.assertEqual(older["allAssertions"], [*staged.ORIGINALS, *staged.HELPERS])
 
     def test_twelve_legacy_cases_remain_byte_exact(self):

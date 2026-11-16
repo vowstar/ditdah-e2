@@ -7,6 +7,7 @@ from collections import Counter, deque
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -439,11 +440,12 @@ def feature_negative_controls(case, text):
 
 
 def without_instruction_sync(text):
-    changes = (("m_fenceI <= isFenceI;", "m_fenceI <= 1'h0;"),
-               ("| advance\n       & isFenceI & ~fault", "| 1'h0"))
-    for original, replacement in changes:
-        assert text.count(original) == 1, "Cannot identify instruction synchronization logic"
-        text = text.replace(original, replacement)
+    original = "m_fenceI <= isFenceI;"
+    assert text.count(original) == 1, "Cannot identify instruction synchronization logic"
+    text = text.replace(original, "m_fenceI <= 1'h0;")
+    text, shared = re.subn(r"(wire\s+\w+\s*=\s*)advance\s*&\s*isFenceI;", r"\g<1>1'h0;", text)
+    text, direct = re.subn(r"\|\s*advance\s*&\s*isFenceI\s*&\s*~fault", "| 1'h0", text)
+    assert shared + direct == 1, "Cannot identify instruction synchronization logic"
     return text
 
 
@@ -482,6 +484,44 @@ def fence_negative_control(case, rtl, manifest, command, work, output):
             "traceHash": hashlib.sha256(run.stdout.encode()).hexdigest()}
 
 
+def without_raw_identity(text):
+    pattern = r"(wire\s+\[31:0\]\s+rawInstruction\s*=\s*x_length\s*==\s*3'h2\s*\?\s*)\{16'h0,\s*x_word\[15:0\]\}"
+    text, count = re.subn(pattern, r"\g<1>xDecoded", text)
+    assert count == 1, "Cannot identify compressed raw identity"
+    return text
+
+
+def raw_identity_negative_control(case, rtl, manifest, command, work, output):
+    mutant = work / "raw-identity-mutant"
+    mutant.mkdir()
+    for name in manifest["rtlHashes"]:
+        text = (rtl / name).read_text()
+        (mutant / name).write_text(without_raw_identity(text) if name == "DitDahE2.sv" else text)
+    compile_command = [str(mutant / Path(argument).name) if argument.endswith(".sv") else argument
+                       for argument in command]
+    compile_command[compile_command.index("--Mdir") + 1] = str(work / "raw-identity-obj")
+    compiled = subprocess.run(compile_command, capture_output=True, text=True)
+    if compiled.returncode:
+        raise RuntimeError(compiled.stdout + compiled.stderr)
+    image = work / "raw-identity-negative.hex"
+    image.write_text("".join(f"{address:08x} {word:08x}\n" for address, word in sorted(case.words().items())))
+    run = subprocess.run([str(work / "raw-identity-obj/VDitDahE2"), str(image), "1", "24",
+                          str(1 << 32), str(1 << 32), "20000", str(case.completion_pc)],
+                         capture_output=True, text=True)
+    assert run.returncode == 0, "Raw identity mutant did not complete"
+    try:
+        check(case, run.stdout)
+    except AssertionError as error:
+        assert "Instruction/PC/trap mismatch" in str(error), "Raw identity control failed for another reason"
+        reason = str(error)
+    else:
+        raise AssertionError("Checker accepted expanded compressed retirement identity")
+    (output / "expanded-identity.trace").write_text(run.stdout)
+    return {"mutation": "replace raw compressed identity with its expansion", "exitStatus": 0,
+            "failure": reason, "rtlHashes": {name: digest(mutant / name) for name in manifest["rtlHashes"]},
+            "traceHash": hashlib.sha256(run.stdout.encode()).hexdigest()}
+
+
 def retirement_check(case, stdout, trace, interrupts):
     from test.common.retirement import bind_native_trace, check_trace, read_interrupts, read_trace
     records = read_trace(trace)
@@ -515,6 +555,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     selected = [case for case in cases(manifest["parameters"]["resetVector"],
                                        enable_m=manifest["parameters"].get("enableM", False),
+                                       multiply_bits_per_cycle=manifest["parameters"].get("multiplyBitsPerCycle", 2),
                                        enable_c=manifest["parameters"].get("enableC", False),
                                        enable_a=manifest["parameters"].get("enableA", False),
                                        enable_zba=manifest["parameters"].get("enableZba", False),
@@ -577,6 +618,9 @@ def main():
         for case in selected:
             if case.name == "fence_i_self_modify":
                 rtl_controls.append(fence_negative_control(case, args.rtl, manifest, command, work, args.output))
+                controls += 1
+            if case.name == "c_mixed_loop":
+                rtl_controls.append(raw_identity_negative_control(case, args.rtl, manifest, command, work, args.output))
                 controls += 1
         from test.units.bit_pipeline import negative_controls as bit_negative_controls
         bit_controls = bit_negative_controls(selected, args.rtl, manifest, command, work, args.output, check)

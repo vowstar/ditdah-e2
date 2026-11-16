@@ -30,10 +30,22 @@ def replace_once(content, old, new):
 
 
 def mutate(content, name):
+    if name == "held-request" and "assign memory_request_bits_address = held ?" in content:
+        return replace_once(content, "assign memory_request_bits_address = held ? heldAddress : offerAddress;",
+                            "assign memory_request_bits_address = heldDiscarded ? {target[31:2], 2'b0} : held ? heldAddress : offerAddress;")
+    if name == "fault-address" and re.search(r"assemblyPc\s*\+\s*32'h2", content):
+        result, count = re.subn(r"(assemblyPc\s*\+\s*)32'h2", r"\g<1>32'h0", content)
+        assert count == 1, "Fetch mutation no longer matches RTL"
+        return result
+    if name == "stale-response":
+        pattern = r"(flush|discardWords) & outstanding \| discarded;"
+        result, count = re.subn(pattern, lambda match: ("(pause | predicted)" if match[1] == "discardWords" else "pause") +
+                                " & outstanding | discarded;", content)
+        assert count == 1, "Fetch mutation no longer matches RTL"
+        return result
     changes = {
         "address-increment": ("nextWord <= nextWord + 32'h4;", "nextWord <= nextWord + 32'h8;"),
-        "stale-response": ("request ? flush | held & heldDiscarded : flush & outstanding | discarded;",
-                           "request ? flush | held & heldDiscarded : pause & outstanding | discarded;"),
+        "stale-response": ("flush & outstanding | discarded;", "pause & outstanding | discarded;"),
         "release": ("assemble & (assemblyPc[1] | crossing & ~headFault)",
                     "assemble & (headFault | assemblyPc[1] | crossing)"),
         "fault-address": (": failed ? tailAddress : assemblyPc;", ": failed ? assemblyPc : assemblyPc;"),
@@ -41,11 +53,11 @@ def mutate(content, name):
                        "crossing_0 ? {half_0, raw[15:0]} : half"),
         "held-request": ("assign memory_request_bits_address = memory_request_bits_address_0;",
                          "assign memory_request_bits_address = heldDiscarded ? {target[31:2], 2'b0} : memory_request_bits_address_0;"),
-        "idle": ("assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;",
-                 "assign idle = ~outstanding & ~firstValid & ~secondValid & ~buffered;"),
+        "idle": ("assign idle = ~held & ~outstanding & ~firstValid & ~secondValid;",
+                 "assign idle = ~outstanding & ~firstValid & ~secondValid;"),
         "held-privilege": ("assign memory_request_bits_machine = held ? heldMachine : machine;",
                            "assign memory_request_bits_machine = machine;"),
-        "capacity": ("& (~tailValid | release_0);", "& 1'b1;")}
+        "capacity": ("& (~tailValid | release_0)", "& 1'b1")}
     return replace_once(content, *changes[name])
 
 
@@ -54,8 +66,7 @@ def observe(content):
                "discarded": "discarded", "first_valid": "firstValid",
                "second_valid": "secondValid", "first_fault": "firstFault", "second_fault": "secondFault"}
     words = {"assembly_pc": "assemblyPc", "next_word": "nextWord", "first_word": "firstWord",
-             "second_word": "secondWord", "first_address": "firstAddress", "second_address": "secondAddress",
-             "address": "address", "held_address": "heldAddress"}
+             "second_word": "secondWord", "held_address": "heldAddress"}
     for signal in [*scalars.values(), *words.values()]:
         assert re.search(r"reg\s+(?:\[31:0\]\s+)?" + signal + r"\s*;", content), "Missing observation signal"
     ports = "  output " + ", ".join("formal_" + name for name in scalars) + ",\n"
@@ -74,7 +85,10 @@ def freeze(args):
     assert type(parameters.get("enableC", False)) is bool, "Invalid C configuration"
     assert type(parameters["resetVector"]) is int and 0 <= parameters["resetVector"] <= 0xFFFFFFFF, "Invalid reset address"
     assert parameters["resetVector"] % (2 if parameters.get("enableC", False) else 4) == 0, "Misaligned reset address"
-    assert set(parameters) <= {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs"}, "Unknown fetch configuration"
+    assert set(parameters) <= {"resetVector", "enableM", "enableC", "protectedMode", "enableDebug", "enableA", "enableZba", "enableZbb", "enableZbs", "multiplyBitsPerCycle", "axiConcurrent", "branchPrediction"}, "Unknown fetch configuration"
+    assert type(parameters.get("branchPrediction", False)) is bool, "Invalid prediction configuration"
+    assert type(parameters.get("multiplyBitsPerCycle", 2)) is int and parameters.get("multiplyBitsPerCycle", 2) in (1, 2, 4), "Invalid multiply configuration"
+    assert type(parameters.get("axiConcurrent", False)) is bool, "Invalid AXI configuration"
     assert type(parameters.get("protectedMode", False)) is bool, "Invalid protection configuration"
     assert type(parameters.get("enableDebug", False)) is bool, "Invalid debug configuration"
     assert type(parameters.get("enableA", False)) is bool, "Invalid atomic configuration"
@@ -100,7 +114,7 @@ def freeze(args):
     return contents, bindings
 
 
-def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compressed=True, reset_pc=0):
+def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compressed=True, reset_pc=0, prediction=False):
     case = work / name
     case.mkdir()
     source = mutate(rtl, name) if negative else rtl
@@ -110,7 +124,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compr
     config = (f"[options]\nmode {mode}\ndepth {depth}\n"
               "[engines]\nsmtbmc z3\n[script]\n"
               f"read -formal -sv {flags}DitDahE2Fetch.sv compressed_fetch_formal.sv\n"
-              f"chparam -set COMPRESSED {int(compressed)} -set RESET_PC {reset_pc} compressed_fetch_formal\n"
+              f"chparam -set COMPRESSED {int(compressed)} -set RESET_PC {reset_pc} -set PREDICTION {int(prediction)} compressed_fetch_formal\n"
               "prep -top compressed_fetch_formal\n"
               "[files]\nDitDahE2Fetch.sv\ncompressed_fetch_formal.sv\n")
     (case / "run.sby").write_text(config)
@@ -150,7 +164,7 @@ def execute(work, output, rtl, wrapper, name, mode, depth, negative=False, compr
         result["witness"] = witness(trace.read_text(), name)
         (output / (name + ".json")).write_text(json.dumps(result, indent=2) + "\n")
     if mode == "cover":
-        assert len(reached) == (15 if compressed else 11), "Missing fetch cover"
+        assert len(reached) == (20 if compressed else 16) + (4 if prediction else 0), "Missing fetch cover"
     return result
 
 
@@ -189,7 +203,8 @@ def main():
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(execute, work, args.output, contents["rtl/DitDahE2Fetch.sv"].decode(),
                                        contents["formal/fetch/compressed_fetch_formal.sv"], *case,
-                                       compressed=compressed, reset_pc=bindings["parameters"]["resetVector"]) for case in cases]
+                                       compressed=compressed, reset_pc=bindings["parameters"]["resetVector"],
+                                       prediction=bindings["parameters"].get("branchPrediction", False)) for case in cases]
             for future in as_completed(futures):
                 outcomes.append(future.result())
                 outcomes.sort(key=lambda value: next(index for index, case in enumerate(cases) if case[0] == value["name"]))

@@ -33,6 +33,7 @@ class ColdResetTests(unittest.TestCase):
         check_core_reset_collectors(collectors)
         for role in ("safety", "multiply_safety", "multiply_retry", "trace", "negative_older"):
             expression = re.search(r"assume -reset \{([^\n]+)\}", collectors[role].decode()).group(1)
+            self.assertNotIn("dut.fetch.buffered", expression)
             for name in ("dut.registers", *(f"dut.registers_{index}" for index in range(30))):
                 self.assertIn(name + " == 0", expression)
             for name in ("dut.debug.program0", "dut.debug.program1", "dut.dm.executionProgram0",
@@ -44,10 +45,11 @@ class ColdResetTests(unittest.TestCase):
                          "dut.debug.injecting", "dut.debug.cancelInjection", "dut.debug.pendingIssue",
                          "dut.debug.slot", "dut.dm.program0", "dut.dm.program1"):
                 self.assertIn(name + " == 0", expression)
-        self.assertEqual(CORE_INITIAL_STATE["profile"], "source-cold-reset122")
-        self.assertEqual(CORE_INITIAL_STATE["resetFacts"], 122)
+        self.assertEqual(CORE_INITIAL_STATE["profile"], "source-cold-reset121")
+        self.assertEqual(CORE_INITIAL_STATE["resetFacts"], 121)
         self.assertEqual(CORE_INITIAL_STATE["resetGprs"], 31)
         self.assertEqual(CORE_INITIAL_STATE["addedResetFacts"], 52)
+        self.assertEqual(CORE_INITIAL_STATE["removedResetFacts"], 1)
 
     def test_missing_register_or_unreset_payload_changes_are_rejected(self):
         for mutation in (" && dut.registers_0 == 0", " && dut.dm.commandValid == 0", " && dut.xInjected == 0"):

@@ -5,6 +5,7 @@
 import json
 import time
 import z3
+from .multiply_invariant import Certificate as Conservation
 
 
 class State:
@@ -18,6 +19,8 @@ class State:
             ("operation", 3),
             ("iteration", 6),
             ("product", 64),
+            ("terminal_product", 64),
+            ("multiplier", 32),
             ("response", 32),
             ("expected", 32),
         ]:
@@ -33,6 +36,7 @@ class Certificate:
         base=True,
         epoch=True,
         terminal=True,
+        narrow=True,
         wrong_finish=False,
         wrong_hold=False
     ):
@@ -43,10 +47,10 @@ class Certificate:
         self.first, self.history, self.previous_reset = z3.Bools(
             "first_proof_frame history_valid previous_reset"
         )
-        self.finish, self.hold, self.previous_owner = z3.Bools(
-            "chain_previous_mul_finish chain_previous_mul_hold chain_previous_owner"
+        self.finish, self.hold, self.previous_owner, self.shortcut = z3.Bools(
+            "chain_previous_mul_finish chain_previous_mul_hold chain_previous_owner chain_previous_narrow_capture"
         )
-        self.snapshot_product = z3.BitVec("chain_previous_product", 64)
+        self.snapshot_product = z3.BitVec("chain_previous_finish_product", 64)
         self.snapshot_negative = z3.Bool("chain_previous_negative")
         self.snapshot_left, self.snapshot_right = z3.BitVecs(
             "chain_previous_owner_left chain_previous_owner_right", 32
@@ -75,7 +79,7 @@ class Certificate:
         def reference(state):
             op = z3.BitVecVal(operation, 3)
             magnitude_left, magnitude_right = magnitudes(state, op)
-            product = self.U(magnitude_left, magnitude_right)
+            product = self.U(*Conservation.selected_magnitudes(state.left, state.right, op))
             left_negative, right_negative = signs(state, op)
             corrected = z3.If(z3.Xor(left_negative, right_negative), -product, product)
             return z3.Extract(31, 0, product) if operation == 0 else z3.Extract(63, 32, corrected)
@@ -96,7 +100,7 @@ class Certificate:
             p.pending,
             p.active,
             p.operation == operation,
-            p.iteration == 32,
+            z3.Or(p.multiplier == 0, z3.And(p.operation == 0, z3.LShR(p.multiplier, 2) == 0)),
         )
         self.common = z3.And(
             self.history, z3.Not(c.reset), z3.Not(c.cancel), c.pending, c.operation == operation
@@ -108,7 +112,7 @@ class Certificate:
             )
         if epoch:
             self.facts["native_response_epoch"] = z3.Implies(
-                self.G, z3.And(self.history, c.pending, z3.Or(self.finish, self.hold))
+                self.G, z3.And(self.history, c.pending, z3.Or(self.finish, self.hold, self.shortcut))
             )
         self.facts["source_previous_reset_capture"] = z3.Implies(
             z3.And(self.history, z3.Not(self.first)), self.previous_reset == p.reset
@@ -117,8 +121,8 @@ class Certificate:
             z3.And(self.G, self.finish), z3.And(self.previous_owner, self.p_terminal)
         )
         snapshot_guard = z3.And(self.history, z3.Not(c.reset), z3.Not(self.previous_reset))
-        self.facts["native_snapshot_product"] = z3.Implies(
-            snapshot_guard, self.snapshot_product == p.product
+        self.facts["native_snapshot_finish_product"] = z3.Implies(
+            snapshot_guard, self.snapshot_product == p.terminal_product
         )
         self.facts["native_snapshot_left"] = z3.Implies(
             snapshot_guard, self.snapshot_left == p.left
@@ -142,7 +146,7 @@ class Certificate:
         )
         if terminal:
             self.facts["native_actual_past_terminal"] = z3.Implies(
-                self.p_terminal, p.product == self.U(*magnitudes(p, p.operation))
+                self.p_terminal, p.terminal_product == self.U(*Conservation.selected_magnitudes(p.left, p.right, p.operation))
             )
         projected = (
             z3.Extract(31, 0, self.snapshot_product)
@@ -155,6 +159,10 @@ class Certificate:
             z3.And(self.common, self.finish),
             c.response == projected ^ z3.BitVecVal(int(wrong_finish), 32),
         )
+        if narrow:
+            self.facts["native_narrow_result"] = z3.Implies(
+                z3.And(self.G, self.shortcut), c.response == c.expected
+            )
         self.facts["proved_checker_capture"] = z3.Implies(
             z3.And(z3.Not(c.reset), c.pending), c.expected == self.ref(c)
         )
@@ -267,13 +275,26 @@ def prove(output, operation):
         "unsat",
         "The actual preceding response and expected words are unchanged",
     )
+    if operation == 0:
+        query("narrow_response_matches_reference", c,
+              [step, c.G, c.shortcut, z3.Not(c.I)], "unsat",
+              "Exact licensed nine-bit request result premise under the original result guard")
+        query("narrow_response_nonvacuity", c,
+              [step, c.G, c.shortcut], "sat",
+              "The low-product narrow result case is satisfiable")
     query(
         "all_step_cases",
         c,
         [step, c.pI, z3.Not(c.I)],
         "unsat",
-        "Original guard and finish or hold cases are exhaustive",
+        "Original guard and finish, held response or bounded narrow capture are exhaustive",
     )
+    if operation == 0:
+        missing_narrow = Certificate(operation, narrow=False)
+        query("negative_missing_narrow_result", missing_narrow,
+              [z3.Not(missing_narrow.first), missing_narrow.G, missing_narrow.shortcut,
+               missing_narrow.pI, z3.Not(missing_narrow.I)], "sat",
+              "The new early response requires its own licensed arithmetic result premise")
     previous_I = z3.Bool("boolean_observer.previous_I")
     monitor = z3.Implies(z3.And(c.history, step), previous_I == z3.Or(c.past.reset, c.pI))
     query(

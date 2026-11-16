@@ -3,40 +3,6 @@
   wire core_program_no_injection_I = (!dut.dm.busy || dut.dm.commandValid) &&
       (!dut.dm.commandValid || !dut.dm.command_postExec) && !dut.debug.injecting &&
       !dut.debug.pendingIssue && !dut.xInjected && (!dut.mValid || !dut.m_injected);
-// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
-// SPDX-License-Identifier: MIT
-  wire rom_local_response_safe = instruction_response_bits_data != 32'h10500073 &&
-      instruction_response_bits_data != 32'h00100073 &&
-      !(instruction_response_bits_data[6:0] == 7'h0f && instruction_response_bits_data[14:12] == 3'b001);
-  always @($global_clock) begin
-    rom_local_response_class: assert(rom_local_response_safe);
-  end
-// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
-// SPDX-License-Identifier: MIT
-  wire rom_local_first_safe = dut.fetch.firstWord != 32'h10500073 &&
-      dut.fetch.firstWord != 32'h00100073 &&
-      !(dut.fetch.firstWord[6:0] == 7'h0f && dut.fetch.firstWord[14:12] == 3'b001);
-  wire rom_local_second_safe = dut.fetch.secondWord != 32'h10500073 &&
-      dut.fetch.secondWord != 32'h00100073 &&
-      !(dut.fetch.secondWord[6:0] == 7'h0f && dut.fetch.secondWord[14:12] == 3'b001);
-  wire rom_local_packet_safe = dut.fetch.packet_word != 32'h10500073 &&
-      dut.fetch.packet_word != 32'h00100073 &&
-      !(dut.fetch.packet_word[6:0] == 7'h0f && dut.fetch.packet_word[14:12] == 3'b001);
-  always @(posedge clock) begin
-    rom_local_valid_word_class: assert((!dut.fetch.firstValid || rom_local_first_safe) &&
-          (!dut.fetch.secondValid || rom_local_second_safe) &&
-          (!dut.fetch.buffered || rom_local_packet_safe));
-  end
-// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
-// SPDX-License-Identifier: MIT
-  always @(posedge clock) begin
-    rom_local_fetch_rom_consistent: assert((!dut.fetch.outstanding ||
-        (instruction_busy && instruction_address == dut.fetch.address)) &&
-        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(dut.fetch.firstAddress)) &&
-        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(dut.fetch.secondAddress)));
-  end
-// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
-// SPDX-License-Identifier: MIT
   // Pause discards a stream without rewinding its request cursor.
   reg core_geom_sync_epoch = 0;
   always @(posedge clock) begin
@@ -53,25 +19,60 @@
   wire [31:0] core_geom_held_bytes = core_geom_live_held ? 32'd4 : 0;
   wire core_geom_shape = (!dut.fetch.secondValid || dut.fetch.firstValid) &&
       !(dut.fetch.held && dut.fetch.outstanding) && core_geom_occupancy <= 2;
-  wire core_geom_geometry = (!dut.fetch.firstValid || dut.fetch.firstAddress == core_geom_aligned_pc) &&
-      (!dut.fetch.secondValid || dut.fetch.secondAddress == core_geom_aligned_pc + 4) &&
-      (!core_geom_live_outstanding || dut.fetch.address == core_geom_aligned_pc + core_geom_queue_bytes) &&
+  wire core_geom_geometry =
+      (!core_geom_live_outstanding || instruction_address == core_geom_aligned_pc + core_geom_queue_bytes) &&
       (!core_geom_live_held || dut.fetch.heldAddress == core_geom_aligned_pc + core_geom_queue_bytes + core_geom_outstanding_bytes) &&
       dut.fetch.nextWord == core_geom_aligned_pc + core_geom_queue_bytes + core_geom_outstanding_bytes + core_geom_held_bytes;
-  wire core_geom_packet_rom = !core_geom_sync_epoch || !dut.fetch.buffered ||
-      dut.fetch.packet_word == rom({dut.fetch.packet_pc[31:2], 2'b00});
+  wire core_geom_packet_rom = !core_geom_sync_epoch || !dut.fetch.output_valid ||
+      dut.fetch.output_bits_word == rom({dut.fetch.output_bits_pc[31:2], 2'b00});
+// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+// SPDX-License-Identifier: MIT
+  wire rom_local_response_safe = instruction_response_bits_data != 32'h10500073 &&
+      instruction_response_bits_data != 32'h00100073 &&
+      !(instruction_response_bits_data[6:0] == 7'h0f && instruction_response_bits_data[14:12] == 3'b001);
+  always @($global_clock) begin
+    rom_local_response_class: assert(rom_local_response_safe);
+  end
+// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+// SPDX-License-Identifier: MIT
+  wire rom_local_first_safe = dut.fetch.firstWord != 32'h10500073 &&
+      dut.fetch.firstWord != 32'h00100073 &&
+      !(dut.fetch.firstWord[6:0] == 7'h0f && dut.fetch.firstWord[14:12] == 3'b001);
+  wire rom_local_second_safe = dut.fetch.secondWord != 32'h10500073 &&
+      dut.fetch.secondWord != 32'h00100073 &&
+      !(dut.fetch.secondWord[6:0] == 7'h0f && dut.fetch.secondWord[14:12] == 3'b001);
+  wire rom_local_packet_safe = dut.fetch.output_bits_word != 32'h10500073 &&
+      dut.fetch.output_bits_word != 32'h00100073 &&
+      !(dut.fetch.output_bits_word[6:0] == 7'h0f && dut.fetch.output_bits_word[14:12] == 3'b001);
+  always @(posedge clock) begin
+    rom_local_valid_word_class: assert((!dut.fetch.firstValid || rom_local_first_safe) &&
+          (!dut.fetch.secondValid || rom_local_second_safe) &&
+          (!dut.fetch.output_valid || rom_local_packet_safe));
+  end
+// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+// SPDX-License-Identifier: MIT
+  always @(posedge clock) begin
+    rom_local_fetch_rom_consistent: assert((!dut.fetch.outstanding ||
+        (instruction_busy && (!core_geom_sync_epoch || dut.fetch.discarded ||
+          instruction_address == core_geom_aligned_pc + core_geom_queue_bytes))) &&
+        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(core_geom_aligned_pc)) &&
+        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(core_geom_aligned_pc + 32'd4)));
+  end
+// SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+// SPDX-License-Identifier: MIT
   always @(posedge clock) begin
     core_geom_rom_packet_consistent: assert(((!dut.fetch.outstanding ||
-        (instruction_busy && instruction_address == dut.fetch.address)) &&
-        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(dut.fetch.firstAddress)) &&
-        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(dut.fetch.secondAddress))) && core_geom_shape && (!core_geom_sync_epoch || core_geom_geometry) && core_geom_packet_rom);
+        (instruction_busy && (!core_geom_sync_epoch || dut.fetch.discarded ||
+          instruction_address == core_geom_aligned_pc + core_geom_queue_bytes))) &&
+        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(core_geom_aligned_pc)) &&
+        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(core_geom_aligned_pc + 32'd4))) && core_geom_shape && (!core_geom_sync_epoch || core_geom_geometry) && core_geom_packet_rom);
   end
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
 // SPDX-License-Identifier: MIT
   always @(posedge clock) begin
     rom_local_fetch_fault_free: assert((!dut.fetch.firstValid || !dut.fetch.firstFault) &&
         (!dut.fetch.secondValid || !dut.fetch.secondFault) &&
-        (!dut.fetch.buffered || !dut.fetch.packet_fault));
+        (!dut.fetch.output_valid || !dut.fetch.output_bits_fault));
   end
 
 // SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
@@ -82,9 +83,10 @@
   wire core_stage_admission_safe = dut.driveTrap || !core_stage_consume || core_geom_sync_epoch;
   always @(posedge clock) begin
     core_frontend_stage_rom_consistent: assert((((!dut.fetch.outstanding ||
-        (instruction_busy && instruction_address == dut.fetch.address)) &&
-        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(dut.fetch.firstAddress)) &&
-        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(dut.fetch.secondAddress))) && core_geom_shape && (!core_geom_sync_epoch || core_geom_geometry) && core_geom_packet_rom) &&
+        (instruction_busy && (!core_geom_sync_epoch || dut.fetch.discarded ||
+          instruction_address == core_geom_aligned_pc + core_geom_queue_bytes))) &&
+        (!dut.fetch.firstValid || dut.fetch.firstWord == rom(core_geom_aligned_pc)) &&
+        (!dut.fetch.secondValid || dut.fetch.secondWord == rom(core_geom_aligned_pc + 32'd4))) && core_geom_shape && (!core_geom_sync_epoch || core_geom_geometry) && core_geom_packet_rom) &&
         (core_geom_sync_epoch || dut._debug_core_stop || dut.sleeping_0 || (dut.mValid && dut.m_fenceI && !dut.m_trap)) &&
         ((!dut.xValid || dut.x_word == rom({dut.x_pc[31:2], 2'b00})) && (!dut.mValid || dut.m_instruction_word == rom({dut.m_instruction_pc[31:2], 2'b00}))));
   end
@@ -122,7 +124,7 @@
   always @(posedge clock) begin
     core_fetch_execute_fault_free: assert((!dut.fetch.firstValid || !dut.fetch.firstFault) &&
         (!dut.fetch.secondValid || !dut.fetch.secondFault) &&
-        (!dut.fetch.buffered || !dut.fetch.packet_fault) &&
+        (!dut.fetch.output_valid || !dut.fetch.output_bits_fault) &&
         (!dut.xValid || !dut.x_fault));
   end
 

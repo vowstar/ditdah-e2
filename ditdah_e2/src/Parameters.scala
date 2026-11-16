@@ -9,9 +9,12 @@ case class Parameters(resetVector: Long = 0, enableM: Boolean = true, enableC: B
                       protectedMode: Boolean = false, enableDebug: Boolean = false, enableA: Boolean = false,
                       enableZba: Boolean = false, enableZbb: Boolean = false, enableZbs: Boolean = false,
                       enableJtag: Boolean = false, jtagIdcode: Option[Long] = None,
-                      triggerCount: Int = 0, enableSba: Boolean = false) extends Parameter:
+                      triggerCount: Int = 0, enableSba: Boolean = false,
+                      multiplyBitsPerCycle: Int = 4, axiConcurrent: Boolean = true,
+                      branchPrediction: Boolean = true) extends Parameter:
   require(resetVector >= 0 && resetVector <= 0xffffffffL, "resetVector must fit RV32")
   require((resetVector & (if enableC then 1 else 3)) == 0, "resetVector must satisfy instruction alignment")
+  require(Set(1, 2, 4).contains(multiplyBitsPerCycle), "multiplyBitsPerCycle must be one, two or four")
   require(triggerCount == 0 || triggerCount == 2, "triggerCount must be zero or two")
   require(triggerCount == 0 || enableDebug, "Execute triggers require Debug")
   require(!enableSba || enableDebug, "System bus access requires Debug")

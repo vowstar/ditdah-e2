@@ -22,6 +22,17 @@ def simulation_wrapper(text):
     return text.replace(declarations, "").replace("  reg instruction_busy", declarations + "  reg instruction_busy")
 
 
+def helper_wrapper(text):
+    fragments = [(HERE / name).read_text() for name in ("staged_helpers.sv", "semantic_helpers.sv")]
+    fragment = "\n".join(fragments).replace("always @($global_clock)", "always @(posedge clock)")
+    # Native cold-state facts precede the first edge; simulation initializes at that edge.
+    fragment, count = re.subn(r"(always @\(posedge clock\) begin\n\s*)(?=\w+:\s*assert)",
+                             r"\g<1>if (!reset) ", fragment)
+    if count != 15 or text.count("endmodule") != 1:
+        raise ValueError("Frontend helper inventory changed")
+    return text.replace("endmodule", fragment + "\nendmodule")
+
+
 def mutate(text, name):
     if name == "phase-gate":
         for expression in ("check && !instruction_busy", "check && instruction_busy",
@@ -99,9 +110,11 @@ def result(log, status, scenario):
     return dict(zip(("setupRequests", "setupResponses", "haltedReady", "resumes"), map(int, rows[0]), strict=True))
 
 
-def run(rtl, output, source_root):
+def run(rtl, output, source_root, helpers=False):
     _, sources = load_rtl(rtl, "DitDahE2", True, source_root)
     wrapper = (HERE / "trigger_core_formal.sv").read_text()
+    if helpers:
+        wrapper = helper_wrapper(wrapper)
     output.mkdir(parents=True, exist_ok=False)
     runs, controls = [], []
     for scenario, mutation in [*((scenario, None) for scenario in range(4)), (0, "phase-gate"), (0, "clear-setup-debt")]:
@@ -128,6 +141,9 @@ def run(rtl, output, source_root):
     summary = {"exitStatus": 0, "scope": "formal wrapper peer progress under a driven clock and cold reset",
                "wrapperSha256": sha(wrapper.encode()), "rtlHashes": {name: sha(value) for name, value in sources.items()},
                "runs": runs, "negativeControls": controls, "commercialGate": "not_evaluated"}
+    if helpers:
+        summary["postResetHelperHashes"] = {name: sha((HERE / name).read_bytes())
+                                            for name in ("staged_helpers.sv", "semantic_helpers.sv")}
     write_json(output / "summary.json", summary)
     return summary
 
@@ -137,8 +153,9 @@ def main():
     parser.add_argument("--rtl", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--source-root", default=HERE.parents[1], type=Path)
+    parser.add_argument("--helpers", action="store_true", help="also exercise frontend and semantic helper assertions after reset")
     args = parser.parse_args()
-    print(json.dumps(run(args.rtl, args.output, args.source_root), sort_keys=True))
+    print(json.dumps(run(args.rtl, args.output, args.source_root, args.helpers), sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -80,6 +80,10 @@ def prove(output):
                         == standard_right,
                     ),
                 )
+                selected_left = magnitude_right
+                selected_right = magnitude_left
+                query(tag + "_selected_product", facts,
+                      selected_left * selected_right == magnitude_product)
                 query(tag + "_full_product", facts, corrected == standard)
                 corrected_projection = corrected % WORD if op == 0 else corrected / WORD
                 standard_projection = standard % WORD if op == 0 else standard / WORD
@@ -125,7 +129,7 @@ def prove(output):
     summary = {
         "solver": "Z3",
         "solverVersion": z3.get_version_string(),
-        "positiveUnsat": 66,
+        "positiveUnsat": 82,
         "nonvacuitySat": 16,
         "negativeCountermodels": 3,
         "sourceBound": True,

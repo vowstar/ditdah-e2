@@ -156,9 +156,15 @@ class PlatformTests(unittest.TestCase):
     def test_permission_mutants_change_real_rtl_outputs(self):
         data = "assign data_allowed = size_ok & permitted;"
         self.assertEqual(platform.data_permission_mutant(data), "assign data_allowed = 1'b1;")
-        axi = "wire [2:0]  protection = {~dataOwner, 1'h0, request_machine};"
+        aw = "assign axi_aw_bits_protection = {~selectedWrite, 1'h0, writeMachine};"
+        ar = "assign axi_ar_bits_protection = {~selectedRead, 1'h0, readMachine};"
+        axi = aw + "\n" + ar
         self.assertEqual(platform.axi_privilege_mutant(axi),
-                         "wire [2:0]  protection = {~dataOwner, 1'h0, 1'h1};")
+                         "assign axi_aw_bits_protection = ({~selectedWrite, 1'h0, writeMachine} | 3'h1);\n"
+                         "assign axi_ar_bits_protection = ({~selectedRead, 1'h0, readMachine} | 3'h1);")
+        for changed in (aw, ar, axi + aw, axi + ar):
+            with self.subTest(source=changed), self.assertRaisesRegex(AssertionError, "mutation"):
+                platform.axi_privilege_mutant(changed)
         for mutate, source in ((platform.data_permission_mutant, data), (platform.axi_privilege_mutant, axi)):
             for changed in ("", source + source):
                 with self.subTest(source=changed), self.assertRaisesRegex(AssertionError, "mutation"):

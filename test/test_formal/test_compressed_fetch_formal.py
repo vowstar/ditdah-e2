@@ -24,7 +24,7 @@ def example_rtl():
   assign word = crossing_0 ? {raw[15:0], half_0} : half;
   assign memory_request_bits_address = memory_request_bits_address_0;
   assign memory_request_bits_machine = held ? heldMachine : machine;
-  assign idle = ~held & ~outstanding & ~firstValid & ~secondValid & ~buffered;
+  assign idle = ~held & ~outstanding & ~firstValid & ~secondValid;
   always @(posedge clock) nextWord <= nextWord + 32'h4;
   always @(posedge clock) discarded <= request ? flush | held & heldDiscarded : flush & outstanding | discarded;
   wire offer = ~held & ~flush & (~outstanding | response) & (~tailValid | release_0);
@@ -149,6 +149,18 @@ class CompressedFetchInputTests(unittest.TestCase):
         record = json.loads((output / "release.json").read_text())
         archived = output / record["inputDirectory"] / "DitDahE2Fetch.sv"
         self.assertEqual(hashlib.sha256(archived.read_bytes()).hexdigest(), record["inputHashes"][archived.name])
+
+    def test_address_economy_mutations_remain_unique(self):
+        original = example_rtl().replace(
+            "assign memory_request_bits_address = memory_request_bits_address_0;",
+            "assign memory_request_bits_address = held ? heldAddress : offerAddress;").replace(
+            "headFault ? firstAddress : failed ? tailAddress : assemblyPc",
+            "failed & ~headFault ? assemblyPc + 32'h2 : assemblyPc")
+        self.assertIn("heldDiscarded ?", mutate(original, "held-request"))
+        self.assertIn("assemblyPc + 32'h0", mutate(original, "fault-address"))
+        for name in ("held-request", "fault-address"):
+            with self.subTest(name=name), self.assertRaisesRegex(AssertionError, "no longer matches"):
+                mutate(original + original, name)
 
 
 if __name__ == "__main__":

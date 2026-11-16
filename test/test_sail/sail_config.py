@@ -36,10 +36,18 @@ def _disable(value):
 
 def configuration(defaults, parameters, regions, *, instruction_limit):
     """Return a fresh configuration; validate it with the real model before use."""
-    if set(parameters) != PARAMETERS:
+    implementation = {"multiplyBitsPerCycle", "axiConcurrent", "branchPrediction"}
+    if not PARAMETERS <= set(parameters) or set(parameters) - PARAMETERS - implementation:
         raise ValueError("Core parameter fields differ")
     if any(type(parameters[key]) is not bool for key in PARAMETERS - {"resetVector"}):
         raise ValueError("Core feature parameters must be booleans")
+    bits = parameters.get("multiplyBitsPerCycle", 2)
+    if type(bits) is not int or bits not in (1, 2, 4):
+        raise ValueError("Invalid multiplyBitsPerCycle")
+    if type(parameters.get("axiConcurrent", False)) is not bool:
+        raise ValueError("Invalid axiConcurrent")
+    if type(parameters.get("branchPrediction", False)) is not bool:
+        raise ValueError("Invalid branchPrediction")
     reset = parameters["resetVector"]
     if type(reset) is not int or not 0 <= reset <= 0xffffffff or reset % (2 if parameters["enableC"] else 4):
         raise ValueError("Reset vector does not satisfy RV32 instruction alignment")

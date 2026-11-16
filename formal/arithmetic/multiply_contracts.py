@@ -18,30 +18,30 @@ CONTRACTS = (
      'dut.remainderNegative == owner_left_negative'),
     ('owner_zero_divisor', 'assert', [('! reset && ! cancel && pending', True)],
      'dut.zeroDivisor == ( owner_right == 0 )'),
-    ('owner_raw_dividend', 'assert', [('! reset && ! cancel && pending', True)],
-     'dut.dividend == owner_left'),
-    ('owner_divisor', 'assert', [('! reset && ! cancel && pending', True)],
-     'dut.divisor == owner_right_magnitude'),
+    ('owner_raw_dividend', 'assert', [('! reset && ! cancel && pending', True), ('owner_op [ 2 ]', True)],
+     'observed_dividend == owner_left'),
+    ('owner_divisor', 'assert', [('! reset && ! cancel && pending', True), ('owner_op [ 2 ]', True)],
+     'observed_divisor == owner_right_magnitude'),
     ('iteration_in_range', 'assert', [('! reset && ! cancel && pending', True)],
      'dut.iteration <= 32'),
     ('multiplier_tracks_remaining_bits', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', True)],
-     'dut.multiplier == ( owner_right_magnitude >> dut.iteration )'),
+     'dut.multiplier == ( owner_multiplier >> dut.iteration )'),
     ('multiplicand_tracks_iteration', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', True)],
-     "dut.multiplicand == ( { 32'd0 , owner_left_magnitude } << dut.iteration )"),
+     "dut.multiplicand == ( { 32'd0 , owner_multiplicand } << dut.iteration )"),
     ('multiplication_conservation', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', True)],
      'dut.product + remaining_product == magnitude_product'),
     ('multiplication_terminal', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', True), ('dut.iteration == 32', True)],
      'dut.product == magnitude_product'),
     ('quotient_tracks_unprocessed_bits', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', False)],
-     "( dut.quotient >> dut.iteration ) == ( owner_left_magnitude & ( 32'hffffffff >> dut.iteration ) )"),
+     "( observed_quotient >> dut.iteration ) == ( owner_left_magnitude & ( 32'hffffffff >> dut.iteration ) )"),
     ('division_conservation', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', False)],
      "division_sum == { 33'd0 , dividend_prefix }"),
     ('remainder_fits_word', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', False)],
-     '! dut.remainder [ 32 ]'),
+     '! observed_remainder [ 32 ]'),
     ('remainder_below_divisor', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', False), ('owner_right_magnitude != 0', True)],
-     "dut.remainder < { 1'b0 , dut.divisor }"),
+     "observed_remainder < { 1'b0 , observed_divisor }"),
     ('division_terminal', 'assert', [('! reset && ! cancel && pending', True), ('dut.active && owner_op == OPERATION', True), ('! OPERATION [ 2 ]', False), ('dut.iteration == 32', True)],
-     "{ 32'd0 , dut.remainder } + ( { 33'd0 , dut.divisor } * { 33'd0 , dut.quotient } ) == { 33'd0 , owner_left_magnitude }"),
+     "{ 32'd0 , observed_remainder } + ( { 33'd0 , observed_divisor } * { 33'd0 , observed_quotient } ) == { 33'd0 , owner_left_magnitude }"),
     ('initial_synchronous_reset', 'assume', [('first_cycle', True)],
      'reset'),
     ('producer_keeps_valid', 'assume', [('reset', False), ('! cancel && history_valid && ! previous_reset && ! previous_cancel && previous_stall', True)],
@@ -94,6 +94,8 @@ CONTRACTS = (
      'completed && owner_op == OPERATION && held_cycles >= 3'),
     ('two_completions_reached', 'cover', [('reset', False)],
      'completed && owner_op == OPERATION && completed_once'),
+    ('polynomial_step0_identity', 'assert', [], 'polynomial_state1_total == chain_total'),
+    ('polynomial_step1_identity', 'assert', [], 'chain_predicted_total == polynomial_state1_total'),
     ('chain_variable_lsb_identity', 'assert', [],
      'chain_predicted_total == chain_total'),
     ('chain_owner_operation_stable', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_owner', True)],
@@ -106,34 +108,48 @@ CONTRACTS = (
      'magnitude_product == chain_previous_reference'),
     ('chain_expected_stable', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_owner', True)],
      'expected == chain_previous_expected'),
+    ('chain_actual_step_operation', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     '$past(dut.operation) == OPERATION'),
     ('chain_actual_step_active', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
      'dut.active && ! dut.valid'),
     ('chain_actual_step_iteration', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
-     "dut.iteration == chain_previous_iteration + 6'd1"),
+     "dut.iteration == chain_previous_iteration + 6'd2"),
     ('chain_actual_step_product', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
-     "dut.product == chain_previous_product + ( chain_previous_multiplier [ 0 ] ? chain_previous_multiplicand : 64'd0 )"),
+     "dut.product == chain_previous_product + (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0) + (chain_previous_multiplier[1] ? {chain_previous_multiplicand[62:0], 1'b0} : 64'd0)"),
     ('chain_actual_step_multiplicand', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
-     "dut.multiplicand == { chain_previous_multiplicand [ 62 : 0 ] , 1'b0 }"),
+     "dut.multiplicand == {chain_previous_multiplicand[61:0], 2'b0}"),
     ('chain_actual_step_multiplier', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
-     "dut.multiplier == { 1'b0 , chain_previous_multiplier [ 31 : 1 ] }"),
+     "dut.multiplier == {2'b0, chain_previous_multiplier[31:2]}"),
     ('chain_actual_total_update', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
      'chain_total == chain_previous_predicted_total'),
+    ('chain_polynomial_snapshot_product', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     'chain_previous_predicted_product == $past(chain_predicted_product)'),
+    ('chain_polynomial_snapshot_multiplicand', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     'chain_previous_predicted_multiplicand == $past(chain_predicted_multiplicand)'),
+    ('chain_polynomial_snapshot_multiplier', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     'chain_previous_predicted_multiplier == $past(chain_predicted_multiplier)'),
+    ('chain_polynomial_snapshot_predicted_total', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     'chain_previous_predicted_total == $past(chain_predicted_total)'),
+    ('chain_polynomial_snapshot_total', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     'chain_previous_total == $past(chain_total)'),
+    ('chain_polynomial_previous_identity', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
+     '$past(chain_predicted_total == chain_total)'),
     ('chain_sampled_identity', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
      'chain_previous_predicted_total == chain_previous_total'),
     ('chain_total_preserved', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_step', True)],
      'chain_total == chain_previous_total'),
     ('chain_initial_state', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && dut.iteration == 0', True)],
-     "dut.product == 0 && dut.multiplicand == { 32'd0 , owner_left_magnitude } && dut.multiplier == owner_right_magnitude"),
+     "dut.product == 0 && dut.multiplicand == { 32'd0 , owner_multiplicand } && dut.multiplier == owner_multiplier"),
     ('chain_initial_total', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && dut.iteration == 0', True)],
      'chain_total == magnitude_product'),
-    ('chain_terminal_multiplier_zero', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && dut.iteration == 32', True)],
-     'dut.multiplier == 0'),
-    ('chain_terminal_total_is_product', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && dut.iteration == 32', True)],
-     'chain_total == dut.product'),
+    ('chain_terminal_remaining_zero', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && chain_finish', True)],
+     'chain_predicted_multiplier == 0'),
+    ('chain_terminal_total_is_product', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('dut.active && chain_finish', True)],
+     'chain_total == chain_finish_product'),
     ('chain_actual_finish_valid', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_finish', True)],
      'dut.valid && response_valid && ! dut.active'),
     ('chain_actual_finish_low', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_finish', True), ('OPERATION == 0', True)],
-     'response_bits == chain_previous_product [ 31 : 0 ]'),
+     'response_bits == chain_previous_finish_product [ 31 : 0 ]'),
     ('chain_actual_finish_high', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_finish', True), ('OPERATION == 0', False)],
      'response_bits == chain_previous_corrected_product [ 63 : 32 ]'),
     ('chain_blocked_total_stable', 'assert', [('history_valid && ! reset && ! cancel && chain_selected_owner', True), ('chain_previous_mul_hold', True)],
@@ -161,7 +177,7 @@ CONTRACTS = (
     ('snapshot_owner_operation_is_actual_past', 'assert', [('history_valid && ! reset && ! previous_reset', True)],
      'chain_previous_owner_operation == $past ( owner_op )'),
     ('snapshot_mul_step_is_actual_past', 'assert', [('history_valid && ! reset', True)],
-     'chain_previous_mul_step == ( ! previous_reset && $past ( ! cancel && chain_selected_owner && dut.active && dut.iteration < 32 ) )'),
+     'chain_previous_mul_step == ( ! previous_reset && $past ( ! cancel && chain_selected_owner && dut.active && ! chain_finish ) )'),
     ('snapshot_owner_is_actual_past', 'assert', [('history_valid && ! reset', True)],
      'chain_previous_owner == ( ! previous_reset && $past ( ! cancel && chain_selected_owner ) )'),
     ('initial_frame_is_idle', 'assert', [('! reset && first_proof_frame', True)],
@@ -171,7 +187,7 @@ CONTRACTS = (
     ('captured_reference_matches_owner', 'assert', [('! reset && pending', True)],
      'expected == m_reference ( OPERATION , owner_left , owner_right )'),
     ('response_epoch_has_predecessor', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION', True)],
-     'history_valid && pending && ( chain_previous_mul_finish || chain_previous_mul_hold )'),
+     'history_valid && pending && ( chain_previous_mul_finish || chain_previous_mul_hold || chain_previous_narrow_capture )'),
     ('captured_reference_reached', 'cover', [],
      '! reset && pending && owner_op == OPERATION && owner_left [ 31 ] && owner_right [ 31 ]'),
     ('pending_capture_or_hold_predecessor', 'assert', [('! reset && pending', True)],
@@ -189,7 +205,7 @@ CONTRACTS = (
     ('owner_right_without_accept_holds', 'assert', [('history_valid && ! reset && ! previous_reset', True), ('$past ( accepted )', False)],
      'owner_right == $past ( owner_right )'),
     ('response_finish_has_actual_past_terminal_owner', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION', True), ('chain_previous_mul_finish', True)],
-     'chain_previous_owner && $past ( ! reset && ! cancel && pending && dut.active && owner_op == OPERATION && dut.iteration == 32 )'),
+     'chain_previous_owner && $past ( ! reset && ! cancel && pending && dut.active && owner_op == OPERATION && chain_finish )'),
     ('response_hold_has_actual_past_goal', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION', True), ('chain_previous_mul_hold', True)],
      '$past ( ! reset && ! cancel && response_valid && owner_op == OPERATION )'),
     ('response_hold_data_matches_past', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION', True), ('chain_previous_mul_hold', True)],
@@ -200,18 +216,29 @@ CONTRACTS = (
      'chain_previous_negative == $past ( dut.negative )'),
 )
 
+CONTRACTS += (
+ ('snapshot_finish_product_is_actual_past', 'assert', [('history_valid && ! reset && ! previous_reset', True)],
+  'chain_previous_finish_product == $past(chain_finish_product)'),
+ ('narrow_response_has_past_accept', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION && chain_previous_narrow_capture', True)],
+  'history_valid && $past(accepted && request_bits_operation == 0 && request_bits_left[31:9] == 0 && request_bits_right[31:9] == 0)'),
+ ('narrow_result_matches_reference', 'assert', [('! reset && ! cancel && response_valid && owner_op == OPERATION && chain_previous_narrow_capture', True)],
+  'response_bits == expected'),
+ ('narrow_capture_reached', 'cover', [],
+  '!reset && accepted && OPERATION == 0 && request_bits_operation == 0 && request_bits_left[31:9] == 0 && request_bits_right[31:9] == 0'),
+)
+
 DEFINITIONS = {
     "chain_selected_owner": (1, "pending && owner_op == OPERATION && !OPERATION[2]"),
     "remaining_product": (64, "dut.multiplicand * {32'd0, dut.multiplier}"),
     "chain_total": (64, "dut.product + remaining_product"),
-    "magnitude_product": (64, "{32'd0, owner_left_magnitude} * {32'd0, owner_right_magnitude}"),
+    "magnitude_product": (64, "{32'd0, owner_multiplicand} * {32'd0, owner_multiplier}"),
     "chain_previous_total": (
         64,
         "chain_previous_product + chain_previous_multiplicand * {32'd0, chain_previous_multiplier}",
     ),
     "chain_previous_reference": (
         64,
-        "{32'd0, chain_previous_left_magnitude} * {32'd0, chain_previous_right_magnitude}",
+        "{32'd0, chain_previous_selected_left} * {32'd0, chain_previous_selected_right}",
     ),
     "owner_left_signed": (1, "owner_op == 1 || owner_op == 2 || owner_op == 4 || owner_op == 6"),
     "owner_right_signed": (1, "owner_op == 1 || owner_op == 4 || owner_op == 6"),
@@ -245,10 +272,10 @@ DEFINITIONS = {
     ),
     "chain_previous_predicted_product": (
         64,
-        "chain_previous_product + (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0)",
+        "chain_previous_product + (chain_previous_multiplier[0] ? chain_previous_multiplicand : 64'd0) + (chain_previous_multiplier[1] ? {chain_previous_multiplicand[62:0], 1'b0} : 64'd0)",
     ),
-    "chain_previous_predicted_multiplicand": (64, "{chain_previous_multiplicand[62:0], 1'b0}"),
-    "chain_previous_predicted_multiplier": (32, "{1'b0, chain_previous_multiplier[31:1]}"),
+    "chain_previous_predicted_multiplicand": (64, "{chain_previous_multiplicand[61:0], 2'b0}"),
+    "chain_previous_predicted_multiplier": (32, "{2'b0, chain_previous_multiplier[31:2]}"),
     "chain_previous_predicted_total": (
         64,
         "chain_previous_predicted_product + chain_previous_predicted_multiplicand * {32'd0, chain_previous_predicted_multiplier}",
@@ -260,8 +287,50 @@ DEFINITIONS = {
 }
 
 
+DEFINITIONS.update({
+    "polynomial_state1_product": (
+        64, "dut.product + (dut.multiplier[0] ? dut.multiplicand : 64'd0)"
+    ),
+    "polynomial_state1_multiplicand": (64, "{dut.multiplicand[62:0], 1'b0}"),
+    "polynomial_state1_multiplier": (32, "{1'b0, dut.multiplier[31:1]}"),
+})
+
+
+DEFINITIONS.update({'polynomial_state1_total': (64, "polynomial_state1_product + polynomial_state1_multiplicand * {32'd0, polynomial_state1_multiplier}")})
+
+DEFINITIONS.update({
+    'chain_predicted_product': (
+        64, "dut.product + (dut.multiplier[0] ? dut.multiplicand : 64'd0) + (dut.multiplier[1] ? {dut.multiplicand[62:0], 1'b0} : 64'd0)"
+    ),
+    'chain_predicted_multiplicand': (
+        64, "{dut.multiplicand[61:0], 2'b0}"
+    ),
+    'chain_predicted_multiplier': (
+        32, "{2'b0, dut.multiplier[31:2]}"
+    ),
+    'chain_predicted_total': (
+        64, "chain_predicted_product + chain_predicted_multiplicand * {32'd0, chain_predicted_multiplier}"
+    ),
+})
+
+DEFINITIONS.update({
+ 'observed_quotient': (32, 'dut.multiplier'),
+ 'observed_remainder': (33, 'dut.product[32:0]'),
+ 'observed_divisor': (32, 'dut.multiplicand[31:0]'),
+ 'observed_dividend': (32, 'dut.multiplicand[63:32]'),
+ 'owner_swap': (1, '!owner_op[2]'),
+ 'owner_multiplicand': (32, 'owner_swap ? owner_right_magnitude : owner_left_magnitude'),
+ 'owner_multiplier': (32, 'owner_swap ? owner_left_magnitude : owner_right_magnitude'),
+ 'chain_previous_swap': (1, '!chain_previous_owner_operation[2]'),
+ 'chain_previous_selected_left': (32, 'chain_previous_swap ? chain_previous_right_magnitude : chain_previous_left_magnitude'),
+ 'chain_previous_selected_right': (32, 'chain_previous_swap ? chain_previous_left_magnitude : chain_previous_right_magnitude'),
+ 'chain_low_finish': (1, 'owner_op == 0 && dut.multiplier[31:2] == 0'),
+ 'chain_finish': (1, 'dut.multiplier == 0 || chain_low_finish'),
+ 'chain_finish_product': (64, 'chain_low_finish ? chain_predicted_product : dut.product'),
+})
+
 HELPER_TOKENS_SHA256 = "45292641b3848bd302f517270a5b4292373b34023fe306879ecf685e33ff62f2"
-SCAFFOLD_SHA256 = "3e2c53b18552a2f5cbcaad18a8840a7dfb99876ee69d9eb403af389878d15086"
+SCAFFOLD_SHA256 = "5d1612f86761f5fd76d3c38061cf5031264efcf2951a6ce7e7f3bd3dee6c752e"
 
 
 def scaffold(text, operation):

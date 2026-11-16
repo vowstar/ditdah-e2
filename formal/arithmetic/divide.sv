@@ -15,6 +15,10 @@ module md_math_bench #(
 );
     wire request_ready, response_valid;
     wire [31:0] response_bits;
+    wire [31:0] observed_quotient = dut.multiplier;
+    wire [32:0] observed_remainder = dut.product[32:0];
+    wire [31:0] observed_divisor = dut.multiplicand[31:0];
+    wire [31:0] observed_dividend = dut.multiplicand[63:32];
 
     DitDahE2MultiplyDivide dut (
         .clock(clock),
@@ -61,10 +65,10 @@ module md_math_bench #(
     wire [63:0] remaining_product = dut.multiplicand * {32'd0, dut.multiplier};
     wire [5:0] remaining_iterations = 6'd32 - dut.iteration;
     wire [31:0] quotient_mask = 32'hffffffff >> remaining_iterations;
-    wire [31:0] quotient_partial = dut.quotient & quotient_mask;
+    wire [31:0] quotient_partial = observed_quotient & quotient_mask;
     wire [31:0] dividend_prefix = owner_left_magnitude >> remaining_iterations;
-    wire [64:0] division_sum = {32'd0, dut.remainder} +
-                             ({33'd0, dut.divisor} * {33'd0, quotient_partial});
+    wire [64:0] division_sum = {32'd0, observed_remainder} +
+                             ({33'd0, observed_divisor} * {33'd0, quotient_partial});
 
     always @(posedge clock) begin
         if (reset) begin
@@ -82,8 +86,10 @@ module md_math_bench #(
             owner_sign: assert(dut.negative == (owner_left_negative ^ owner_right_negative));
             owner_remainder_sign: assert(dut.remainderNegative == owner_left_negative);
             owner_zero_divisor: assert(dut.zeroDivisor == (owner_right == 0));
-            owner_raw_dividend: assert(dut.dividend == owner_left);
-            owner_divisor: assert(dut.divisor == owner_right_magnitude);
+            if (owner_op[2]) begin
+                owner_raw_dividend: assert(observed_dividend == owner_left);
+                owner_divisor: assert(observed_divisor == owner_right_magnitude);
+            end
             iteration_in_range: assert(dut.iteration <= 32);
             if (dut.active && owner_op == OPERATION) begin
                 if (!OPERATION[2]) begin
@@ -93,15 +99,15 @@ module md_math_bench #(
                     if (dut.iteration == 32)
                         multiplication_terminal: assert(dut.product == magnitude_product);
                 end else begin
-                    quotient_tracks_unprocessed_bits: assert((dut.quotient >> dut.iteration) ==
+                    quotient_tracks_unprocessed_bits: assert((observed_quotient >> dut.iteration) ==
                         (owner_left_magnitude & (32'hffffffff >> dut.iteration)));
                     division_conservation: assert(division_sum == {33'd0, dividend_prefix});
-                    remainder_fits_word: assert(!dut.remainder[32]);
+                    remainder_fits_word: assert(!observed_remainder[32]);
                     if (owner_right_magnitude != 0)
-                        remainder_below_divisor: assert(dut.remainder < {1'b0, dut.divisor});
+                        remainder_below_divisor: assert(observed_remainder < {1'b0, observed_divisor});
                     if (dut.iteration == 32)
-                        division_terminal: assert({32'd0, dut.remainder} +
-                               ({33'd0, dut.divisor} * {33'd0, dut.quotient}) ==
+                        division_terminal: assert({32'd0, observed_remainder} +
+                               ({33'd0, observed_divisor} * {33'd0, observed_quotient}) ==
                                {33'd0, owner_left_magnitude});
                 end
             end
@@ -283,9 +289,9 @@ module md_math_bench #(
             division_previous_step <= !cancel && division_selected_owner && dut.active && dut.iteration < 32;
             division_previous_finish <= !cancel && division_selected_owner && dut.active && dut.iteration == 32;
             if (!cancel && division_selected_owner) begin
-                division_previous_remainder <= dut.remainder;
-                division_previous_quotient <= dut.quotient;
-                division_previous_divisor <= dut.divisor;
+                division_previous_remainder <= observed_remainder;
+                division_previous_quotient <= observed_quotient;
+                division_previous_divisor <= observed_divisor;
                 division_previous_owner_left <= owner_left;
                 division_previous_owner_right <= owner_right;
                 division_previous_owner_operation <= owner_op;
@@ -303,8 +309,8 @@ module md_math_bench #(
                     owner_right == division_previous_owner_right && owner_op == division_previous_owner_operation);
             end
             if (dut.active && dut.iteration == 0) begin
-                division_initial_state: assert(dut.remainder == 0 && dut.quotient == owner_left_magnitude &&
-                    dut.divisor == owner_right_magnitude && quotient_partial == 0 && dividend_prefix == 0);
+                division_initial_state: assert(observed_remainder == 0 && observed_quotient == owner_left_magnitude &&
+                    observed_divisor == owner_right_magnitude && quotient_partial == 0 && dividend_prefix == 0);
                 division_initial_conservation: assert(division_sum == {33'd0, dividend_prefix});
             end
             if (dut.active && dut.iteration < 32)
@@ -315,9 +321,9 @@ module md_math_bench #(
                 division_previous_partial_fits: assert(!division_previous_partial[31]);
                 division_actual_control_step: assert(dut.active && !dut.valid &&
                     dut.iteration == division_previous_iteration + 6'd1);
-                division_actual_remainder_step: assert(dut.remainder == division_predicted_remainder);
-                division_actual_quotient_step: assert(dut.quotient == division_predicted_quotient);
-                division_actual_divisor_stable: assert(dut.divisor == division_previous_divisor);
+                division_actual_remainder_step: assert(observed_remainder == division_predicted_remainder);
+                division_actual_quotient_step: assert(observed_quotient == division_predicted_quotient);
+                division_actual_divisor_stable: assert(observed_divisor == division_previous_divisor);
                 division_mask_step: assert(quotient_partial == division_predicted_partial);
                 division_next_source_bit: assert(division_previous_quotient[31] == division_previous_next_prefix[0]);
                 division_prefix_step: assert({33'd0, dividend_prefix} == division_doubled_previous_prefix);
@@ -326,12 +332,12 @@ module md_math_bench #(
                 division_actual_sum_step: assert(division_sum == division_doubled_previous_sum);
             end
             if (dut.active && dut.iteration == 32) begin
-                division_terminal_fields: assert(quotient_partial == dut.quotient && dividend_prefix == owner_left_magnitude);
+                division_terminal_fields: assert(quotient_partial == observed_quotient && dividend_prefix == owner_left_magnitude);
                 if (owner_right_magnitude != 0) begin
-                    division_terminal_quotient_reference: assert(dut.quotient == owner_left_magnitude / owner_right_magnitude);
-                    division_terminal_remainder_reference: assert(dut.remainder[31:0] == owner_left_magnitude % owner_right_magnitude);
+                    division_terminal_quotient_reference: assert(observed_quotient == owner_left_magnitude / owner_right_magnitude);
+                    division_terminal_remainder_reference: assert(observed_remainder[31:0] == owner_left_magnitude % owner_right_magnitude);
                 end else begin
-                    division_zero_divisor_terminal: assert(dut.zeroDivisor && dut.remainder[31:0] == owner_left_magnitude);
+                    division_zero_divisor_terminal: assert(dut.zeroDivisor && observed_remainder[31:0] == owner_left_magnitude);
                 end
             end
             if (division_previous_finish) begin
@@ -353,7 +359,7 @@ module md_math_bench #(
         if (!reset && !cancel && pending && dut.active &&
             OPERATION[2] && owner_op == OPERATION)
             division_remainder_iteration_bound:
-                assert(dut.remainder < (33'd1 << dut.iteration));
+                assert(observed_remainder < (33'd1 << dut.iteration));
     end
 
     logic division_first_proof_frame = 1'b1;
@@ -364,9 +370,9 @@ module md_math_bench #(
             division_epoch_active_has_predecessor: assert(history_valid &&
                 (dut.iteration == 0 || (division_previous_step && division_previous_owner)));
         if (history_valid && !reset && !previous_reset && division_previous_owner) begin
-            division_snapshot_remainder: assert(division_previous_remainder == $past(dut.remainder));
-            division_snapshot_quotient: assert(division_previous_quotient == $past(dut.quotient));
-            division_snapshot_divisor: assert(division_previous_divisor == $past(dut.divisor));
+            division_snapshot_remainder: assert(division_previous_remainder == $past(observed_remainder));
+            division_snapshot_quotient: assert(division_previous_quotient == $past(observed_quotient));
+            division_snapshot_divisor: assert(division_previous_divisor == $past(observed_divisor));
             division_snapshot_owner_left: assert(division_previous_owner_left == $past(owner_left));
             division_snapshot_owner_right: assert(division_previous_owner_right == $past(owner_right));
             division_snapshot_owner_operation: assert(division_previous_owner_operation == $past(owner_op));
