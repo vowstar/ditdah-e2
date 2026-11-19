@@ -40,7 +40,8 @@
           exec ${debugPython}/bin/python3 "$@"
         '';
         softwareTools = [ crossCompiler crossCompiler.bintools python ];
-        tools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install
+        rtlTools = [ elaborate pkgs.scala-cli pkgs.circt-install pkgs.mlir-install ];
+        tools = rtlTools ++ [
           pkgs.verilator pkgs.iverilog pkgs.yosys pkgs.sby pkgs.z3 pkgs.reuse
           pkgs.openocd pkgs.pkgsCross.riscv32-embedded.buildPackages.gdb debugHost
           python pkgs.tcl pkgs.gnumake maven ] ++ softwareTools;
@@ -72,6 +73,10 @@
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = tools;
           env.ZAOZI_JAR = jar;
+          env.PYTHONDONTWRITEBYTECODE = "1";
+        };
+        devShells.release = pkgs.mkShell {
+          nativeBuildInputs = rtlTools ++ [ maven pkgs.python3 pkgs.verilator pkgs.reuse ];
           env.PYTHONDONTWRITEBYTECODE = "1";
         };
       });

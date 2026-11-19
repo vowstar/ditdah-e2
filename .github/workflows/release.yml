@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 Huang Rui <vowstar@gmail.com>
+# SPDX-License-Identifier: MIT
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      tag-object: ${{ steps.source.outputs.tag-object }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_KEY: 7EFD3BB0CF1513009738D02CAD4E34A8385E3E52
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          version=v0.0.0
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version="$GITHUB_REF_NAME"
+            [[ "$version" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+            test "$(git for-each-ref --format='%(objecttype) %(type) %(tag)' "$GITHUB_REF")" = "tag commit $version"
+            test "$(git rev-parse "${GITHUB_REF}^{commit}")" = "$(git rev-parse HEAD)"
+            GNUPGHOME=$(mktemp -d)
+            export GNUPGHOME
+            trap 'rm -rf "$GNUPGHOME"' EXIT
+            gh api "users/$GITHUB_REPOSITORY_OWNER/gpg_keys" \
+              --jq '.[] | select(.key_id == "AD4E34A8385E3E52" and .revoked == false) | .raw_key' \
+              | gpg --batch --import
+            git verify-tag --raw "$GITHUB_REF" 2>"$GNUPGHOME/tag-status"
+            awk -v key="$RELEASE_KEY" '
+              $1 == "[GNUPG:]" && $2 == "VALIDSIG" && $NF == key { valid = 1 }
+              END { exit !valid }
+            ' "$GNUPGHOME/tag-status"
+            echo "tag-object=$(git rev-parse "$GITHUB_REF")" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: release-nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**') }}
+          save: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch }}
+          gc-max-store-size-linux: 14G
+
+      - name: Build and check release archives
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          nix develop -L .#release --no-write-lock-file --profile "$RUNNER_TEMP/release-tools" \
+            --command bash -euc '
+              reuse lint
+              python3 -m unittest test.test_scripts.test_release
+              python3 scripts/release.py build --version "$VERSION" --directory "$RUNNER_TEMP/release"
+            '
+
+      - name: Upload release assets
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rtl-release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out publication script
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release
+
+      - name: Verify and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG_OBJECT: ${{ needs.build.outputs.tag-object }}
+        run: |
+          python3 scripts/release.py publish --version "$VERSION" --directory "$RUNNER_TEMP/release" \
+            --repo "$GITHUB_REPOSITORY" --tag-object "$TAG_OBJECT"
