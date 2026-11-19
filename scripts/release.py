@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 from build_rtl import configuration
 import platform_map
@@ -177,8 +178,15 @@ def publish(directory, version, repo, tag_object):
             ["gh", "release", "create", version, "--repo", repo, "--verify-tag", "--draft",
              "--title", title, "--notes", notes], check=True,
         )
-        release = find_release(repo, version)
-    if release is None or release["name"] != title or release["body"].rstrip() != notes.rstrip():
+        for delay in (0, 1, 2, 4, 8):
+            if delay:
+                time.sleep(delay)
+            release = find_release(repo, version)
+            if release is not None:
+                break
+    if release is None:
+        raise RuntimeError(f"Release draft {version} is absent from the release list")
+    if release["name"] != title or release["body"].rstrip() != notes.rstrip():
         raise ValueError("GitHub Release title or notes differ from the prepared text")
     assets = release_assets(repo, release["id"])
     if any(expected.get(name) != value for name, value in assets.items()):
@@ -194,10 +202,12 @@ def publish(directory, version, repo, tag_object):
         raise ValueError("GitHub Release asset verification failed")
     if release["draft"]:
         require_tag(repo, version, tag_object)
-        subprocess.run(
-            ["gh", "release", "edit", version, "--repo", repo, "--verify-tag", "--draft=false"],
-            check=True,
+        published = gh_json(
+            f"repos/{repo}/releases/{release['id']}", "--method", "PATCH",
+            "-f", f"tag_name={version}", "-F", "draft=false",
         )
+        if published["draft"] or published["tag_name"] != version:
+            raise ValueError("GitHub did not confirm publication of the verified release")
     print(f"Verified release assets for {repo} {version}")
 
 

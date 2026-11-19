@@ -44,22 +44,31 @@ class ReleaseTests(unittest.TestCase):
 
         with (
             patch.object(release, "require_tag") as tag,
-            patch.object(release, "find_release", side_effect=[None, draft, draft, draft]),
+            patch.object(release, "find_release", side_effect=[None, None, draft, draft]),
             patch.object(release, "release_assets", side_effect=[
                 {self.names[0]: expected[self.names[0]]}, expected,
                 {self.names[0]: expected[self.names[0]]}, {**expected, self.names[1]: "sha256:" + "0" * 64},
             ]),
+            patch.object(release.time, "sleep") as wait,
+            patch.object(release, "gh_json", return_value={"draft": False, "tag_name": self.version}) as api,
             patch.object(release.subprocess, "run", side_effect=command) as run,
         ):
             release.publish(self.directory, self.version, self.repo, self.tag)
-            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["create", "upload", "edit"])
+            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["create", "upload"])
             upload_paths = run.call_args_list[1].args[0][6:]
             self.assertCountEqual(upload_paths, [self.directory / name for name in self.names[1:]])
+            wait.assert_called_once_with(1)
             self.assertEqual(tag.call_count, 2)
+            api.assert_called_once_with(
+                f"repos/{self.repo}/releases/1", "--method", "PATCH",
+                "-f", f"tag_name={self.version}", "-F", "draft=false",
+            )
             run.reset_mock()
+            api.reset_mock()
             with self.assertRaisesRegex(ValueError, "asset verification failed"):
                 release.publish(self.directory, self.version, self.repo, self.tag)
             self.assertEqual([call.args[0][2] for call in run.call_args_list], ["upload"])
+            api.assert_not_called()
 
 
 if __name__ == "__main__":

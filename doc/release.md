@@ -28,7 +28,8 @@ The publish job creates a draft and uploads the two archives and `SHA256SUMS`.
 It checks all three uploaded digests before it publishes the draft.
 Use `gh run watch` to follow the release run.
 
-For a transient upload failure, rerun the failed job with `gh run rerun RUN_ID --failed`.
+For a transient publication failure, rerun the failed job with `gh run rerun RUN_ID --failed`.
+If GitHub just created the draft, wait for it to appear before retrying.
 The job keeps matching files and uploads missing files. Remove incomplete or mismatched files from the draft before retrying.
 If the Actions artifact has expired after seven days, rerun all jobs with `gh run rerun RUN_ID`.
 Reruns use the original commit. Test workflow fixes before tagging a new version.
